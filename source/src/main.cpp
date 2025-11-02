@@ -2,6 +2,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <dwmapi.h>
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
@@ -112,7 +113,7 @@ void SetupImGuiStyle() {
     colors[ImGuiCol_TitleBg] = ImVec4(0.172f, 0.172f, 0.172f, 1.00f);         // Tab bar background
     colors[ImGuiCol_TitleBgActive] = ImVec4(0.172f, 0.172f, 0.172f, 1.00f);  // Active tab bar
     colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.00f, 0.00f, 0.00f, 0.51f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.125f, 0.125f, 0.125f, 1.0f);
+    colors[ImGuiCol_MenuBarBg] = ImVec4(0.172f, 0.172f, 0.172f, 0.70f);
     colors[ImGuiCol_ScrollbarBg] = ImVec4(0.02f, 0.02f, 0.02f, 0.53f);
     colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.31f, 0.31f, 0.31f, 1.00f);
     colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.41f, 0.41f, 0.41f, 1.00f);
@@ -393,7 +394,7 @@ int main(int argc, char** argv)
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     // Create window with graphics context
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "ufb", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "u.f.b.", nullptr, nullptr);
     if (window == nullptr)
         return 1;
 
@@ -725,6 +726,27 @@ int main(int argc, char** argv)
                 if (ImGui::MenuItem("Windows Accent Color", nullptr, use_windows_accent_color)) {
                     use_windows_accent_color = !use_windows_accent_color;
                     SetupImGuiStyle(); // Reapply style with new accent color
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Help"))
+            {
+                ImGui::BeginDisabled();
+                ImGui::MenuItem("u.f.b. v0.1.1", nullptr, false);
+                ImGui::EndDisabled();
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("About"))
+                {
+                    ShellExecuteW(nullptr, L"open", L"https://github.com/cbkow/ufb", nullptr, nullptr, SW_SHOWNORMAL);
+                }
+                if (ImGui::MenuItem("License"))
+                {
+                    ShellExecuteW(nullptr, L"open", L"https://github.com/cbkow/ufb/blob/main/LICENSE", nullptr, nullptr, SW_SHOWNORMAL);
+                }
+                if (ImGui::MenuItem("Check for Updates"))
+                {
+                    ShellExecuteW(nullptr, L"open", L"https://github.com/cbkow/ufb/releases", nullptr, nullptr, SW_SHOWNORMAL);
                 }
                 ImGui::EndMenu();
             }

@@ -139,7 +139,7 @@ ImTextureID IconManager::GetFileIcon(const std::wstring& path, bool isDirectory,
 
         if (result != 0)
         {
-            std::wcout << L"[IconManager] Getting jumbo icon for: " << path << L" (icon index: " << shfi.iIcon << L")" << std::endl;
+            //std::wcout << L"[IconManager] Getting jumbo icon for: " << path << L" (icon index: " << shfi.iIcon << L")" << std::endl;
 
             // Get the jumbo image list
             IImageList* pImageList = nullptr;
@@ -152,27 +152,27 @@ ImTextureID IconManager::GetFileIcon(const std::wstring& path, bool isDirectory,
 
                 if (SUCCEEDED(hr) && hIcon)
                 {
-                    std::cout << "[IconManager] Successfully got jumbo icon (256x256)" << std::endl;
+                    //std::cout << "[IconManager] Successfully got jumbo icon (256x256)" << std::endl;
                 }
                 else
                 {
-                    std::cout << "[IconManager] Failed to get icon from IImageList, hr=" << std::hex << hr << std::endl;
+                    //std::cout << "[IconManager] Failed to get icon from IImageList, hr=" << std::hex << hr << std::endl;
                 }
             }
             else
             {
-                std::cout << "[IconManager] Failed to get IImageList, hr=" << std::hex << hr << std::endl;
+                //std::cout << "[IconManager] Failed to get IImageList, hr=" << std::hex << hr << std::endl;
             }
         }
         else
         {
-            std::wcout << L"[IconManager] SHGetFileInfoW failed for: " << path << std::endl;
+            //std::wcout << L"[IconManager] SHGetFileInfoW failed for: " << path << std::endl;
         }
 
         // Fallback if jumbo icon failed
         if (!hIcon)
         {
-            std::cout << "[IconManager] Falling back to large icon" << std::endl;
+            //std::cout << "[IconManager] Falling back to large icon" << std::endl;
             result = SHGetFileInfoW(
                 path.c_str(),
                 0,

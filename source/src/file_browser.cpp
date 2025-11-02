@@ -13,6 +13,7 @@
 #include <shlwapi.h>
 #include <dwmapi.h>
 #include <algorithm>
+#include <set>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -130,6 +131,9 @@ void FileBrowser::Shutdown()
 
 void FileBrowser::Draw(const char* title, HWND hwnd, bool withWindow)
 {
+    // Push unique ID for this FileBrowser instance to avoid popup conflicts
+    ImGui::PushID(this);
+
     if (withWindow)
         ImGui::Begin(title);
 
@@ -170,6 +174,9 @@ void FileBrowser::Draw(const char* title, HWND hwnd, bool withWindow)
 
     if (withWindow)
         ImGui::End();
+
+    // Pop unique ID for this FileBrowser instance
+    ImGui::PopID();
 }
 
 void FileBrowser::SetCurrentDirectory(const std::wstring& path)
@@ -239,6 +246,32 @@ void FileBrowser::RefreshFileList()
                 // Use epoch time if we can't get the real time
                 fileEntry.lastModified = std::filesystem::file_time_type();
             }
+
+            // Apply filter if active
+            if (!m_filterExtensions.empty())
+            {
+                bool shouldShow = false;
+
+                if (fileEntry.isDirectory)
+                {
+                    // Show directory only if "[folders]" is in the filter set
+                    shouldShow = (m_filterExtensions.count(L"[folders]") > 0);
+                }
+                else
+                {
+                    // Show file only if its extension is in the filter set
+                    std::filesystem::path p(entry.path());
+                    std::wstring ext = p.extension().wstring();
+                    // Convert to lowercase for case-insensitive comparison
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+                    shouldShow = (m_filterExtensions.count(ext) > 0);
+                }
+
+                if (!shouldShow)
+                    continue;  // Skip items that don't match any active filter
+            }
+
             m_files.push_back(fileEntry);
         }
 
@@ -845,6 +878,63 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
 void FileBrowser::DrawNavigationBar()
 {
+   
+    // Editable path bar - sync buffer with current directory when not editing
+    if (!ImGui::IsItemActive() || m_pathBuffer[0] == '\0')
+    {
+        WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
+    }
+
+    // Draw editable path input with mono font
+    if (font_mono)
+        ImGui::PushFont(font_mono);
+
+    ImGui::SetNextItemWidth(-1.0f);  // Full width
+    if (ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
+    {
+        // Enter pressed - navigate to the entered path
+        wchar_t widePathBuffer[1024];
+        MultiByteToWideChar(CP_UTF8, 0, m_pathBuffer, -1, widePathBuffer, 1024);
+        std::wstring newPath = widePathBuffer;
+
+        // Validate path exists before navigating
+        if (std::filesystem::exists(newPath) && std::filesystem::is_directory(newPath))
+        {
+            NavigateTo(newPath);
+        }
+        else
+        {
+            // Invalid path - reset to current directory
+            WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
+        }
+    }
+
+    if (font_mono)
+        ImGui::PopFont();
+
+    // Right-click context menu for path text area
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+    {
+        ImGui::OpenPopup("PathContextMenu");
+    }
+
+    if (ImGui::BeginPopup("PathContextMenu"))
+    {
+        if (ImGui::MenuItem("Copy Path"))
+        {
+            // Copy current directory path to clipboard
+            ImGui::SetClipboardText(m_pathBuffer);
+        }
+
+        if (ImGui::MenuItem("Open in Explorer"))
+        {
+            // Open Windows Explorer at the current directory
+            ShellExecuteW(nullptr, L"explore", m_currentDirectory.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+
+        ImGui::EndPopup();
+    }
+
     // Back button (arrow left)
     bool canGoBack = !m_backHistory.empty();
     if (!canGoBack)
@@ -899,88 +989,6 @@ void FileBrowser::DrawNavigationBar()
 
     ImGui::SameLine();
 
-    // Editable path bar - sync buffer with current directory when not editing
-    if (!ImGui::IsItemActive() || m_pathBuffer[0] == '\0')
-    {
-        WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
-    }
-
-    // Draw editable path input with mono font
-    if (font_mono)
-        ImGui::PushFont(font_mono);
-
-    ImGui::SetNextItemWidth(-1.0f);  // Full width
-    if (ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
-    {
-        // Enter pressed - navigate to the entered path
-        wchar_t widePathBuffer[1024];
-        MultiByteToWideChar(CP_UTF8, 0, m_pathBuffer, -1, widePathBuffer, 1024);
-        std::wstring newPath = widePathBuffer;
-
-        // Validate path exists before navigating
-        if (std::filesystem::exists(newPath) && std::filesystem::is_directory(newPath))
-        {
-            NavigateTo(newPath);
-        }
-        else
-        {
-            // Invalid path - reset to current directory
-            WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
-        }
-    }
-
-    if (font_mono)
-        ImGui::PopFont();
-
-    // Quick access buttons with Windows icons integrated inside
-    ImGui::Spacing();
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-    // Helper lambda to draw a button with an icon inside
-    auto DrawIconButton = [&](const char* id, const char* label, ImTextureID icon, auto onClick) -> void {
-        if (!icon)
-            return;
-
-        // Calculate button size
-        ImVec2 textSize = ImGui::CalcTextSize(label);
-        float iconSize = 16.0f;
-        float width = iconSize + style.ItemInnerSpacing.x + textSize.x + style.FramePadding.x * 2;
-        float height = (iconSize > textSize.y ? iconSize : textSize.y) + style.FramePadding.y * 2;
-        ImVec2 buttonSize(width, height);
-
-        // Draw invisible button for interaction
-        bool clicked = ImGui::InvisibleButton(id, buttonSize);
-
-        // Get button state
-        bool hovered = ImGui::IsItemHovered();
-        bool active = ImGui::IsItemActive();
-
-        // Draw button background
-        ImU32 bgColor;
-        if (active)
-            bgColor = ImGui::GetColorU32(ImGuiCol_ButtonActive);
-        else if (hovered)
-            bgColor = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
-        else
-            bgColor = ImGui::GetColorU32(ImGuiCol_Button);
-
-        ImVec2 p_min = ImGui::GetItemRectMin();
-        ImVec2 p_max = ImGui::GetItemRectMax();
-        drawList->AddRectFilled(p_min, p_max, bgColor, style.FrameRounding);
-
-        // Draw icon
-        ImVec2 iconPos(p_min.x + style.FramePadding.x, p_min.y + (buttonSize.y - iconSize) * 0.5f);
-        drawList->AddImage(icon, iconPos, ImVec2(iconPos.x + iconSize, iconPos.y + iconSize));
-
-        // Draw text
-        ImVec2 textPos(iconPos.x + iconSize + style.ItemInnerSpacing.x, p_min.y + style.FramePadding.y);
-        drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), label);
-
-        if (clicked)
-            onClick();
-    };
-
     // Up button at the left
     if (font_icons)
     {
@@ -1017,6 +1025,103 @@ void FileBrowser::DrawNavigationBar()
         {
             RefreshFileList();
         }
+    }
+
+    ImGui::SameLine();
+
+    // Filter button
+    if (font_icons)
+    {
+        ImGui::PushFont(font_icons);
+        if (ImGui::Button(u8"\uE152"))  // Material Icons filter_list symbol
+        {
+            ImGui::OpenPopup("FilterPopup");
+        }
+        ImGui::PopFont();
+    }
+    else
+    {
+        if (ImGui::Button("Filter"))
+        {
+            ImGui::OpenPopup("FilterPopup");
+        }
+    }
+
+    // Filter popup
+    if (ImGui::BeginPopup("FilterPopup"))
+    {
+        // Reduce padding for more compact menu
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 4.0f));
+
+        ImGui::TextDisabled("Filter by Type (click outside to close)");
+        ImGui::Separator();
+
+        if (ImGui::Button("Reset All"))
+        {
+            m_filterExtensions.clear();
+            RefreshFileList();
+        }
+
+        ImGui::Separator();
+
+        // Folders toggle
+        bool foldersSelected = m_filterExtensions.count(L"[folders]") > 0;
+        if (ImGui::Checkbox("Folders", &foldersSelected))
+        {
+            if (foldersSelected)
+                m_filterExtensions.insert(L"[folders]");
+            else
+                m_filterExtensions.erase(L"[folders]");
+            RefreshFileList();
+        }
+
+        ImGui::Separator();
+
+        // Collect unique extensions from current directory (unfiltered)
+        std::set<std::wstring> extensions;
+        try
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(m_currentDirectory))
+            {
+                if (!entry.is_directory())
+                {
+                    std::filesystem::path p(entry.path());
+                    std::wstring ext = p.extension().wstring();
+                    if (!ext.empty())
+                    {
+                        // Convert to lowercase for consistency
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                        extensions.insert(ext);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            // Failed to read directory
+        }
+
+        // Display each extension as a toggleable checkbox
+        for (const auto& ext : extensions)
+        {
+            // Convert to UTF-8 for ImGui
+            char extUtf8[64];
+            WideCharToMultiByte(CP_UTF8, 0, ext.c_str(), -1, extUtf8, sizeof(extUtf8), nullptr, nullptr);
+
+            bool isSelected = m_filterExtensions.count(ext) > 0;
+            if (ImGui::Checkbox(extUtf8, &isSelected))
+            {
+                if (isSelected)
+                    m_filterExtensions.insert(ext);
+                else
+                    m_filterExtensions.erase(ext);
+                RefreshFileList();
+            }
+        }
+
+        ImGui::PopStyleVar(2);
+        ImGui::EndPopup();
     }
 
     // Spacer, separator, spacer
@@ -1993,8 +2098,8 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
     ImGui::EndChild();
 
-    // Background context menu (right-click on empty space)
-    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    // Background context menu (right-click on empty space in grid)
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
     {
         ImGui::OpenPopup("background_context_menu");
     }

@@ -164,6 +164,9 @@ private:
     // Path bar edit state
     char m_pathBuffer[1024] = {};
 
+    // File extension filter (multi-selection)
+    std::set<std::wstring> m_filterExtensions;  // Empty = show all, can contain multiple extensions and/or "[folders]"
+
     // External drag-drop state
     bool m_isHovered = false;
     ImVec2 m_windowPos = {};
