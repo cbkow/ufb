@@ -1,0 +1,80 @@
+THIRD PARTY NOTICES
+===================
+
+This software incorporates material from third parties. The applicable license
+terms are listed below, and the full license texts can be found in the
+individual LICENSE files in this directory.
+
+===============================================================================
+
+1. Dear ImGui
+   Copyright (c) 2014-2024 Omar Cornut
+   License: MIT
+   File: ImGui-LICENSE.txt
+
+2. GLFW
+   Copyright (c) 2002-2006 Marcus Geelnard
+   Copyright (c) 2006-2019 Camilla Löwy
+   License: zlib/libpng
+   File: GLFW-LICENSE.md
+
+3. FFmpeg
+   Copyright (c) 2000-2024 FFmpeg developers
+   License: LGPL 2.1+ (with GPL components)
+   File: FFmpeg-LICENSE.txt
+
+4. ImageMagick
+   Copyright 1999-2024 ImageMagick Studio LLC
+   License: Apache 2.0 (ImageMagick License)
+   File: ImageMagick-LICENSE.txt
+
+5. Ghostscript
+   Copyright (C) 2001-2024 Artifex Software, Inc.
+   License: AGPL 3.0
+   File: Ghostscript-LICENSE.txt
+
+6. OpenEXR
+   Copyright (c) 2002-2024 Industrial Light & Magic
+   License: BSD 3-Clause
+   File: OpenEXR-LICENSE.txt
+
+7. NanoSVG
+   Copyright (c) 2013-14 Mikko Mononen
+   License: zlib-like
+   File: nanosvg-LICENSE.txt
+
+8. JSON for Modern C++ (nlohmann/json)
+   Copyright (c) 2013-2025 Niels Lohmann
+   License: MIT
+   File: nlohmann-json-LICENSE.txt
+
+9. SQLite
+   Public Domain
+   File: SQLite-LICENSE.txt
+
+10. GLAD (OpenGL Loader)
+    License: (WTFPL OR CC0-1.0) AND Apache-2.0
+    File: glad-LICENSE.txt
+
+11. Material Symbols Font
+    Copyright 2024 Google LLC
+    License: Apache 2.0 (Google Fonts)
+    File: MaterialSymbols-LICENSE.txt
+
+12. Inter Font
+    Copyright 2020 The Inter Project Authors
+    License: SIL Open Font License 1.1
+    File: Inter-JetBrainsMono-LICENSE.txt
+
+13. JetBrains Mono Font
+    Copyright 2020 The JetBrains Mono Project Authors
+    License: SIL Open Font License 1.1
+    File: Inter-JetBrainsMono-LICENSE.txt
+
+===============================================================================
+
+For the complete license terms, please refer to the individual LICENSE files
+in the LICENSES directory.
+
+This project itself is licensed under the GNU General Public License v3.0.
+See the LICENSE file in the project root for details.
