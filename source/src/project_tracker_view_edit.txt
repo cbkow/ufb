@@ -1,0 +1,8 @@
+This is a temp file with the full editable table implementation that I'll need to add. Due to the size and complexity, I'll apply it in multiple steps.
+
+Key changes needed:
+1. Change DrawItemsTable signature to take non-const reference
+2. Add status options array
+3. Replace ImGui::Text calls with ImGui::BeginCombo for dropdowns
+4. Add ImGui::InputText for editable text fields
+5. Track metadata changes and save to database via m_subscriptionManager

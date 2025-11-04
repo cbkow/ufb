@@ -4,10 +4,17 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <functional>
 #include <filesystem>
 #include "imgui.h"
 #include "icon_manager.h"
 #include "thumbnail_manager.h"
+
+// Forward declarations
+namespace UFB {
+    class BookmarkManager;
+    class SubscriptionManager;
+}
 
 struct FileEntry
 {
@@ -24,8 +31,8 @@ public:
     FileBrowser();
     ~FileBrowser();
 
-    // Initialize the file browser
-    void Initialize();
+    // Initialize the file browser with optional manager dependencies
+    void Initialize(UFB::BookmarkManager* bookmarkManager = nullptr, UFB::SubscriptionManager* subscriptionManager = nullptr);
 
     // Shutdown and cleanup
     void Shutdown();
@@ -50,6 +57,25 @@ public:
 
     // Public settings (static so it's shared across all browser instances)
     static bool showHiddenFiles;
+
+    // Callback for transcoding video files
+    std::function<void(const std::vector<std::wstring>&)> onTranscodeToMP4;
+
+    // Callback for opening shot view
+    std::function<void(const std::wstring& categoryPath, const std::wstring& categoryName)> onOpenShotView;
+
+    // Callback for opening assets view
+    std::function<void(const std::wstring& assetsFolderPath, const std::wstring& jobName)> onOpenAssetsView;
+
+    // Callback for opening postings view
+    std::function<void(const std::wstring& postingsFolderPath, const std::wstring& jobName)> onOpenPostingsView;
+
+    // Callback for opening path in other browser
+    std::function<void(const std::wstring& path)> onOpenInOtherBrowser;
+
+    // Callbacks for opening path in Browser 1 or Browser 2 (used in specialized views)
+    std::function<void(const std::wstring& path)> onOpenInBrowser1;
+    std::function<void(const std::wstring& path)> onOpenInBrowser2;
 
 private:
     // Refresh the file list for the current directory
@@ -108,6 +134,10 @@ private:
     // Thumbnail manager
     ThumbnailManager m_thumbnailManager;
 
+    // Manager dependencies (for project/job features)
+    UFB::BookmarkManager* m_bookmarkManager = nullptr;
+    UFB::SubscriptionManager* m_subscriptionManager = nullptr;
+
     // Special folder paths and icons
     std::wstring m_desktopPath;
     std::wstring m_documentsPath;
@@ -127,6 +157,12 @@ private:
     // Last click time and index for double-click detection and shift-select
     double m_lastClickTime = 0.0;
     int m_lastClickedIndex = -1;
+
+    // Box selection state (grid view only)
+    bool m_isBoxSelecting = false;
+    bool m_boxSelectDragged = false;  // Track if we actually dragged during box selection
+    ImVec2 m_boxSelectStart = ImVec2(0, 0);
+    std::vector<std::pair<ImVec2, ImVec2>> m_itemBounds;  // Bounds for each grid item (min, max)
 
     // Sorting state
     enum class SortColumn { Name, Size, Modified };
@@ -151,6 +187,11 @@ private:
     // Get Windows accent color
     ImVec4 GetAccentColor();
 
+    // Folder creation helpers
+    bool CreateUFBFolder(const std::string& folderName);
+    bool CreateDateFolder();
+    bool CreateTimeFolder();
+
     // Context menu state
     std::wstring m_contextMenuPath;
     bool m_showRenameDialog = false;
@@ -160,6 +201,10 @@ private:
     // New folder dialog state
     bool m_showNewFolderDialog = false;
     char m_newFolderNameBuffer[256] = {};
+
+    // New u.f.b. folder dialog state
+    bool m_showNewUFBFolderDialog = false;
+    char m_newUFBFolderNameBuffer[256] = {};
 
     // Path bar edit state
     char m_pathBuffer[1024] = {};

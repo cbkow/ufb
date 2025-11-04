@@ -24,7 +24,7 @@ public:
     std::function<void(const std::wstring& path)> onNavigateToPath;  // Default navigation (Browser 1)
     std::function<void(const std::wstring& path)> onNavigateToBrowser1;
     std::function<void(const std::wstring& path)> onNavigateToBrowser2;
-    std::function<void(const std::wstring& path, const std::wstring& name)> onAssignJob;
+    std::function<void(const std::wstring& jobPath, const std::wstring& jobName)> onOpenProjectTracker;
 
 private:
     BookmarkManager* m_bookmarkManager = nullptr;
@@ -33,14 +33,12 @@ private:
 
     // UI state
     bool m_showAddBookmarkModal = false;
-    bool m_showAddJobModal = false;
     bool m_showDeleteConfirmModal = false;
 
     // Modal input buffers
     char m_bookmarkPath[512] = {0};
     char m_bookmarkName[256] = {0};
-    char m_jobPath[512] = {0};
-    char m_jobName[256] = {0};
+    bool m_bookmarkIsProjectFolder = false;
 
     // Delete confirmation state
     enum class DeleteType { None, Bookmark, Job };
@@ -53,7 +51,6 @@ private:
     void DrawBookmarksSection();
     void DrawJobsSection();
     void DrawAddBookmarkModal();
-    void DrawAddJobModal();
     void DrawDeleteConfirmModal();
 
     const char* GetSyncStatusIcon(SyncStatus status);

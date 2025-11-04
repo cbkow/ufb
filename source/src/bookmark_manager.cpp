@@ -46,12 +46,23 @@ bool BookmarkManager::CreateTables()
         return false;
     }
 
+    // Add is_project_folder column if it doesn't exist (migration for existing databases)
+    const char* alterSql = "ALTER TABLE bookmarks ADD COLUMN is_project_folder INTEGER DEFAULT 0;";
+    rc = sqlite3_exec(m_db, alterSql, nullptr, nullptr, &errMsg);
+
+    // Silently ignore error if column already exists
+    if (rc != SQLITE_OK)
+    {
+        // Column might already exist, which is fine
+        sqlite3_free(errMsg);
+    }
+
     return true;
 }
 
-bool BookmarkManager::AddBookmark(const std::wstring& path, const std::wstring& displayName)
+bool BookmarkManager::AddBookmark(const std::wstring& path, const std::wstring& displayName, bool isProjectFolder)
 {
-    const char* sql = "INSERT INTO bookmarks (path, display_name, created_time) VALUES (?, ?, ?)";
+    const char* sql = "INSERT INTO bookmarks (path, display_name, created_time, is_project_folder) VALUES (?, ?, ?, ?)";
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
@@ -69,6 +80,7 @@ bool BookmarkManager::AddBookmark(const std::wstring& path, const std::wstring& 
     sqlite3_bind_text(stmt, 1, pathUtf8.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, displayNameUtf8.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 3, currentTime);
+    sqlite3_bind_int(stmt, 4, isProjectFolder ? 1 : 0);
 
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -154,7 +166,7 @@ std::vector<Bookmark> BookmarkManager::GetAllBookmarks()
 {
     std::vector<Bookmark> bookmarks;
 
-    const char* sql = "SELECT id, path, display_name, created_time FROM bookmarks";
+    const char* sql = "SELECT id, path, display_name, created_time, is_project_folder FROM bookmarks";
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
@@ -176,6 +188,7 @@ std::vector<Bookmark> BookmarkManager::GetAllBookmarks()
         bookmark.path = Utf8ToWide(path ? path : "");
         bookmark.displayName = Utf8ToWide(displayName ? displayName : "");
         bookmark.createdTime = sqlite3_column_int64(stmt, 3);
+        bookmark.isProjectFolder = sqlite3_column_int(stmt, 4) != 0;
 
         bookmarks.push_back(bookmark);
     }
@@ -205,7 +218,7 @@ std::vector<Bookmark> BookmarkManager::GetAllBookmarks()
 
 std::optional<Bookmark> BookmarkManager::GetBookmark(int bookmarkId)
 {
-    const char* sql = "SELECT id, path, display_name, created_time FROM bookmarks WHERE id = ?";
+    const char* sql = "SELECT id, path, display_name, created_time, is_project_folder FROM bookmarks WHERE id = ?";
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
@@ -229,6 +242,7 @@ std::optional<Bookmark> BookmarkManager::GetBookmark(int bookmarkId)
         bookmark.path = Utf8ToWide(path ? path : "");
         bookmark.displayName = Utf8ToWide(displayName ? displayName : "");
         bookmark.createdTime = sqlite3_column_int64(stmt, 3);
+        bookmark.isProjectFolder = sqlite3_column_int(stmt, 4) != 0;
 
         sqlite3_finalize(stmt);
         return bookmark;
@@ -240,7 +254,7 @@ std::optional<Bookmark> BookmarkManager::GetBookmark(int bookmarkId)
 
 std::optional<Bookmark> BookmarkManager::GetBookmarkByPath(const std::wstring& path)
 {
-    const char* sql = "SELECT id, path, display_name, created_time FROM bookmarks WHERE path = ?";
+    const char* sql = "SELECT id, path, display_name, created_time, is_project_folder FROM bookmarks WHERE path = ?";
 
     sqlite3_stmt* stmt;
     int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
@@ -265,6 +279,7 @@ std::optional<Bookmark> BookmarkManager::GetBookmarkByPath(const std::wstring& p
         bookmark.path = Utf8ToWide(pathStr ? pathStr : "");
         bookmark.displayName = Utf8ToWide(displayName ? displayName : "");
         bookmark.createdTime = sqlite3_column_int64(stmt, 3);
+        bookmark.isProjectFolder = sqlite3_column_int(stmt, 4) != 0;
 
         sqlite3_finalize(stmt);
         return bookmark;

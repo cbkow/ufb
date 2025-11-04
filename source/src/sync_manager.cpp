@@ -172,6 +172,9 @@ void SyncManager::SyncJob(const std::wstring& jobPath)
         m_firstSyncDone[jobPath] = true;
     }
 
+    // Discover and track shot folders (creates metadata entries for new shots)
+    DiscoverAndTrackShots(jobPath);
+
     // Update subscription status
     m_subManager->UpdateSyncStatus(jobPath, SyncStatus::Syncing, GetCurrentTimeMs());
 
@@ -464,6 +467,101 @@ void SyncManager::RefreshActiveJobs()
     if (m_currentIndex >= m_activeJobPaths.size() && !m_activeJobPaths.empty())
     {
         m_currentIndex = 0;
+    }
+}
+
+void SyncManager::DiscoverAndTrackShots(const std::wstring& jobPath)
+{
+    // Load project config for this job
+    std::filesystem::path configPath = std::filesystem::path(jobPath) / L".ufb" / L"projectConfig.json";
+
+    ProjectConfig config;
+    if (!config.LoadFromFile(configPath.wstring()))
+    {
+        // No config found, skip shot discovery
+        return;
+    }
+
+    // Get all folder types that should be tracked
+    auto folderTypes = config.GetAllFolderTypes();
+
+    for (const auto& typeName : folderTypes)
+    {
+        // Get config for this type
+        auto typeConfigOpt = config.GetFolderTypeConfig(typeName);
+        if (!typeConfigOpt.has_value())
+            continue;
+
+        const auto& typeConfig = typeConfigOpt.value();
+
+        // Only track shot folder types
+        if (!typeConfig.isShot)
+            continue;
+
+        // Check if category folder exists in job root
+        std::wstring typeNameWide = Utf8ToWide(typeName);
+        std::filesystem::path categoryPath = std::filesystem::path(jobPath) / typeNameWide;
+
+        if (std::filesystem::exists(categoryPath) && std::filesystem::is_directory(categoryPath))
+        {
+            DiscoverShotsInCategory(categoryPath.wstring(), typeName, config);
+        }
+    }
+}
+
+void SyncManager::DiscoverShotsInCategory(const std::wstring& categoryPath, const std::string& folderType, const ProjectConfig& config)
+{
+    try
+    {
+        // Iterate through all subdirectories in the category folder
+        for (const auto& entry : std::filesystem::directory_iterator(categoryPath))
+        {
+            if (!entry.is_directory())
+                continue;
+
+            std::wstring shotPath = entry.path().wstring();
+
+            // Check if metadata already exists for this shot
+            auto existingMetadata = m_subManager->GetShotMetadata(shotPath);
+
+            if (!existingMetadata.has_value())
+            {
+                // Create new metadata entry with defaults from template
+                ShotMetadata metadata;
+                metadata.shotPath = shotPath;
+                metadata.folderType = folderType;
+                metadata.priority = 2; // Default to medium priority
+                metadata.isTracked = false; // Default to NOT tracked - user must explicitly add to tracker
+                metadata.createdTime = GetCurrentTimeMs();
+                metadata.modifiedTime = GetCurrentTimeMs();
+
+                // Apply default status and category from template
+                auto folderConfigOpt = config.GetFolderTypeConfig(folderType);
+                if (folderConfigOpt.has_value())
+                {
+                    const auto& folderConfig = folderConfigOpt.value();
+
+                    if (!folderConfig.statusOptions.empty())
+                    {
+                        metadata.status = folderConfig.statusOptions[0].name;
+                    }
+
+                    if (!folderConfig.categoryOptions.empty())
+                    {
+                        metadata.category = folderConfig.categoryOptions[0].name;
+                    }
+                }
+
+                // Create the metadata entry
+                m_subManager->CreateOrUpdateShotMetadata(metadata);
+
+                std::wcout << L"[SyncManager] Discovered new shot: " << shotPath << L" (" << Utf8ToWide(folderType) << L")" << std::endl;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SyncManager] Error discovering shots in " << WideToUtf8(categoryPath) << ": " << e.what() << std::endl;
     }
 }
 

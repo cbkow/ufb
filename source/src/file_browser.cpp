@@ -8,6 +8,9 @@
 #include "extractors/exr_extractor.h"
 #include "extractors/fallback_icon_extractor.h"
 #include "ole_drag_drop.h"
+#include "bookmark_manager.h"
+#include "subscription_manager.h"
+#include "utils.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -16,14 +19,17 @@
 #include <set>
 #include <sstream>
 #include <iomanip>
+
+// C++20 changed u8"" literals to char8_t, need to cast for ImGui
+#define U8(x) reinterpret_cast<const char*>(u8##x)
 #include <iostream>
 #include <ctime>
 #include <chrono>
 #include <GLFW/glfw3.h>
 
 // Material Icons for drag tooltips
-#define ICON_FOLDER u8"\uE2C7"  // folder
-#define ICON_FILE u8"\uE873"    // description
+#define ICON_FOLDER U8("\uE2C7")  // folder
+#define ICON_FILE U8("\uE873")    // description
 
 // External font references
 extern ImFont* font_regular;
@@ -48,8 +54,12 @@ FileBrowser::~FileBrowser()
     Shutdown();
 }
 
-void FileBrowser::Initialize()
+void FileBrowser::Initialize(UFB::BookmarkManager* bookmarkManager, UFB::SubscriptionManager* subscriptionManager)
 {
+    // Store manager dependencies
+    m_bookmarkManager = bookmarkManager;
+    m_subscriptionManager = subscriptionManager;
+
     // Initialize OLE for drag and drop support (only once per thread)
     if (m_oleRefCount == 0)
     {
@@ -814,12 +824,295 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
             RevealInExplorer(entry.fullPath);
         }
 
+        // Open in Other Browser
+        if (onOpenInOtherBrowser)
+        {
+            if (ImGui::MenuItem("Open in Other Browser"))
+            {
+                onOpenInOtherBrowser(entry.fullPath);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Open in Browser 1 and Browser 2 (when used in specialized views)
+        if (onOpenInBrowser1 || onOpenInBrowser2)
+        {
+            ImGui::Separator();
+
+            if (onOpenInBrowser1)
+            {
+                if (ImGui::MenuItem("Open in Browser 1"))
+                {
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
+                    onOpenInBrowser1(pathToOpen);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+
+            if (onOpenInBrowser2)
+            {
+                if (ImGui::MenuItem("Open in Browser 2"))
+                {
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
+                    onOpenInBrowser2(pathToOpen);
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+        }
+
+        // Open Shot View (only for shot category folders in synced jobs)
+        if (entry.isDirectory && m_subscriptionManager && onOpenShotView)
+        {
+            // Check if current directory is a synced job
+            auto subscription = m_subscriptionManager->GetSubscription(m_currentDirectory);
+            if (subscription.has_value() && subscription->isActive)
+            {
+                // Check if this folder is a shot category type
+                static const std::set<std::wstring> shotCategories = {
+                    L"3d", L"ae", L"audition", L"illustrator", L"photoshop", L"premiere"
+                };
+
+                std::wstring folderName = entry.name;
+                std::transform(folderName.begin(), folderName.end(), folderName.begin(), ::towlower);
+
+                if (shotCategories.find(folderName) != shotCategories.end())
+                {
+                    ImGui::Separator();
+
+                    // Use bright accent color
+                    ImVec4 accentColor = GetAccentColor();
+                    ImVec4 brightAccent = ImVec4(
+                        accentColor.x * 1.3f,
+                        accentColor.y * 1.3f,
+                        accentColor.z * 1.3f,
+                        1.0f
+                    );
+                    ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                    if (ImGui::MenuItem("Open Shot View"))
+                    {
+                        onOpenShotView(entry.fullPath, entry.name);
+                        ImGui::CloseCurrentPopup();
+                    }
+
+                    ImGui::PopStyleColor();
+                }
+
+                // Check if this folder is "assets" or "postings"
+                std::wstring folderNameLower = entry.name;
+                std::transform(folderNameLower.begin(), folderNameLower.end(), folderNameLower.begin(), ::towlower);
+
+                if (folderNameLower == L"assets" && onOpenAssetsView)
+                {
+                    ImGui::Separator();
+
+                    // Use bright accent color
+                    ImVec4 accentColor = GetAccentColor();
+                    ImVec4 brightAccent = ImVec4(
+                        accentColor.x * 1.3f,
+                        accentColor.y * 1.3f,
+                        accentColor.z * 1.3f,
+                        1.0f
+                    );
+                    ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                    if (ImGui::MenuItem("Open Assets View"))
+                    {
+                        // Get job name from subscription
+                        std::wstring jobName = subscription->jobName;
+                        onOpenAssetsView(entry.fullPath, jobName);
+                        ImGui::CloseCurrentPopup();
+                    }
+
+                    ImGui::PopStyleColor();
+                }
+
+                if (folderNameLower == L"postings" && onOpenPostingsView)
+                {
+                    ImGui::Separator();
+
+                    // Use bright accent color
+                    ImVec4 accentColor = GetAccentColor();
+                    ImVec4 brightAccent = ImVec4(
+                        accentColor.x * 1.3f,
+                        accentColor.y * 1.3f,
+                        accentColor.z * 1.3f,
+                        1.0f
+                    );
+                    ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                    if (ImGui::MenuItem("Open Postings View"))
+                    {
+                        // Get job name from subscription
+                        std::wstring jobName = subscription->jobName;
+                        onOpenPostingsView(entry.fullPath, jobName);
+                        ImGui::CloseCurrentPopup();
+                    }
+
+                    ImGui::PopStyleColor();
+                }
+            }
+        }
+
         // Open (only for files)
         if (!entry.isDirectory)
         {
             if (ImGui::MenuItem("Open"))
             {
                 ShellExecuteW(nullptr, L"open", entry.fullPath.c_str(), nullptr, nullptr, SW_SHOW);
+            }
+        }
+
+        // Transcode to MP4 (only for video files)
+        if (!entry.isDirectory)
+        {
+            // Check if this is a video file
+            std::filesystem::path filePath(entry.fullPath);
+            std::wstring ext = filePath.extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+            static const std::set<std::wstring> videoExtensions = {
+                L".mp4", L".mov", L".avi", L".mkv", L".wmv", L".flv", L".webm",
+                L".m4v", L".mpg", L".mpeg", L".3gp", L".mxf", L".mts", L".m2ts"
+            };
+
+            bool isVideo = videoExtensions.find(ext) != videoExtensions.end();
+
+            if (isVideo && onTranscodeToMP4)
+            {
+                std::wcout << L"[FileBrowser] Showing Transcode menu for video file, " << m_selectedIndices.size() << L" files selected" << std::endl;
+
+                // Use bright variant of accent color
+                ImVec4 accentColor = GetAccentColor();
+                ImVec4 brightAccent = ImVec4(
+                    accentColor.x * 1.3f,
+                    accentColor.y * 1.3f,
+                    accentColor.z * 1.3f,
+                    1.0f
+                );
+                ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                if (ImGui::MenuItem("Transcode to MP4"))
+                {
+                    // Collect all selected video file paths
+                    std::vector<std::wstring> selectedVideos;
+
+                    if (m_selectedIndices.empty())
+                    {
+                        // If no selection, transcode just this file
+                        selectedVideos.push_back(entry.fullPath);
+                    }
+                    else
+                    {
+                        // Transcode all selected video files
+                        for (int idx : m_selectedIndices)
+                        {
+                            if (idx >= 0 && idx < m_files.size())
+                            {
+                                const auto& file = m_files[idx];
+                                if (!file.isDirectory)
+                                {
+                                    std::filesystem::path fp(file.fullPath);
+                                    std::wstring fileExt = fp.extension().wstring();
+                                    std::transform(fileExt.begin(), fileExt.end(), fileExt.begin(), ::towlower);
+
+                                    if (videoExtensions.find(fileExt) != videoExtensions.end())
+                                    {
+                                        selectedVideos.push_back(file.fullPath);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    std::wcout << L"[FileBrowser] Sending " << selectedVideos.size() << L" videos to transcode" << std::endl;
+                    for (const auto& vid : selectedVideos) {
+                        std::wcout << L"  - " << vid << std::endl;
+                    }
+
+                    if (!selectedVideos.empty())
+                    {
+                        onTranscodeToMP4(selectedVideos);
+                    }
+
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::PopStyleColor();
+            }
+        }
+
+        // Sync as Job (only for directories when in a project folder)
+        if (entry.isDirectory && m_bookmarkManager && m_subscriptionManager)
+        {
+            // Check if current directory (parent) is a project folder
+            // Try both exact match and canonicalized path (for symlinks/junctions)
+            bool isProjectFolder = false;
+
+            // First try exact match
+            auto bookmark = m_bookmarkManager->GetBookmarkByPath(m_currentDirectory);
+            if (bookmark.has_value() && bookmark->isProjectFolder)
+            {
+                isProjectFolder = true;
+            }
+            else
+            {
+                // Try canonicalizing current directory and checking all bookmarks
+                try
+                {
+                    std::filesystem::path canonicalCurrent = std::filesystem::canonical(m_currentDirectory);
+                    auto allBookmarks = m_bookmarkManager->GetAllBookmarks();
+
+                    for (const auto& bm : allBookmarks)
+                    {
+                        if (bm.isProjectFolder)
+                        {
+                            try
+                            {
+                                std::filesystem::path canonicalBookmark = std::filesystem::canonical(bm.path);
+                                if (canonicalCurrent == canonicalBookmark)
+                                {
+                                    isProjectFolder = true;
+                                    break;
+                                }
+                            }
+                            catch (const std::exception&)
+                            {
+                                // Bookmark path might not exist, skip
+                                continue;
+                            }
+                        }
+                    }
+                }
+                catch (const std::exception&)
+                {
+                    // Current directory might not be canonical, use original path
+                }
+            }
+
+            if (isProjectFolder)
+            {
+                ImGui::Separator();
+
+                // Use bright accent color like "Transcode to MP4"
+                ImVec4 accentColor = GetAccentColor();
+                ImVec4 brightAccent = ImVec4(
+                    accentColor.x * 1.3f,
+                    accentColor.y * 1.3f,
+                    accentColor.z * 1.3f,
+                    1.0f
+                );
+                ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                if (ImGui::MenuItem("Sync as Job"))
+                {
+                    // Use the subfolder name as job name
+                    std::wstring jobName = entry.name;
+                    m_subscriptionManager->SubscribeToJob(entry.fullPath, jobName);
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::PopStyleColor();
             }
         }
 
@@ -885,29 +1178,12 @@ void FileBrowser::DrawNavigationBar()
         WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
     }
 
-    // Draw editable path input with mono font
+    // Draw read-only path text with mono font
     if (font_mono)
         ImGui::PushFont(font_mono);
 
     ImGui::SetNextItemWidth(-1.0f);  // Full width
-    if (ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
-    {
-        // Enter pressed - navigate to the entered path
-        wchar_t widePathBuffer[1024];
-        MultiByteToWideChar(CP_UTF8, 0, m_pathBuffer, -1, widePathBuffer, 1024);
-        std::wstring newPath = widePathBuffer;
-
-        // Validate path exists before navigating
-        if (std::filesystem::exists(newPath) && std::filesystem::is_directory(newPath))
-        {
-            NavigateTo(newPath);
-        }
-        else
-        {
-            // Invalid path - reset to current directory
-            WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
-        }
-    }
+    ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_ReadOnly);
 
     if (font_mono)
         ImGui::PopFont();
@@ -943,7 +1219,7 @@ void FileBrowser::DrawNavigationBar()
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
-        if (ImGui::Button(u8"\uE5CB"))  // Material Icons arrow_back
+        if (ImGui::Button(U8("\uE5CB")))  // Material Icons arrow_back
         {
             NavigateBack();
         }
@@ -970,7 +1246,7 @@ void FileBrowser::DrawNavigationBar()
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
-        if (ImGui::Button(u8"\uE5CC"))  // Material Icons arrow_forward
+        if (ImGui::Button(U8("\uE5CC")))  // Material Icons arrow_forward
         {
             NavigateForward();
         }
@@ -993,7 +1269,7 @@ void FileBrowser::DrawNavigationBar()
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
-        if (ImGui::Button(u8"\uE5CE"))  // Material Icons arrow_upward
+        if (ImGui::Button(U8("\uE5CE")))  // Material Icons arrow_upward
         {
             NavigateUp();
         }
@@ -1013,7 +1289,7 @@ void FileBrowser::DrawNavigationBar()
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
-        if (ImGui::Button(u8"\uE5D5"))  // Material Icons refresh symbol
+        if (ImGui::Button(U8("\uE5D5")))  // Material Icons refresh symbol
         {
             RefreshFileList();
         }
@@ -1033,7 +1309,7 @@ void FileBrowser::DrawNavigationBar()
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
-        if (ImGui::Button(u8"\uE152"))  // Material Icons filter_list symbol
+        if (ImGui::Button(U8("\uE152")))  // Material Icons filter_list symbol
         {
             ImGui::OpenPopup("FilterPopup");
         }
@@ -1254,6 +1530,121 @@ void FileBrowser::DrawFileList(HWND hwnd)
         DrawGridView(hwnd);
     }
 
+    // New Folder dialog modal (shared between both view modes)
+    if (m_showNewFolderDialog)
+    {
+        ImGui::OpenPopup("New Folder");
+        m_showNewFolderDialog = false;  // Only open once
+    }
+
+    if (ImGui::BeginPopupModal("New Folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Enter folder name:");
+        ImGui::SetNextItemWidth(300.0f);
+
+        // Auto-focus the input field when opened
+        if (ImGui::IsWindowAppearing())
+        {
+            ImGui::SetKeyboardFocusHere();
+        }
+
+        bool enterPressed = ImGui::InputText("##newfolder", m_newFolderNameBuffer, sizeof(m_newFolderNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+
+        bool doCreate = false;
+        if (ImGui::Button("OK", ImVec2(120, 0)) || enterPressed)
+        {
+            doCreate = true;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+
+        // Handle folder creation
+        if (doCreate && strlen(m_newFolderNameBuffer) > 0)
+        {
+            // Convert folder name from UTF-8 to wide string
+            wchar_t folderNameW[256];
+            MultiByteToWideChar(CP_UTF8, 0, m_newFolderNameBuffer, -1, folderNameW, 256);
+
+            // Build new folder path
+            std::filesystem::path newFolderPath = std::filesystem::path(m_currentDirectory) / folderNameW;
+
+            // Attempt to create folder
+            try
+            {
+                if (std::filesystem::create_directory(newFolderPath))
+                {
+                    std::wcout << L"[FileBrowser] Created folder: " << newFolderPath.wstring() << std::endl;
+                    RefreshFileList();
+                }
+                else
+                {
+                    std::wcerr << L"[FileBrowser] Folder already exists: " << newFolderPath.wstring() << std::endl;
+                }
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "[FileBrowser] Failed to create folder: " << e.what() << std::endl;
+            }
+
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+
+    // New u.f.b. Folder dialog modal
+    if (m_showNewUFBFolderDialog)
+    {
+        ImGui::OpenPopup("New u.f.b. Folder");
+        m_showNewUFBFolderDialog = false;  // Only open once
+    }
+
+    if (ImGui::BeginPopupModal("New u.f.b. Folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Enter folder name:");
+        ImGui::SetNextItemWidth(300.0f);
+
+        // Auto-focus the input field when opened
+        if (ImGui::IsWindowAppearing())
+        {
+            ImGui::SetKeyboardFocusHere();
+        }
+
+        bool enterPressed = ImGui::InputText("##newufbfolder", m_newUFBFolderNameBuffer, sizeof(m_newUFBFolderNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+
+        bool doCreate = false;
+        if (ImGui::Button("OK", ImVec2(120, 0)) || enterPressed)
+        {
+            doCreate = true;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+
+        // Handle folder creation
+        if (doCreate && strlen(m_newUFBFolderNameBuffer) > 0)
+        {
+            std::string folderName(m_newUFBFolderNameBuffer);
+            if (CreateUFBFolder(folderName))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::EndPopup();
+    }
+
     // Drop target for entire browser window (for drag and drop between browsers)
     if (ImGui::BeginDragDropTarget())
     {
@@ -1299,12 +1690,70 @@ void FileBrowser::DrawFileList(HWND hwnd)
 
 void FileBrowser::DrawListView(HWND hwnd)
 {
+    // Clear and resize item bounds vector for box selection
+    m_itemBounds.clear();
+    m_itemBounds.resize(m_files.size());
+
+    // Check if current directory is a project folder
+    // Try both exact match and canonicalized path (for symlinks/junctions)
+    bool isProjectFolder = false;
+    if (m_bookmarkManager)
+    {
+        // First try exact match
+        auto bookmark = m_bookmarkManager->GetBookmarkByPath(m_currentDirectory);
+        if (bookmark.has_value() && bookmark->isProjectFolder)
+        {
+            isProjectFolder = true;
+        }
+        else
+        {
+            // Try canonicalizing current directory and checking all bookmarks
+            try
+            {
+                std::filesystem::path canonicalCurrent = std::filesystem::canonical(m_currentDirectory);
+                auto allBookmarks = m_bookmarkManager->GetAllBookmarks();
+
+                for (const auto& bm : allBookmarks)
+                {
+                    if (bm.isProjectFolder)
+                    {
+                        try
+                        {
+                            std::filesystem::path canonicalBookmark = std::filesystem::canonical(bm.path);
+                            if (canonicalCurrent == canonicalBookmark)
+                            {
+                                isProjectFolder = true;
+                                break;
+                            }
+                        }
+                        catch (const std::exception&)
+                        {
+                            // Bookmark path might not exist, skip
+                            continue;
+                        }
+                    }
+                }
+            }
+            catch (const std::exception&)
+            {
+                // Current directory might not be canonical, use original path
+            }
+        }
+    }
+
+    // Determine number of columns based on whether we're in a project folder
+    int columnCount = isProjectFolder ? 4 : 3;
+
     // Table for file listing
-    if (ImGui::BeginTable("FileList", 3, ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable))
+    if (ImGui::BeginTable("FileList", columnCount, ImGuiTableFlags_Resizable | ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable))
     {
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort);
         ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
         ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        if (isProjectFolder)
+        {
+            ImGui::TableSetupColumn("Synced", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+        }
         ImGui::TableHeadersRow();
 
         // Handle sorting
@@ -1365,7 +1814,7 @@ void FileBrowser::DrawListView(HWND hwnd)
                 }
 
                 // Selectable for clicking
-                if (ImGui::Selectable(nameUtf8, isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap))
+                if (ImGui::Selectable(nameUtf8, isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap))
                 {
                     ImGuiIO& io = ImGui::GetIO();
 
@@ -1411,6 +1860,11 @@ void FileBrowser::DrawListView(HWND hwnd)
                     m_lastClickTime = currentTime;
                     m_lastClickedIndex = i;
                 }
+
+                // Store row bounds for box selection
+                ImVec2 rowMin = ImGui::GetItemRectMin();
+                ImVec2 rowMax = ImGui::GetItemRectMax();
+                m_itemBounds[i] = std::make_pair(rowMin, rowMax);
 
                 if (isSelected)
                 {
@@ -1567,14 +2021,124 @@ void FileBrowser::DrawListView(HWND hwnd)
                 if (font_mono)
                     ImGui::PopFont();
 
+                // Synced column (only if in project folder and entry is a directory)
+                if (isProjectFolder)
+                {
+                    ImGui::TableNextColumn();
+                    if (entry.isDirectory && m_subscriptionManager)
+                    {
+                        // Check if this directory is a synced job
+                        auto subscription = m_subscriptionManager->GetSubscription(entry.fullPath);
+                        if (subscription.has_value() && subscription->isActive)
+                        {
+                            // Use bright accent color
+                            ImVec4 accentColor = GetAccentColor();
+                            ImVec4 brightAccent = ImVec4(
+                                accentColor.x * 1.3f,
+                                accentColor.y * 1.3f,
+                                accentColor.z * 1.3f,
+                                1.0f
+                            );
+                            ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                            if (font_mono)
+                                ImGui::PushFont(font_mono);
+                            ImGui::Text("✓");
+                            if (font_mono)
+                                ImGui::PopFont();
+
+                            ImGui::PopStyleColor();
+                        }
+                    }
+                }
+
                 ImGui::PopID();
             }
         }
 
         ImGui::EndTable();
 
+        // Box selection logic (drag-to-select in list view)
+        // Detect box selection start - left-click on empty space
+        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+        {
+            // Check if click was on empty space (not on any row)
+            bool clickedOnRow = false;
+            ImVec2 mousePos = ImGui::GetMousePos();
+            for (int i = 0; i < m_itemBounds.size(); ++i)
+            {
+                const auto& [itemMin, itemMax] = m_itemBounds[i];
+                if (mousePos.y >= itemMin.y && mousePos.y <= itemMax.y)
+                {
+                    clickedOnRow = true;
+                    break;
+                }
+            }
+
+            if (!clickedOnRow)
+            {
+                m_isBoxSelecting = true;
+                m_boxSelectDragged = false;  // Reset drag flag
+                m_boxSelectStart = mousePos;
+            }
+        }
+
+        // Update selection during drag
+        if (m_isBoxSelecting && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        {
+            m_boxSelectDragged = true;  // Mark that we dragged
+
+            ImVec2 mousePos = ImGui::GetMousePos();
+            ImVec2 boxMin((std::min)(m_boxSelectStart.x, mousePos.x), (std::min)(m_boxSelectStart.y, mousePos.y));
+            ImVec2 boxMax((std::max)(m_boxSelectStart.x, mousePos.x), (std::max)(m_boxSelectStart.y, mousePos.y));
+
+            // Update selection based on modifier keys
+            ImGuiIO& io = ImGui::GetIO();
+            if (!io.KeyCtrl)
+            {
+                m_selectedIndices.clear();
+            }
+
+            // Check which rows intersect with the selection box
+            for (int i = 0; i < m_itemBounds.size(); ++i)
+            {
+                const auto& [itemMin, itemMax] = m_itemBounds[i];
+
+                // Check if row intersects with selection box (Y-axis overlap)
+                bool intersects = !(itemMax.y < boxMin.y || itemMin.y > boxMax.y);
+
+                if (intersects)
+                {
+                    m_selectedIndices.insert(i);
+                }
+            }
+        }
+
+        // End box selection on mouse release
+        if (m_isBoxSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        {
+            // If we didn't drag (just clicked and released), clear selection
+            if (!m_boxSelectDragged)
+            {
+                m_selectedIndices.clear();
+            }
+            m_isBoxSelecting = false;
+        }
+
+        // Draw selection box overlay
+        if (m_isBoxSelecting && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            ImVec4 accentColor = GetAccentColor();
+            ImVec4 fillColor = ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.2f);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            drawList->AddRectFilled(m_boxSelectStart, mousePos, ImGui::GetColorU32(fillColor));
+            drawList->AddRect(m_boxSelectStart, mousePos, ImGui::GetColorU32(accentColor), 0.0f, 0, 2.0f);
+        }
+
         // Right-click on empty space for background context menu
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Right) && ImGui::IsItemHovered())
+        // Only open if not box selecting
+        if (!m_isBoxSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Right) && ImGui::IsItemHovered())
         {
             ImGui::OpenPopup("background_context_menu");
         }
@@ -1590,6 +2154,22 @@ void FileBrowser::DrawListView(HWND hwnd)
         {
             m_showNewFolderDialog = true;
             strcpy_s(m_newFolderNameBuffer, "New Folder");
+        }
+
+        if (ImGui::MenuItem("New u.f.b. Folder"))
+        {
+            m_showNewUFBFolderDialog = true;
+            memset(m_newUFBFolderNameBuffer, 0, sizeof(m_newUFBFolderNameBuffer));
+        }
+
+        if (ImGui::MenuItem("New Date Folder"))
+        {
+            CreateDateFolder();
+        }
+
+        if (ImGui::MenuItem("New Time Folder"))
+        {
+            CreateTimeFolder();
         }
 
         ImGui::Separator();
@@ -1678,74 +2258,6 @@ void FileBrowser::DrawListView(HWND hwnd)
 
         ImGui::EndPopup();
     }
-
-    // New Folder dialog modal
-    if (m_showNewFolderDialog)
-    {
-        ImGui::OpenPopup("New Folder");
-        m_showNewFolderDialog = false;  // Only open once
-    }
-
-    if (ImGui::BeginPopupModal("New Folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        ImGui::Text("Enter folder name:");
-        ImGui::SetNextItemWidth(300.0f);
-
-        // Auto-focus the input field when opened
-        if (ImGui::IsWindowAppearing())
-        {
-            ImGui::SetKeyboardFocusHere();
-        }
-
-        bool enterPressed = ImGui::InputText("##newfolder", m_newFolderNameBuffer, sizeof(m_newFolderNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
-
-        ImGui::Spacing();
-
-        bool doCreate = false;
-        if (ImGui::Button("OK", ImVec2(120, 0)) || enterPressed)
-        {
-            doCreate = true;
-        }
-
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0)))
-        {
-            ImGui::CloseCurrentPopup();
-        }
-
-        // Handle folder creation
-        if (doCreate && strlen(m_newFolderNameBuffer) > 0)
-        {
-            // Convert folder name from UTF-8 to wide string
-            wchar_t folderNameW[256];
-            MultiByteToWideChar(CP_UTF8, 0, m_newFolderNameBuffer, -1, folderNameW, 256);
-
-            // Build new folder path
-            std::filesystem::path newFolderPath = std::filesystem::path(m_currentDirectory) / folderNameW;
-
-            // Attempt to create folder
-            try
-            {
-                if (std::filesystem::create_directory(newFolderPath))
-                {
-                    std::wcout << L"[FileBrowser] Created folder: " << newFolderPath.wstring() << std::endl;
-                    RefreshFileList();
-                }
-                else
-                {
-                    std::wcerr << L"[FileBrowser] Folder already exists: " << newFolderPath.wstring() << std::endl;
-                }
-            }
-            catch (const std::exception& e)
-            {
-                std::cerr << "[FileBrowser] Failed to create folder: " << e.what() << std::endl;
-            }
-
-            ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
-    }
 }
 
 void FileBrowser::DrawGridView(HWND hwnd)
@@ -1755,6 +2267,13 @@ void FileBrowser::DrawGridView(HWND hwnd)
     float itemWidth = m_thumbnailSize + 20.0f;  // Thumbnail + padding
     float itemHeight = m_thumbnailSize + 40.0f; // Thumbnail + text
     int columnsPerRow = (std::max)(1, (int)(availableSize.x / itemWidth));
+
+    // Track if any file was right-clicked (to prevent background menu from opening)
+    bool fileRightClicked = false;
+
+    // Clear and resize item bounds vector for box selection
+    m_itemBounds.clear();
+    m_itemBounds.resize(m_files.size());
 
     // Child window for scrolling
     ImGui::BeginChild("GridView", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -1983,76 +2502,6 @@ void FileBrowser::DrawGridView(HWND hwnd)
         // Check if item is selected
         bool isSelected = (m_selectedIndices.find(i) != m_selectedIndices.end());
 
-        // Draw selection highlight with accent color
-        if (isSelected)
-        {
-            ImVec2 rectMin = ImGui::GetItemRectMin();
-            ImVec2 rectMax = ImGui::GetItemRectMax();
-            ImVec4 accentColor = GetAccentColor();
-            ImGui::GetWindowDrawList()->AddRectFilled(rectMin, rectMax, ImGui::GetColorU32(accentColor));
-        }
-
-        // Handle clicking
-        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-        {
-            ImGuiIO& io = ImGui::GetIO();
-
-            if (io.KeyCtrl)
-            {
-                // Ctrl+Click: Toggle selection
-                if (isSelected)
-                    m_selectedIndices.erase(i);
-                else
-                    m_selectedIndices.insert(i);
-            }
-            else if (io.KeyShift && m_lastClickedIndex >= 0)
-            {
-                // Shift+Click: Range select
-                int start = (std::min)(m_lastClickedIndex, i);
-                int end = (std::max)(m_lastClickedIndex, i);
-                for (int idx = start; idx <= end; ++idx)
-                {
-                    m_selectedIndices.insert(idx);
-                }
-            }
-            else
-            {
-                // Normal click: Select only this item
-                m_selectedIndices.clear();
-                m_selectedIndices.insert(i);
-            }
-
-            // Double-click detection
-            double currentTime = glfwGetTime();
-            if (m_lastClickedIndex == i && (currentTime - m_lastClickTime) < 0.3)
-            {
-                // Double-clicked
-                if (entry.isDirectory)
-                {
-                    NavigateTo(entry.fullPath);
-                }
-                else
-                {
-                    ShellExecuteW(nullptr, L"open", entry.fullPath.c_str(), nullptr, nullptr, SW_SHOW);
-                }
-            }
-            m_lastClickTime = currentTime;
-            m_lastClickedIndex = i;
-        }
-
-        // Right-click context menu
-        if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-        {
-            ImGui::OpenPopup("file_context_menu");
-
-            // If right-clicked item is not in selection, select only it
-            if (!isSelected)
-            {
-                m_selectedIndices.clear();
-                m_selectedIndices.insert(i);
-            }
-        }
-
         // Draw filename (truncated to fit)
         char nameUtf8[256];
         WideCharToMultiByte(CP_UTF8, 0, entry.name.c_str(), -1, nameUtf8, sizeof(nameUtf8), nullptr, nullptr);
@@ -2082,12 +2531,106 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
         ImGui::EndGroup();
 
-        // Highlight selected item
+        // Add invisible button over the entire group for better hover/click detection
+        ImVec2 groupMin = ImGui::GetItemRectMin();
+        ImVec2 groupMax = ImGui::GetItemRectMax();
+        ImGui::SetCursorScreenPos(groupMin);
+        ImGui::InvisibleButton(("##grid_item_" + std::to_string(i)).c_str(), ImVec2(groupMax.x - groupMin.x, groupMax.y - groupMin.y));
+
+        // Store item bounds for box selection
+        m_itemBounds[i] = std::make_pair(groupMin, groupMax);
+
+        // Handle left-click on invisible button
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+        {
+            ImGuiIO& io = ImGui::GetIO();
+
+            if (io.KeyCtrl)
+            {
+                // Ctrl+Click: Toggle selection
+                if (isSelected)
+                    m_selectedIndices.erase(i);
+                else
+                    m_selectedIndices.insert(i);
+            }
+            else if (io.KeyShift && m_lastClickedIndex >= 0)
+            {
+                // Shift+Click: Range select
+                int start = (std::min)(m_lastClickedIndex, i);
+                int end = (std::max)(m_lastClickedIndex, i);
+                for (int idx = start; idx <= end; ++idx)
+                {
+                    m_selectedIndices.insert(idx);
+                }
+            }
+            else
+            {
+                // Normal click
+                // If clicking on already selected item, don't clear selection yet (might be starting a drag)
+                // If clicking on unselected item, clear and select only this one
+                if (!isSelected)
+                {
+                    m_selectedIndices.clear();
+                    m_selectedIndices.insert(i);
+                }
+                // If already selected, selection will be cleared on mouse release (if not dragging)
+            }
+
+            // Double-click detection
+            double currentTime = glfwGetTime();
+            if (m_lastClickedIndex == i && (currentTime - m_lastClickTime) < 0.3)
+            {
+                // Double-clicked
+                if (entry.isDirectory)
+                {
+                    NavigateTo(entry.fullPath);
+                }
+                else
+                {
+                    ShellExecuteW(nullptr, L"open", entry.fullPath.c_str(), nullptr, nullptr, SW_SHOW);
+                }
+            }
+            m_lastClickTime = currentTime;
+            m_lastClickedIndex = i;
+        }
+
+        // Handle mouse release on already selected item (if not dragging)
+        if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && isSelected)
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            // Only clear selection if we didn't start a drag, no modifiers, and not box selecting
+            if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left, 5.0f) && !io.KeyCtrl && !io.KeyShift && !m_isBoxSelecting)
+            {
+                m_selectedIndices.clear();
+                m_selectedIndices.insert(i);
+            }
+        }
+
+        // Highlight selected item (after group so it covers the entire item)
         if (isSelected)
         {
-            ImVec2 rectMin = ImGui::GetItemRectMin();
-            ImVec2 rectMax = ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddRect(rectMin, rectMax, IM_COL32(255, 255, 255, 128), 0.0f, 0, 2.0f);
+            ImVec4 accentColor = GetAccentColor();
+
+            // Draw filled background with accent color (semi-transparent)
+            ImVec4 bgColor = ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.3f);
+            ImGui::GetWindowDrawList()->AddRectFilled(groupMin, groupMax, ImGui::GetColorU32(bgColor));
+
+            // Draw border around selected item
+            ImGui::GetWindowDrawList()->AddRect(groupMin, groupMax, ImGui::GetColorU32(accentColor), 0.0f, 0, 2.0f);
+        }
+
+        // Right-click context menu (check on invisible button)
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+        {
+            ImGui::OpenPopup("file_context_menu");
+            fileRightClicked = true;  // Mark that a file was right-clicked
+
+            // If right-clicked item is not in selection, select only it
+            if (!isSelected)
+            {
+                m_selectedIndices.clear();
+                m_selectedIndices.insert(i);
+            }
         }
 
         // Render context menu
@@ -2098,8 +2641,105 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
     ImGui::EndChild();
 
+    // Box selection logic (drag-to-select in grid view)
+    // Detect box selection start - left-click on empty space
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !fileRightClicked)
+    {
+        // Check if click was on empty space (not on any item)
+        bool clickedOnItem = false;
+        ImVec2 mousePos = ImGui::GetMousePos();
+        for (int i = 0; i < m_itemBounds.size(); ++i)
+        {
+            const auto& [itemMin, itemMax] = m_itemBounds[i];
+            if (mousePos.x >= itemMin.x && mousePos.x <= itemMax.x &&
+                mousePos.y >= itemMin.y && mousePos.y <= itemMax.y)
+            {
+                clickedOnItem = true;
+                break;
+            }
+        }
+
+        if (!clickedOnItem)
+        {
+            m_isBoxSelecting = true;
+            m_boxSelectDragged = false;  // Reset drag flag
+            m_boxSelectStart = mousePos;
+        }
+    }
+
+    // Update selection during drag
+    if (m_isBoxSelecting && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    {
+        m_boxSelectDragged = true;  // Mark that we dragged
+
+        ImVec2 mousePos = ImGui::GetMousePos();
+
+        // Calculate selection box bounds
+        ImVec2 boxMin(
+            (std::min)(m_boxSelectStart.x, mousePos.x),
+            (std::min)(m_boxSelectStart.y, mousePos.y)
+        );
+        ImVec2 boxMax(
+            (std::max)(m_boxSelectStart.x, mousePos.x),
+            (std::max)(m_boxSelectStart.y, mousePos.y)
+        );
+
+        // Update selection based on modifier keys
+        ImGuiIO& io = ImGui::GetIO();
+        if (!io.KeyCtrl)
+        {
+            // Normal drag: replace selection
+            m_selectedIndices.clear();
+        }
+
+        // Check which items intersect with selection box
+        for (int i = 0; i < m_itemBounds.size(); ++i)
+        {
+            const auto& [itemMin, itemMax] = m_itemBounds[i];
+
+            // Rectangle intersection test
+            bool intersects = !(itemMax.x < boxMin.x || itemMin.x > boxMax.x ||
+                               itemMax.y < boxMin.y || itemMin.y > boxMax.y);
+
+            if (intersects)
+            {
+                m_selectedIndices.insert(i);
+            }
+        }
+    }
+
+    // End box selection on mouse release
+    if (m_isBoxSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+    {
+        // If we didn't drag (just clicked and released), clear selection
+        if (!m_boxSelectDragged)
+        {
+            m_selectedIndices.clear();
+        }
+        m_isBoxSelecting = false;
+    }
+
+    // Draw selection box overlay
+    if (m_isBoxSelecting && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    {
+        ImVec2 mousePos = ImGui::GetMousePos();
+        ImVec4 accentColor = GetAccentColor();
+
+        // Semi-transparent fill
+        ImVec4 fillColor = ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.2f);
+        ImU32 fillColorU32 = ImGui::GetColorU32(fillColor);
+
+        // Solid border
+        ImU32 borderColorU32 = ImGui::GetColorU32(accentColor);
+
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddRectFilled(m_boxSelectStart, mousePos, fillColorU32);
+        drawList->AddRect(m_boxSelectStart, mousePos, borderColorU32, 0.0f, 0, 2.0f);
+    }
+
     // Background context menu (right-click on empty space in grid)
-    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    // Only open if no file was right-clicked and not box selecting
+    if (!fileRightClicked && !m_isBoxSelecting && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
     {
         ImGui::OpenPopup("background_context_menu");
     }
@@ -2114,6 +2754,22 @@ void FileBrowser::DrawGridView(HWND hwnd)
         {
             m_showNewFolderDialog = true;
             strcpy_s(m_newFolderNameBuffer, "New Folder");
+        }
+
+        if (ImGui::MenuItem("New u.f.b. Folder"))
+        {
+            m_showNewUFBFolderDialog = true;
+            memset(m_newUFBFolderNameBuffer, 0, sizeof(m_newUFBFolderNameBuffer));
+        }
+
+        if (ImGui::MenuItem("New Date Folder"))
+        {
+            CreateDateFolder();
+        }
+
+        if (ImGui::MenuItem("New Time Folder"))
+        {
+            CreateTimeFolder();
         }
 
         ImGui::Separator();
@@ -2299,4 +2955,181 @@ void FileBrowser::HandleExternalDrop(const std::vector<std::wstring>& droppedPat
 
     // Refresh file list to show newly copied files
     RefreshFileList();
+}
+
+// Create a new u.f.b. folder with YYMMDDx_{Name} versioning
+bool FileBrowser::CreateUFBFolder(const std::string& folderName)
+{
+    try
+    {
+        // Get current date in YYMMDD format
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_now;
+        localtime_s(&tm_now, &time_t_now);
+
+        char datePrefix[7];
+        snprintf(datePrefix, sizeof(datePrefix), "%02d%02d%02d",
+                 tm_now.tm_year % 100, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+        // Find existing folders with this date prefix to determine next letter
+        char letter = 'a';
+        bool foundAvailable = false;
+
+        for (char c = 'a'; c <= 'z' && !foundAvailable; c++)
+        {
+            std::string testFolderName = std::string(datePrefix) + c + "_";
+            bool exists = false;
+
+            // Check if any folder in current directory starts with this prefix
+            for (const auto& entry : m_files)
+            {
+                if (!entry.isDirectory)
+                    continue;
+
+                std::filesystem::path entryPath(entry.fullPath);
+                std::string folderNameStr = entryPath.filename().string();
+
+                if (folderNameStr.substr(0, testFolderName.length()) == testFolderName)
+                {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists)
+            {
+                letter = c;
+                foundAvailable = true;
+            }
+        }
+
+        if (!foundAvailable)
+        {
+            std::cerr << "[FileBrowser] No available letter suffix for date: " << datePrefix << std::endl;
+            return false;
+        }
+
+        // Create folder name: YYMMDDx_{FolderName}
+        std::string newFolderName = std::string(datePrefix) + letter + "_" + folderName;
+
+        // Convert to wide string
+        wchar_t newFolderNameW[512];
+        MultiByteToWideChar(CP_UTF8, 0, newFolderName.c_str(), -1, newFolderNameW, 512);
+        std::wstring newFolderNameWide(newFolderNameW);
+
+        // Create full path
+        std::filesystem::path newFolderPath = std::filesystem::path(m_currentDirectory) / newFolderNameWide;
+
+        if (std::filesystem::exists(newFolderPath))
+        {
+            std::cerr << "[FileBrowser] Folder already exists: " << newFolderName << std::endl;
+            return false;
+        }
+
+        // Create the directory
+        std::filesystem::create_directory(newFolderPath);
+        std::cout << "[FileBrowser] Created u.f.b. folder: " << newFolderPath << std::endl;
+
+        // Refresh the file list
+        RefreshFileList();
+
+        std::cout << "[FileBrowser] Successfully created u.f.b. folder: " << newFolderName << std::endl;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FileBrowser] Error creating u.f.b. folder: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Create a new date folder with YYMMDD format
+bool FileBrowser::CreateDateFolder()
+{
+    try
+    {
+        // Get current date in YYMMDD format
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_now;
+        localtime_s(&tm_now, &time_t_now);
+
+        char dateFolderName[7];
+        snprintf(dateFolderName, sizeof(dateFolderName), "%02d%02d%02d",
+                 tm_now.tm_year % 100, tm_now.tm_mon + 1, tm_now.tm_mday);
+
+        // Convert to wide string
+        wchar_t dateFolderNameW[256];
+        MultiByteToWideChar(CP_UTF8, 0, dateFolderName, -1, dateFolderNameW, 256);
+        std::wstring dateFolderNameWide(dateFolderNameW);
+
+        // Create full path
+        std::filesystem::path newFolderPath = std::filesystem::path(m_currentDirectory) / dateFolderNameWide;
+
+        if (std::filesystem::exists(newFolderPath))
+        {
+            std::cerr << "[FileBrowser] Date folder already exists: " << dateFolderName << std::endl;
+            return false;
+        }
+
+        // Create the directory
+        std::filesystem::create_directory(newFolderPath);
+        std::cout << "[FileBrowser] Created date folder: " << newFolderPath << std::endl;
+
+        // Refresh the file list
+        RefreshFileList();
+
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FileBrowser] Error creating date folder: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// Create a new time folder with HHMM format
+bool FileBrowser::CreateTimeFolder()
+{
+    try
+    {
+        // Get current time in HHMM format
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        struct tm tm_now;
+        localtime_s(&tm_now, &time_t_now);
+
+        char timeFolderName[5];
+        snprintf(timeFolderName, sizeof(timeFolderName), "%02d%02d",
+                 tm_now.tm_hour, tm_now.tm_min);
+
+        // Convert to wide string
+        wchar_t timeFolderNameW[256];
+        MultiByteToWideChar(CP_UTF8, 0, timeFolderName, -1, timeFolderNameW, 256);
+        std::wstring timeFolderNameWide(timeFolderNameW);
+
+        // Create full path
+        std::filesystem::path newFolderPath = std::filesystem::path(m_currentDirectory) / timeFolderNameWide;
+
+        if (std::filesystem::exists(newFolderPath))
+        {
+            std::cerr << "[FileBrowser] Time folder already exists: " << timeFolderName << std::endl;
+            return false;
+        }
+
+        // Create the directory
+        std::filesystem::create_directory(newFolderPath);
+        std::cout << "[FileBrowser] Created time folder: " << newFolderPath << std::endl;
+
+        // Refresh the file list
+        RefreshFileList();
+
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FileBrowser] Error creating time folder: " << e.what() << std::endl;
+        return false;
+    }
 }

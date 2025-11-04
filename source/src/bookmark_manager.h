@@ -13,6 +13,7 @@ struct Bookmark
     std::wstring path;          // File path or SMB network share path
     std::wstring displayName;   // User-friendly name
     uint64_t createdTime;
+    bool isProjectFolder = false;  // True if this bookmark represents a project folder
 };
 
 class BookmarkManager
@@ -25,7 +26,7 @@ public:
     bool Initialize(sqlite3* db);
 
     // Bookmark CRUD
-    bool AddBookmark(const std::wstring& path, const std::wstring& displayName);
+    bool AddBookmark(const std::wstring& path, const std::wstring& displayName, bool isProjectFolder = false);
     bool RemoveBookmark(int bookmarkId);
     bool RemoveBookmark(const std::wstring& path);
     bool UpdateBookmarkName(const std::wstring& path, const std::wstring& newDisplayName);

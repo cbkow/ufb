@@ -3,6 +3,9 @@
 #include "utils.h"
 #include <iostream>
 
+// External function from main.cpp
+extern ImVec4 GetWindowsAccentColor();
+
 namespace UFB {
 
 SubscriptionPanel::SubscriptionPanel()
@@ -56,7 +59,6 @@ void SubscriptionPanel::Draw(const char* title, bool withWindow)
 
     // Draw modals
     DrawAddBookmarkModal();
-    DrawAddJobModal();
     DrawDeleteConfirmModal();
 }
 
@@ -73,6 +75,7 @@ void SubscriptionPanel::DrawBookmarksSection()
             m_showAddBookmarkModal = true;
             memset(m_bookmarkPath, 0, sizeof(m_bookmarkPath));
             memset(m_bookmarkName, 0, sizeof(m_bookmarkName));
+            m_bookmarkIsProjectFolder = false;
         }
 
         ImGui::Spacing();
@@ -176,16 +179,6 @@ void SubscriptionPanel::DrawJobsSection()
     {
         ImGui::Indent();
 
-        // Assign job button
-        if (ImGui::Button("+ Assign Job"))
-        {
-            m_showAddJobModal = true;
-            memset(m_jobPath, 0, sizeof(m_jobPath));
-            memset(m_jobName, 0, sizeof(m_jobName));
-        }
-
-        ImGui::Spacing();
-
         // List active subscriptions
         auto subscriptions = m_subscriptionManager->GetActiveSubscriptions();
 
@@ -239,6 +232,23 @@ void SubscriptionPanel::DrawJobsSection()
 
                     ImGui::Separator();
 
+                    // Project Tracker menu item with bright accent color
+                    ImVec4 accentColor = GetWindowsAccentColor();
+                    ImVec4 brightAccent = ImVec4(accentColor.x * 1.3f, accentColor.y * 1.3f, accentColor.z * 1.3f, 1.0f);
+                    ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                    if (ImGui::MenuItem("Project Tracker"))
+                    {
+                        if (onOpenProjectTracker)
+                        {
+                            onOpenProjectTracker(sub.jobPath, sub.jobName);
+                        }
+                    }
+
+                    ImGui::PopStyleColor();
+
+                    ImGui::Separator();
+
                     if (ImGui::MenuItem("Unsubscribe"))
                     {
                         m_deleteType = DeleteType::Job;
@@ -287,6 +297,7 @@ void SubscriptionPanel::DrawAddBookmarkModal()
 
         ImGui::InputText("Path", m_bookmarkPath, sizeof(m_bookmarkPath));
         ImGui::InputText("Name", m_bookmarkName, sizeof(m_bookmarkName));
+        ImGui::Checkbox("Is Project Folder", &m_bookmarkIsProjectFolder);
 
         ImGui::Spacing();
 
@@ -297,7 +308,7 @@ void SubscriptionPanel::DrawAddBookmarkModal()
                 std::wstring path = Utf8ToWide(m_bookmarkPath);
                 std::wstring name = Utf8ToWide(m_bookmarkName);
 
-                if (m_bookmarkManager->AddBookmark(path, name))
+                if (m_bookmarkManager->AddBookmark(path, name, m_bookmarkIsProjectFolder))
                 {
                     std::cout << "Bookmark added: " << m_bookmarkName << std::endl;
                     m_showAddBookmarkModal = false;
@@ -314,56 +325,6 @@ void SubscriptionPanel::DrawAddBookmarkModal()
         if (ImGui::Button("Cancel", ImVec2(120, 0)))
         {
             m_showAddBookmarkModal = false;
-        }
-
-        ImGui::EndPopup();
-    }
-}
-
-void SubscriptionPanel::DrawAddJobModal()
-{
-    if (m_showAddJobModal)
-    {
-        ImGui::OpenPopup("Assign Job");
-    }
-
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-    if (ImGui::BeginPopupModal("Assign Job", &m_showAddJobModal, ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        ImGui::Text("Assign a new job for sync");
-        ImGui::Separator();
-
-        ImGui::InputText("Job Path", m_jobPath, sizeof(m_jobPath));
-        ImGui::InputText("Job Name", m_jobName, sizeof(m_jobName));
-
-        ImGui::Spacing();
-        ImGui::TextWrapped("This will subscribe to the job and start syncing metadata.");
-        ImGui::Spacing();
-
-        if (ImGui::Button("Assign", ImVec2(120, 0)))
-        {
-            if (strlen(m_jobPath) > 0 && strlen(m_jobName) > 0)
-            {
-                std::wstring path = Utf8ToWide(m_jobPath);
-                std::wstring name = Utf8ToWide(m_jobName);
-
-                if (onAssignJob)
-                {
-                    onAssignJob(path, name);
-                }
-
-                std::cout << "Job assigned: " << m_jobName << std::endl;
-                m_showAddJobModal = false;
-            }
-        }
-
-        ImGui::SameLine();
-
-        if (ImGui::Button("Cancel", ImVec2(120, 0)))
-        {
-            m_showAddJobModal = false;
         }
 
         ImGui::EndPopup();

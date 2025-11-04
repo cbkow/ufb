@@ -1,6 +1,9 @@
 #include "subscription_manager.h"
 #include "utils.h"
 #include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <windows.h>
 
 namespace UFB {
 
@@ -67,13 +70,45 @@ bool SubscriptionManager::CreateTables()
         );
     )";
 
-    const char* createIndexes = R"(
-        CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(is_active);
+    const char* createShotMetadataTable = R"(
+        CREATE TABLE IF NOT EXISTS shot_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            shot_path TEXT UNIQUE NOT NULL,
+            item_type TEXT DEFAULT 'shot',
+            folder_type TEXT NOT NULL,
+            status TEXT,
+            category TEXT,
+            priority INTEGER DEFAULT 2,
+            due_date INTEGER,
+            artist TEXT,
+            note TEXT,
+            links TEXT,
+            is_tracked INTEGER DEFAULT 1,
+            created_time INTEGER,
+            modified_time INTEGER
+        );
     )";
 
-    return ExecuteSQL(createSubscriptionsTable) &&
-           ExecuteSQL(createSettingsTable) &&
-           ExecuteSQL(createIndexes);
+    const char* createIndexes = R"(
+        CREATE INDEX IF NOT EXISTS idx_subscriptions_active ON subscriptions(is_active);
+        CREATE INDEX IF NOT EXISTS idx_shot_metadata_path ON shot_metadata(shot_path);
+        CREATE INDEX IF NOT EXISTS idx_shot_metadata_type ON shot_metadata(folder_type);
+        CREATE INDEX IF NOT EXISTS idx_shot_metadata_item_type ON shot_metadata(item_type);
+        CREATE INDEX IF NOT EXISTS idx_shot_metadata_tracked ON shot_metadata(is_tracked);
+    )";
+
+    // Add item_type column if it doesn't exist (migration for existing databases)
+    const char* addItemTypeColumn = "ALTER TABLE shot_metadata ADD COLUMN item_type TEXT DEFAULT 'shot';";
+
+    bool tablesCreated = ExecuteSQL(createSubscriptionsTable) &&
+                         ExecuteSQL(createSettingsTable) &&
+                         ExecuteSQL(createShotMetadataTable) &&
+                         ExecuteSQL(createIndexes);
+
+    // Try to add item_type column for existing databases (will fail silently if column exists)
+    sqlite3_exec(m_db, addItemTypeColumn, nullptr, nullptr, nullptr);
+
+    return tablesCreated;
 }
 
 bool SubscriptionManager::ExecuteSQL(const char* sql)
@@ -126,6 +161,38 @@ bool SubscriptionManager::SubscribeToJob(const std::wstring& jobPath, const std:
     {
         std::cerr << "Failed to insert subscription: " << sqlite3_errmsg(m_db) << std::endl;
         return false;
+    }
+
+    // Copy global template to project .ufb folder if it doesn't exist
+    try
+    {
+        std::filesystem::path ufbDir = std::filesystem::path(jobPath) / L".ufb";
+        std::filesystem::path projectConfigPath = ufbDir / L"projectConfig.json";
+
+        if (!std::filesystem::exists(projectConfigPath))
+        {
+            // Create .ufb directory
+            std::filesystem::create_directories(ufbDir);
+
+            // Get global template path
+            std::filesystem::path globalTemplate = GetLocalAppDataPath() / L"projectTemplate.json";
+
+            // Copy template to project folder
+            if (std::filesystem::exists(globalTemplate))
+            {
+                std::filesystem::copy_file(globalTemplate, projectConfigPath);
+                std::wcout << L"[SubscriptionManager] Copied project template to: " << projectConfigPath << std::endl;
+            }
+            else
+            {
+                std::wcerr << L"[SubscriptionManager] Warning: Global template not found at: " << globalTemplate << std::endl;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Error copying project template: " << e.what() << std::endl;
+        // Don't fail the subscription if template copy fails
     }
 
     return true;
@@ -376,6 +443,269 @@ std::optional<std::wstring> SubscriptionManager::GetJobPathForPath(const std::ws
     return std::nullopt;
 }
 
+bool SubscriptionManager::CreateOrUpdateShotMetadata(const ShotMetadata& metadata)
+{
+    const char* sql = R"(
+        INSERT INTO shot_metadata (shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(shot_path) DO UPDATE SET
+            item_type = excluded.item_type,
+            folder_type = excluded.folder_type,
+            status = excluded.status,
+            category = excluded.category,
+            priority = excluded.priority,
+            due_date = excluded.due_date,
+            artist = excluded.artist,
+            note = excluded.note,
+            links = excluded.links,
+            is_tracked = excluded.is_tracked,
+            modified_time = excluded.modified_time;
+    )";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare shot metadata insert: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    std::string shotPathUtf8 = WideToUtf8(metadata.shotPath);
+    std::string itemType = metadata.itemType.empty() ? "shot" : metadata.itemType;
+    sqlite3_bind_text(stmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, itemType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, metadata.folderType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, metadata.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, metadata.category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, metadata.priority);
+    sqlite3_bind_int64(stmt, 7, metadata.dueDate);
+    sqlite3_bind_text(stmt, 8, metadata.artist.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, metadata.note.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, metadata.links.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 11, metadata.isTracked ? 1 : 0);
+    sqlite3_bind_int64(stmt, 12, metadata.createdTime);
+    sqlite3_bind_int64(stmt, 13, metadata.modifiedTime);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE)
+    {
+        std::cerr << "Failed to insert/update shot metadata: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+std::optional<ShotMetadata> SubscriptionManager::GetShotMetadata(const std::wstring& shotPath)
+{
+    std::string shotPathUtf8 = WideToUtf8(shotPath);
+
+    const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path = ?;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare get shot metadata: " << sqlite3_errmsg(m_db) << std::endl;
+        return std::nullopt;
+    }
+
+    sqlite3_bind_text(stmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+
+    if (rc == SQLITE_ROW)
+    {
+        ShotMetadata metadata;
+        metadata.id = sqlite3_column_int(stmt, 0);
+        metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+
+        const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        metadata.itemType = itemType ? itemType : "shot";
+
+        metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        metadata.status = status ? status : "";
+
+        const char* category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        metadata.category = category ? category : "";
+
+        metadata.priority = sqlite3_column_int(stmt, 6);
+        metadata.dueDate = sqlite3_column_int64(stmt, 7);
+
+        const char* artist = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        metadata.artist = artist ? artist : "";
+
+        const char* note = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        metadata.note = note ? note : "";
+
+        const char* links = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        metadata.links = links ? links : "";
+
+        metadata.isTracked = sqlite3_column_int(stmt, 11) != 0;
+        metadata.createdTime = sqlite3_column_int64(stmt, 12);
+        metadata.modifiedTime = sqlite3_column_int64(stmt, 13);
+
+        sqlite3_finalize(stmt);
+        return metadata;
+    }
+
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+std::vector<ShotMetadata> SubscriptionManager::GetAllShotMetadata(const std::wstring& jobPath)
+{
+    std::vector<ShotMetadata> results;
+    std::string jobPathUtf8 = WideToUtf8(jobPath);
+
+    // Get all shots where shot_path starts with job_path
+    const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path LIKE ? || '%';";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare get all shot metadata: " << sqlite3_errmsg(m_db) << std::endl;
+        return results;
+    }
+
+    sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        ShotMetadata metadata;
+        metadata.id = sqlite3_column_int(stmt, 0);
+        metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+
+        const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        metadata.itemType = itemType ? itemType : "shot";
+
+        metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        metadata.status = status ? status : "";
+
+        const char* category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        metadata.category = category ? category : "";
+
+        metadata.priority = sqlite3_column_int(stmt, 6);
+        metadata.dueDate = sqlite3_column_int64(stmt, 7);
+
+        const char* artist = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        metadata.artist = artist ? artist : "";
+
+        const char* note = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        metadata.note = note ? note : "";
+
+        const char* links = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        metadata.links = links ? links : "";
+
+        metadata.isTracked = sqlite3_column_int(stmt, 11) != 0;
+        metadata.createdTime = sqlite3_column_int64(stmt, 12);
+        metadata.modifiedTime = sqlite3_column_int64(stmt, 13);
+
+        results.push_back(metadata);
+    }
+
+    sqlite3_finalize(stmt);
+    return results;
+}
+
+std::vector<ShotMetadata> SubscriptionManager::GetShotMetadataByType(const std::wstring& jobPath, const std::string& folderType)
+{
+    std::vector<ShotMetadata> results;
+    std::string jobPathUtf8 = WideToUtf8(jobPath);
+
+    const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path LIKE ? || '%' AND folder_type = ?;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare get shot metadata by type: " << sqlite3_errmsg(m_db) << std::endl;
+        return results;
+    }
+
+    sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, folderType.c_str(), -1, SQLITE_TRANSIENT);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        ShotMetadata metadata;
+        metadata.id = sqlite3_column_int(stmt, 0);
+        metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+
+        const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        metadata.itemType = itemType ? itemType : "shot";
+
+        metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        metadata.status = status ? status : "";
+
+        const char* category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        metadata.category = category ? category : "";
+
+        metadata.priority = sqlite3_column_int(stmt, 6);
+        metadata.dueDate = sqlite3_column_int64(stmt, 7);
+
+        const char* artist = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        metadata.artist = artist ? artist : "";
+
+        const char* note = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        metadata.note = note ? note : "";
+
+        const char* links = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        metadata.links = links ? links : "";
+
+        metadata.isTracked = sqlite3_column_int(stmt, 11) != 0;
+        metadata.createdTime = sqlite3_column_int64(stmt, 12);
+        metadata.modifiedTime = sqlite3_column_int64(stmt, 13);
+
+        results.push_back(metadata);
+    }
+
+    sqlite3_finalize(stmt);
+    return results;
+}
+
+bool SubscriptionManager::DeleteShotMetadata(const std::wstring& shotPath)
+{
+    std::string shotPathUtf8 = WideToUtf8(shotPath);
+
+    const char* sql = "DELETE FROM shot_metadata WHERE shot_path = ?;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare delete shot metadata: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE)
+    {
+        std::cerr << "Failed to delete shot metadata: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 std::string SubscriptionManager::SyncStatusToString(SyncStatus status)
 {
     switch (status)
@@ -397,6 +727,176 @@ SyncStatus SubscriptionManager::StringToSyncStatus(const std::string& str)
     if (str == "stale") return SyncStatus::Stale;
     if (str == "error") return SyncStatus::Error;
     return SyncStatus::Pending;
+}
+
+std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstring& jobPath, const std::string& itemType)
+{
+    std::vector<ShotMetadata> results;
+    std::string jobPathUtf8 = WideToUtf8(jobPath);
+
+    const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path LIKE ? || '%' AND item_type = ? AND is_tracked = 1;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare get tracked items: " << sqlite3_errmsg(m_db) << std::endl;
+        return results;
+    }
+
+    sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, itemType.c_str(), -1, SQLITE_TRANSIENT);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        ShotMetadata metadata;
+        metadata.id = sqlite3_column_int(stmt, 0);
+        metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+
+        const char* itemTypeStr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        metadata.itemType = itemTypeStr ? itemTypeStr : "shot";
+
+        metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        metadata.status = status ? status : "";
+
+        const char* category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        metadata.category = category ? category : "";
+
+        metadata.priority = sqlite3_column_int(stmt, 6);
+        metadata.dueDate = sqlite3_column_int64(stmt, 7);
+
+        const char* artist = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        metadata.artist = artist ? artist : "";
+
+        const char* note = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        metadata.note = note ? note : "";
+
+        const char* links = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        metadata.links = links ? links : "";
+
+        metadata.isTracked = sqlite3_column_int(stmt, 11) != 0;
+        metadata.createdTime = sqlite3_column_int64(stmt, 12);
+        metadata.modifiedTime = sqlite3_column_int64(stmt, 13);
+
+        results.push_back(metadata);
+    }
+
+    sqlite3_finalize(stmt);
+    return results;
+}
+
+std::vector<ShotMetadata> SubscriptionManager::GetAllTrackedItems(const std::wstring& jobPath)
+{
+    std::vector<ShotMetadata> results;
+    std::string jobPathUtf8 = WideToUtf8(jobPath);
+
+    const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path LIKE ? || '%' AND is_tracked = 1;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare get all tracked items: " << sqlite3_errmsg(m_db) << std::endl;
+        return results;
+    }
+
+    sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        ShotMetadata metadata;
+        metadata.id = sqlite3_column_int(stmt, 0);
+        metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+
+        const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        metadata.itemType = itemType ? itemType : "shot";
+
+        metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        metadata.status = status ? status : "";
+
+        const char* category = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        metadata.category = category ? category : "";
+
+        metadata.priority = sqlite3_column_int(stmt, 6);
+        metadata.dueDate = sqlite3_column_int64(stmt, 7);
+
+        const char* artist = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 8));
+        metadata.artist = artist ? artist : "";
+
+        const char* note = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 9));
+        metadata.note = note ? note : "";
+
+        const char* links = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 10));
+        metadata.links = links ? links : "";
+
+        metadata.isTracked = sqlite3_column_int(stmt, 11) != 0;
+        metadata.createdTime = sqlite3_column_int64(stmt, 12);
+        metadata.modifiedTime = sqlite3_column_int64(stmt, 13);
+
+        results.push_back(metadata);
+    }
+
+    sqlite3_finalize(stmt);
+    return results;
+}
+
+bool SubscriptionManager::CreateManualTask(const std::wstring& jobPath, const std::string& taskName, const ShotMetadata& metadata)
+{
+    // Create a unique path for the manual task using job path + task name
+    uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    // Convert task name to wide string
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, taskName.c_str(), -1, nullptr, 0);
+    std::wstring taskNameWide(wideLen - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, taskName.c_str(), -1, &taskNameWide[0], wideLen);
+
+    // Use task name in path for better display
+    std::wstring taskPath = jobPath + L"/__task_" + taskNameWide;
+
+    ShotMetadata taskMetadata = metadata;
+    taskMetadata.shotPath = taskPath;
+    taskMetadata.itemType = "manual_task";
+    taskMetadata.folderType = "ae";  // Use AE folder type for colors and dropdowns
+    taskMetadata.createdTime = timestamp;
+    taskMetadata.modifiedTime = timestamp;
+    taskMetadata.isTracked = true;  // Manual tasks are always tracked
+
+    return CreateOrUpdateShotMetadata(taskMetadata);
+}
+
+bool SubscriptionManager::DeleteManualTask(int taskId)
+{
+    const char* sql = "DELETE FROM shot_metadata WHERE id = ?;";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "Failed to prepare delete manual task: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, taskId);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE)
+    {
+        std::cerr << "Failed to delete manual task: " << sqlite3_errmsg(m_db) << std::endl;
+        return false;
+    }
+
+    return true;
 }
 
 } // namespace UFB

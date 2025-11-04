@@ -28,6 +28,12 @@
 #include "sync_manager.h"
 #include "bookmark_manager.h"
 #include "subscription_panel.h"
+#include "transcode_queue_panel.h"
+#include "project_config.h"
+#include "shot_view.h"
+#include "assets_view.h"
+#include "postings_view.h"
+#include "project_tracker_view.h"
 #include "utils.h"
 
 using json = nlohmann::json;
@@ -54,6 +60,34 @@ struct WindowState {
     bool maximized = false;
 };
 WindowState window_state;
+
+// Shot view persistence
+struct ShotViewData {
+    std::wstring categoryPath;
+    std::wstring categoryName;
+};
+std::vector<ShotViewData> saved_shot_views;
+
+// Assets view persistence
+struct AssetsViewData {
+    std::wstring assetsFolderPath;
+    std::wstring jobName;
+};
+std::vector<AssetsViewData> saved_assets_views;
+
+// Postings view persistence
+struct PostingsViewData {
+    std::wstring postingsFolderPath;
+    std::wstring jobName;
+};
+std::vector<PostingsViewData> saved_postings_views;
+
+// Project tracker view persistence
+struct TrackerViewData {
+    std::wstring jobPath;
+    std::wstring jobName;
+};
+std::vector<TrackerViewData> saved_tracker_views;
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -225,7 +259,11 @@ WindowState GetCurrentWindowState(GLFWwindow* window) {
     return state;
 }
 
-void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1, bool showBrowser2) {
+void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1, bool showBrowser2, bool showTranscodeQueue,
+                  const std::vector<std::unique_ptr<ShotView>>& shotViews,
+                  const std::vector<std::unique_ptr<AssetsView>>& assetsViews,
+                  const std::vector<std::unique_ptr<PostingsView>>& postingsViews,
+                  const std::vector<std::unique_ptr<ProjectTrackerView>>& trackerViews) {
     try {
         json j;
 
@@ -248,7 +286,52 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
         j["panels"]["show_subscriptions"] = showSubscriptions;
         j["panels"]["show_browser1"] = showBrowser1;
         j["panels"]["show_browser2"] = showBrowser2;
+        j["panels"]["show_transcode_queue"] = showTranscodeQueue;
         j["panels"]["use_windows_accent"] = use_windows_accent_color;
+
+        // Save open shot views (category path and name)
+        j["shot_views"] = json::array();
+        for (const auto& shotView : shotViews) {
+            if (shotView) {
+                json shotViewData;
+                shotViewData["category_path"] = UFB::WideToUtf8(shotView->GetCategoryPath());
+                shotViewData["category_name"] = UFB::WideToUtf8(shotView->GetCategoryName());
+                j["shot_views"].push_back(shotViewData);
+            }
+        }
+
+        // Save open assets views
+        j["assets_views"] = json::array();
+        for (const auto& assetsView : assetsViews) {
+            if (assetsView) {
+                json assetsViewData;
+                assetsViewData["folder_path"] = UFB::WideToUtf8(assetsView->GetAssetsFolderPath());
+                assetsViewData["job_name"] = UFB::WideToUtf8(assetsView->GetJobName());
+                j["assets_views"].push_back(assetsViewData);
+            }
+        }
+
+        // Save open postings views
+        j["postings_views"] = json::array();
+        for (const auto& postingsView : postingsViews) {
+            if (postingsView) {
+                json postingsViewData;
+                postingsViewData["folder_path"] = UFB::WideToUtf8(postingsView->GetPostingsFolderPath());
+                postingsViewData["job_name"] = UFB::WideToUtf8(postingsView->GetJobName());
+                j["postings_views"].push_back(postingsViewData);
+            }
+        }
+
+        // Save open tracker views
+        j["tracker_views"] = json::array();
+        for (const auto& trackerView : trackerViews) {
+            if (trackerView) {
+                json trackerViewData;
+                trackerViewData["job_path"] = UFB::WideToUtf8(trackerView->GetJobPath());
+                trackerViewData["job_name"] = UFB::WideToUtf8(trackerView->GetJobName());
+                j["tracker_views"].push_back(trackerViewData);
+            }
+        }
 
         // Write to file
         std::string settings_path = GetSettingsPath();
@@ -264,7 +347,7 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
     }
 }
 
-void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser2) {
+void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser2, bool& showTranscodeQueue) {
     try {
         std::string settings_path = GetSettingsPath();
         std::ifstream file(settings_path);
@@ -306,7 +389,75 @@ void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser
             showSubscriptions = j["panels"].value("show_subscriptions", true);
             showBrowser1 = j["panels"].value("show_browser1", true);
             showBrowser2 = j["panels"].value("show_browser2", true);
+            showTranscodeQueue = j["panels"].value("show_transcode_queue", false);
             use_windows_accent_color = j["panels"].value("use_windows_accent", true);
+        }
+
+        // Load shot views
+        saved_shot_views.clear();
+        if (j.contains("shot_views") && j["shot_views"].is_array()) {
+            std::cout << "[LoadSettings] Found shot_views array with " << j["shot_views"].size() << " entries" << std::endl;
+            for (const auto& shotViewJson : j["shot_views"]) {
+                std::cout << "[LoadSettings] Processing shot view entry..." << std::endl;
+                std::cout << "[LoadSettings]   Has category_path: " << shotViewJson.contains("category_path") << std::endl;
+                std::cout << "[LoadSettings]   Has category_name: " << shotViewJson.contains("category_name") << std::endl;
+                if (shotViewJson.contains("category_path") && shotViewJson.contains("category_name")) {
+                    ShotViewData data;
+                    std::string catPath = shotViewJson["category_path"].get<std::string>();
+                    std::string catName = shotViewJson["category_name"].get<std::string>();
+                    std::cout << "[LoadSettings]   category_path: " << catPath << std::endl;
+                    std::cout << "[LoadSettings]   category_name: " << catName << std::endl;
+                    data.categoryPath = UFB::Utf8ToWide(catPath);
+                    data.categoryName = UFB::Utf8ToWide(catName);
+                    saved_shot_views.push_back(data);
+                    std::cout << "[LoadSettings]   Added to saved_shot_views" << std::endl;
+                }
+            }
+            std::cout << "Loaded " << saved_shot_views.size() << " shot view(s) to restore" << std::endl;
+        } else {
+            std::cout << "[LoadSettings] No shot_views array found in settings" << std::endl;
+        }
+
+        // Load assets views
+        saved_assets_views.clear();
+        if (j.contains("assets_views") && j["assets_views"].is_array()) {
+            for (const auto& assetsViewJson : j["assets_views"]) {
+                if (assetsViewJson.contains("folder_path") && assetsViewJson.contains("job_name")) {
+                    AssetsViewData data;
+                    data.assetsFolderPath = UFB::Utf8ToWide(assetsViewJson["folder_path"].get<std::string>());
+                    data.jobName = UFB::Utf8ToWide(assetsViewJson["job_name"].get<std::string>());
+                    saved_assets_views.push_back(data);
+                }
+            }
+            std::cout << "Loaded " << saved_assets_views.size() << " assets view(s) to restore" << std::endl;
+        }
+
+        // Load postings views
+        saved_postings_views.clear();
+        if (j.contains("postings_views") && j["postings_views"].is_array()) {
+            for (const auto& postingsViewJson : j["postings_views"]) {
+                if (postingsViewJson.contains("folder_path") && postingsViewJson.contains("job_name")) {
+                    PostingsViewData data;
+                    data.postingsFolderPath = UFB::Utf8ToWide(postingsViewJson["folder_path"].get<std::string>());
+                    data.jobName = UFB::Utf8ToWide(postingsViewJson["job_name"].get<std::string>());
+                    saved_postings_views.push_back(data);
+                }
+            }
+            std::cout << "Loaded " << saved_postings_views.size() << " postings view(s) to restore" << std::endl;
+        }
+
+        // Load tracker views
+        saved_tracker_views.clear();
+        if (j.contains("tracker_views") && j["tracker_views"].is_array()) {
+            for (const auto& trackerViewJson : j["tracker_views"]) {
+                if (trackerViewJson.contains("job_path") && trackerViewJson.contains("job_name")) {
+                    TrackerViewData data;
+                    data.jobPath = UFB::Utf8ToWide(trackerViewJson["job_path"].get<std::string>());
+                    data.jobName = UFB::Utf8ToWide(trackerViewJson["job_name"].get<std::string>());
+                    saved_tracker_views.push_back(data);
+                }
+            }
+            std::cout << "Loaded " << saved_tracker_views.size() << " tracker view(s) to restore" << std::endl;
         }
 
         std::cout << "Settings loaded from: " << settings_path << std::endl;
@@ -326,8 +477,9 @@ void SetupDefaultLayout(ImGuiID dockspace_id, const ImVec2& viewport_size) {
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace_id, viewport_size);
 
-    // Dock the Browser window to fill the entire dockspace
+    // Dock the Browser window and Transcode Queue as tabs in the same dockspace
     ImGui::DockBuilderDockWindow("Browser", dockspace_id);
+    ImGui::DockBuilderDockWindow("Transcode Queue", dockspace_id);
 
     ImGui::DockBuilderFinish(dockspace_id);
     std::cout << "Main layout setup complete" << std::endl;
@@ -445,7 +597,47 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     // Enable Windows dark mode title bar
     EnableDarkModeWindow(window);
+
+    // Load and set application icon from resources
+    HINSTANCE hInstance = GetModuleHandle(NULL);
+    HICON hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101)); // IDI_ICON1 = 101
+    if (hIcon)
+    {
+        SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+    }
 #endif
+
+    // Initialize global project template on first run
+    {
+        wchar_t localAppData[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData)))
+        {
+            std::filesystem::path ufbDir = std::filesystem::path(localAppData) / L"ufb";
+            std::filesystem::path templatePath = ufbDir / L"projectTemplate.json";
+
+            // Check if template already exists
+            if (!std::filesystem::exists(templatePath))
+            {
+                std::cout << "[Main] First run detected - initializing global project template..." << std::endl;
+
+                // Create ufb directory if it doesn't exist
+                std::filesystem::create_directories(ufbDir);
+
+                // Copy template from assets folder
+                std::filesystem::path sourceTemplate = "assets/projectTemplate.json";
+                if (std::filesystem::exists(sourceTemplate))
+                {
+                    std::filesystem::copy_file(sourceTemplate, templatePath);
+                    std::cout << "[Main] Global template initialized at: " << templatePath << std::endl;
+                }
+                else
+                {
+                    std::cerr << "[Main] Warning: Could not find assets/projectTemplate.json" << std::endl;
+                }
+            }
+        }
+    }
 
     // Initialize subscription manager
     UFB::SubscriptionManager subscriptionManager;
@@ -571,13 +763,18 @@ int main(int argc, char** argv)
     IconManager subscriptionIconManager;
     subscriptionIconManager.Initialize();
 
-    // Initialize file browsers (they will default to Desktop via Initialize())
+    // Initialize file browsers with manager dependencies
     FileBrowser fileBrowser1;
     FileBrowser fileBrowser2;
+    fileBrowser1.Initialize(&bookmarkManager, &subscriptionManager);
+    fileBrowser2.Initialize(&bookmarkManager, &subscriptionManager);
 
     // Initialize subscription panel
     UFB::SubscriptionPanel subscriptionPanel;
     subscriptionPanel.Initialize(&bookmarkManager, &subscriptionManager, &subscriptionIconManager);
+
+    // Initialize transcode queue panel
+    UFB::TranscodeQueuePanel transcodeQueuePanel;
 
     // Set up callbacks for subscription panel
     subscriptionPanel.onNavigateToPath = [&fileBrowser1](const std::wstring& path) {
@@ -592,16 +789,312 @@ int main(int argc, char** argv)
         fileBrowser2.SetCurrentDirectory(path);
     };
 
-    subscriptionPanel.onAssignJob = [&subscriptionManager](const std::wstring& path, const std::wstring& name) {
-        subscriptionManager.SubscribeToJob(path, name);
+    // Set up transcode callbacks for both file browsers
+    fileBrowser1.onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
+        transcodeQueuePanel.AddMultipleJobs(paths);
+        transcodeQueuePanel.Show();  // Automatically show the queue panel when jobs are added
+        ImGui::SetWindowFocus("Transcode Queue");  // Switch to the Transcode Queue tab
+    };
+
+    fileBrowser2.onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
+        transcodeQueuePanel.AddMultipleJobs(paths);
+        transcodeQueuePanel.Show();  // Automatically show the queue panel when jobs are added
+        ImGui::SetWindowFocus("Transcode Queue");  // Switch to the Transcode Queue tab
+    };
+
+    // Set up callbacks to open file location in browsers and switch to Browser tab
+    transcodeQueuePanel.onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
+        fileBrowser1.SetCurrentDirectory(path);
+        // Focus the Browser window to switch to that tab
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    transcodeQueuePanel.onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) {
+        fileBrowser2.SetCurrentDirectory(path);
+        // Focus the Browser window to switch to that tab
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    // Shot views management
+    std::vector<std::unique_ptr<ShotView>> shotViews;
+
+    // Assets views management
+    std::vector<std::unique_ptr<AssetsView>> assetsViews;
+
+    // Postings views management
+    std::vector<std::unique_ptr<PostingsView>> postingsViews;
+
+    // Project tracker views management
+    std::vector<std::unique_ptr<ProjectTrackerView>> trackerViews;
+
+    // Set up shot view callbacks for both file browsers
+    auto openShotViewCallback = [&shotViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& categoryPath, const std::wstring& categoryName) {
+        // Check if this shot view is already open
+        for (const auto& sv : shotViews) {
+            if (sv && sv->GetCategoryPath() == categoryPath) {
+                std::wcout << L"[Main] Shot view already open for: " << categoryPath << std::endl;
+                return;
+            }
+        }
+
+        // Create new shot view
+        auto shotView = std::make_unique<ShotView>();
+        shotView->Initialize(categoryPath, categoryName, &bookmarkManager, &subscriptionManager);
+
+        // Set up close callback
+        shotView->onClose = [&shotViews, categoryPath]() {
+            // Find and remove this shot view
+            for (auto it = shotViews.begin(); it != shotViews.end(); ++it) {
+                if ((*it) && (*it)->GetCategoryPath() == categoryPath) {
+                    shotViews.erase(it);
+                    break;
+                }
+            }
+        };
+
+        // Set up "Open in Browser" callbacks and switch to Browser tab
+        shotView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
+            std::wcout << L"[ShotView] Opening in Browser 1: " << path << std::endl;
+            fileBrowser1.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+
+        shotView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) {
+            std::wcout << L"[ShotView] Opening in Browser 2: " << path << std::endl;
+            fileBrowser2.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+        std::wcout << L"[ShotView] Callbacks set for: " << categoryPath << std::endl;
+
+        // Set up transcode callback
+        shotView->onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
+            transcodeQueuePanel.AddMultipleJobs(paths);
+            transcodeQueuePanel.Show();
+            ImGui::SetWindowFocus("Transcode Queue");
+        };
+
+        shotViews.push_back(std::move(shotView));
+        std::wcout << L"[Main] Opened shot view for: " << categoryPath << std::endl;
+    };
+
+    fileBrowser1.onOpenShotView = openShotViewCallback;
+    fileBrowser2.onOpenShotView = openShotViewCallback;
+
+    // Set up assets view callbacks for both file browsers
+    auto openAssetsViewCallback = [&assetsViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& assetsFolderPath, const std::wstring& jobName) {
+        // Check if this assets view is already open
+        for (const auto& av : assetsViews) {
+            if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                std::wcout << L"[Main] Assets view already open for: " << assetsFolderPath << std::endl;
+                return;
+            }
+        }
+
+        // Create new assets view
+        auto assetsView = std::make_unique<AssetsView>();
+        assetsView->Initialize(assetsFolderPath, jobName, &bookmarkManager, &subscriptionManager);
+
+        // Set up close callback
+        assetsView->onClose = [&assetsViews, assetsFolderPath]() {
+            for (auto it = assetsViews.begin(); it != assetsViews.end(); ++it) {
+                if ((*it) && (*it)->GetAssetsFolderPath() == assetsFolderPath) {
+                    assetsViews.erase(it);
+                    break;
+                }
+            }
+        };
+
+        // Set up browser callbacks
+        assetsView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
+            std::wcout << L"[AssetsView] Opening in Browser 1: " << path << std::endl;
+            fileBrowser1.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+
+        assetsView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) {
+            std::wcout << L"[AssetsView] Opening in Browser 2: " << path << std::endl;
+            fileBrowser2.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+
+        // Set up transcode callback
+        assetsView->onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
+            std::wcout << L"[Main] AssetsView transcode callback received " << paths.size() << L" files" << std::endl;
+            for (const auto& path : paths) {
+                std::wcout << L"  - " << path << std::endl;
+            }
+            transcodeQueuePanel.AddMultipleJobs(paths);
+            transcodeQueuePanel.Show();
+            ImGui::SetWindowFocus("Transcode Queue");
+        };
+
+        assetsViews.push_back(std::move(assetsView));
+        std::wcout << L"[Main] Opened assets view for: " << assetsFolderPath << std::endl;
+    };
+
+    fileBrowser1.onOpenAssetsView = openAssetsViewCallback;
+    fileBrowser2.onOpenAssetsView = openAssetsViewCallback;
+
+    // Set up postings view callbacks for both file browsers
+    auto openPostingsViewCallback = [&postingsViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& postingsFolderPath, const std::wstring& jobName) {
+        // Check if this postings view is already open
+        for (const auto& pv : postingsViews) {
+            if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                std::wcout << L"[Main] Postings view already open for: " << postingsFolderPath << std::endl;
+                return;
+            }
+        }
+
+        // Create new postings view
+        auto postingsView = std::make_unique<PostingsView>();
+        postingsView->Initialize(postingsFolderPath, jobName, &bookmarkManager, &subscriptionManager);
+
+        // Set up close callback
+        postingsView->onClose = [&postingsViews, postingsFolderPath]() {
+            for (auto it = postingsViews.begin(); it != postingsViews.end(); ++it) {
+                if ((*it) && (*it)->GetPostingsFolderPath() == postingsFolderPath) {
+                    postingsViews.erase(it);
+                    break;
+                }
+            }
+        };
+
+        // Set up browser callbacks
+        postingsView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
+            std::wcout << L"[PostingsView] Opening in Browser 1: " << path << std::endl;
+            fileBrowser1.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+
+        postingsView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) {
+            std::wcout << L"[PostingsView] Opening in Browser 2: " << path << std::endl;
+            fileBrowser2.SetCurrentDirectory(path);
+            ImGui::SetWindowFocus("Browser");
+        };
+
+        // Set up transcode callback
+        postingsView->onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
+            transcodeQueuePanel.AddMultipleJobs(paths);
+            transcodeQueuePanel.Show();
+            ImGui::SetWindowFocus("Transcode Queue");
+        };
+
+        postingsViews.push_back(std::move(postingsView));
+        std::wcout << L"[Main] Opened postings view for: " << postingsFolderPath << std::endl;
+    };
+
+    fileBrowser1.onOpenPostingsView = openPostingsViewCallback;
+    fileBrowser2.onOpenPostingsView = openPostingsViewCallback;
+
+    // Set up project tracker view callback for subscription panel
+    subscriptionPanel.onOpenProjectTracker = [&trackerViews, &subscriptionManager, &openShotViewCallback, &openAssetsViewCallback, &openPostingsViewCallback, &shotViews, &assetsViews, &postingsViews, hwnd](const std::wstring& jobPath, const std::wstring& jobName) {
+        // Check if this tracker view is already open
+        for (const auto& tv : trackerViews) {
+            if (tv && tv->GetJobPath() == jobPath) {
+                std::wcout << L"[Main] Tracker view already open for: " << jobPath << std::endl;
+                return;
+            }
+        }
+
+        // Create new tracker view
+        auto trackerView = std::make_unique<ProjectTrackerView>();
+        trackerView->Initialize(jobPath, jobName, &subscriptionManager, nullptr);
+
+        // Set up close callback
+        trackerView->onClose = [&trackerViews, jobPath]() {
+            for (auto it = trackerViews.begin(); it != trackerViews.end(); ++it) {
+                if ((*it) && (*it)->GetJobPath() == jobPath) {
+                    trackerViews.erase(it);
+                    break;
+                }
+            }
+        };
+
+        // Set up callbacks for opening items in their respective views
+        trackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
+            // Extract parent category path (e.g., "D:\Job\ae") from shot path (e.g., "D:\Job\ae\shot01")
+            std::filesystem::path path(shotPath);
+            std::wstring categoryPath = path.parent_path().wstring();
+            std::wstring categoryName = path.parent_path().filename().wstring();
+
+            // Open or focus the shot view for this category
+            openShotViewCallback(categoryPath, categoryName);
+
+            // Set the selected shot in the newly opened/focused view and focus the window
+            for (const auto& sv : shotViews) {
+                if (sv && sv->GetCategoryPath() == categoryPath) {
+                    sv->SetSelectedShot(shotPath);
+                    // Focus the window (window title is "JobName - CategoryName")
+                    std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        trackerView->onOpenAsset = [&openAssetsViewCallback, &assetsViews](const std::wstring& assetPath) {
+            // Extract parent folder path (e.g., "D:\Job\assets") from asset path (e.g., "D:\Job\assets\asset01")
+            std::filesystem::path path(assetPath);
+            std::wstring assetsFolderPath = path.parent_path().wstring();
+            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+
+            // Open or focus the assets view for this folder
+            openAssetsViewCallback(assetsFolderPath, jobName);
+
+            // Set the selected asset in the newly opened/focused view and focus the window
+            for (const auto& av : assetsViews) {
+                if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                    av->SetSelectedAsset(assetPath);
+                    // Focus the window (window title is "JobName - Assets")
+                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Assets";
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        trackerView->onOpenPosting = [&openPostingsViewCallback, &postingsViews](const std::wstring& postingPath) {
+            // Extract parent folder path (e.g., "D:\Job\postings") from posting path (e.g., "D:\Job\postings\posting01")
+            std::filesystem::path path(postingPath);
+            std::wstring postingsFolderPath = path.parent_path().wstring();
+            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+
+            // Open or focus the postings view for this folder
+            openPostingsViewCallback(postingsFolderPath, jobName);
+
+            // Set the selected posting in the newly opened/focused view and focus the window
+            for (const auto& pv : postingsViews) {
+                if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                    pv->SetSelectedPosting(postingPath);
+                    // Focus the window (window title is "JobName - Postings")
+                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Postings";
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        trackerViews.push_back(std::move(trackerView));
+        std::wcout << L"[Main] Opened tracker view for: " << jobPath << std::endl;
+    };
+
+    // Set up "Open in Other Browser" callbacks
+    fileBrowser1.onOpenInOtherBrowser = [&fileBrowser2](const std::wstring& path) {
+        fileBrowser2.SetCurrentDirectory(path);
+    };
+
+    fileBrowser2.onOpenInOtherBrowser = [&fileBrowser1](const std::wstring& path) {
+        fileBrowser1.SetCurrentDirectory(path);
     };
 
     // Setup GLFW drop callback for external drag-drop
     struct DropCallbackData {
         FileBrowser* browser1;
         FileBrowser* browser2;
+        std::vector<std::unique_ptr<AssetsView>>* assetsViews;
+        std::vector<std::unique_ptr<PostingsView>>* postingsViews;
     };
-    DropCallbackData dropData = { &fileBrowser1, &fileBrowser2 };
+    DropCallbackData dropData = { &fileBrowser1, &fileBrowser2, &assetsViews, &postingsViews };
     glfwSetWindowUserPointer(window, &dropData);
 
     glfwSetDropCallback(window, [](GLFWwindow* win, int count, const char** paths) {
@@ -621,26 +1114,50 @@ int main(int argc, char** argv)
         }
 
         // Use hover state to determine drop target (ImGui already handles coordinate conversion)
+        // Check browsers first
         if (data->browser2->IsHovered())
         {
             std::cout << "[Main] Drop into Browser 2" << std::endl;
             data->browser2->HandleExternalDrop(droppedPaths);
+            return;
         }
-        else if (data->browser1->IsHovered())
+        if (data->browser1->IsHovered())
         {
             std::cout << "[Main] Drop into Browser 1" << std::endl;
             data->browser1->HandleExternalDrop(droppedPaths);
+            return;
         }
-        else
-        {
-            std::cout << "[Main] Drop ignored (no target browser)" << std::endl;
+
+        // Check assets views
+        if (data->assetsViews) {
+            for (const auto& assetsView : *data->assetsViews) {
+                if (assetsView && assetsView->IsBrowserHovered()) {
+                    std::wcout << L"[Main] Drop into Assets View: " << assetsView->GetJobName() << std::endl;
+                    assetsView->HandleExternalDrop(droppedPaths);
+                    return;
+                }
+            }
         }
+
+        // Check postings views
+        if (data->postingsViews) {
+            for (const auto& postingsView : *data->postingsViews) {
+                if (postingsView && postingsView->IsBrowserHovered()) {
+                    std::wcout << L"[Main] Drop into Postings View: " << postingsView->GetJobName() << std::endl;
+                    postingsView->HandleExternalDrop(droppedPaths);
+                    return;
+                }
+            }
+        }
+
+        std::cout << "[Main] Drop ignored (no target browser)" << std::endl;
     });
 
     // Load settings BEFORE creating window so we can use saved dimensions
     // Note: Individual panel toggles no longer used - all panels always shown
     bool unused1 = true, unused2 = true, unused3 = true;  // Temporary for compatibility
-    LoadSettings(unused1, unused2, unused3);
+    bool showTranscodeQueue = false;
+    LoadSettings(unused1, unused2, unused3, showTranscodeQueue);
 
     // Apply saved window size
     glfwSetWindowSize(window, window_state.width, window_state.height);
@@ -653,6 +1170,13 @@ int main(int argc, char** argv)
     // Apply maximized state
     if (window_state.maximized) {
         glfwMaximizeWindow(window);
+    }
+
+    // Apply transcode queue panel visibility state BEFORE loading layout
+    // This ensures ImGui can properly restore which tab was active
+    if (showTranscodeQueue) {
+        transcodeQueuePanel.Show();
+        std::cout << "Restored Transcode Queue panel visibility" << std::endl;
     }
 
     // Load saved ImGui layout if we have one
@@ -668,6 +1192,64 @@ int main(int argc, char** argv)
             saved_imgui_layout.clear();
         }
     }
+
+    // Restore saved shot views after loading settings
+    std::cout << "[Main] Restoring " << saved_shot_views.size() << " saved shot view(s)..." << std::endl;
+    for (const auto& savedShotView : saved_shot_views) {
+        std::wcout << L"[Main] Checking shot view: " << savedShotView.categoryName << std::endl;
+        // Check if the category path still exists
+        if (std::filesystem::exists(savedShotView.categoryPath)) {
+            std::wcout << L"[Main] Path exists, restoring..." << std::endl;
+            openShotViewCallback(savedShotView.categoryPath, savedShotView.categoryName);
+            std::wcout << L"[Main] Restored shot view: " << savedShotView.categoryName
+                       << L" (" << savedShotView.categoryPath << L")" << std::endl;
+        } else {
+            std::wcout << L"[Main] Skipping shot view (path no longer exists): "
+                       << savedShotView.categoryPath << std::endl;
+        }
+    }
+
+    // Restore saved assets views
+    std::cout << "[Main] Restoring " << saved_assets_views.size() << " saved assets view(s)..." << std::endl;
+    for (const auto& savedAssetsView : saved_assets_views) {
+        if (std::filesystem::exists(savedAssetsView.assetsFolderPath)) {
+            openAssetsViewCallback(savedAssetsView.assetsFolderPath, savedAssetsView.jobName);
+            std::wcout << L"[Main] Restored assets view: " << savedAssetsView.jobName
+                       << L" - Assets (" << savedAssetsView.assetsFolderPath << L")" << std::endl;
+        } else {
+            std::wcout << L"[Main] Skipping assets view (path no longer exists): "
+                       << savedAssetsView.assetsFolderPath << std::endl;
+        }
+    }
+
+    // Restore saved postings views
+    std::cout << "[Main] Restoring " << saved_postings_views.size() << " saved postings view(s)..." << std::endl;
+    for (const auto& savedPostingsView : saved_postings_views) {
+        if (std::filesystem::exists(savedPostingsView.postingsFolderPath)) {
+            openPostingsViewCallback(savedPostingsView.postingsFolderPath, savedPostingsView.jobName);
+            std::wcout << L"[Main] Restored postings view: " << savedPostingsView.jobName
+                       << L" - Postings (" << savedPostingsView.postingsFolderPath << L")" << std::endl;
+        } else {
+            std::wcout << L"[Main] Skipping postings view (path no longer exists): "
+                       << savedPostingsView.postingsFolderPath << std::endl;
+        }
+    }
+
+    // Restore saved tracker views
+    std::cout << "[Main] Restoring " << saved_tracker_views.size() << " saved tracker view(s)..." << std::endl;
+    for (const auto& savedTrackerView : saved_tracker_views) {
+        if (std::filesystem::exists(savedTrackerView.jobPath)) {
+            subscriptionPanel.onOpenProjectTracker(savedTrackerView.jobPath, savedTrackerView.jobName);
+            std::wcout << L"[Main] Restored tracker view: " << savedTrackerView.jobName
+                       << L" - Tracker (" << savedTrackerView.jobPath << L")" << std::endl;
+        } else {
+            std::wcout << L"[Main] Skipping tracker view (path no longer exists): "
+                       << savedTrackerView.jobPath << std::endl;
+        }
+    }
+
+    // Track if we need to focus Browser on first frame
+    bool needsInitialBrowserFocus = true;
 
     // Main loop
     ImVec4 clear_color = ImVec4(0.128f, 0.128f, 0.128f, 1.00f);
@@ -723,6 +1305,11 @@ int main(int argc, char** argv)
                     // Toggle for all browsers - static variable shared across instances
                 }
                 ImGui::Separator();
+                bool transcodeQueueOpen = transcodeQueuePanel.IsOpen();
+                if (ImGui::MenuItem("Transcode Queue", nullptr, &transcodeQueueOpen)) {
+                    transcodeQueuePanel.Toggle();
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Windows Accent Color", nullptr, use_windows_accent_color)) {
                     use_windows_accent_color = !use_windows_accent_color;
                     SetupImGuiStyle(); // Reapply style with new accent color
@@ -732,7 +1319,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.1", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.2", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -811,6 +1398,72 @@ int main(int argc, char** argv)
 
         ImGui::End();
 
+        // Transcode Queue Panel (dockable window)
+        transcodeQueuePanel.Update();  // Process jobs
+
+        // Dock into main dockspace on first use
+        ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+        transcodeQueuePanel.Render();  // Render UI
+
+        // Render all shot views (dockable windows)
+        for (size_t i = 0; i < shotViews.size(); ++i) {
+            if (shotViews[i]) {
+                // Format: "JobName - CategoryName" (e.g., "000000_OH - ae")
+                std::string windowTitle = UFB::WideToUtf8(shotViews[i]->GetJobName()) + " - " + UFB::WideToUtf8(shotViews[i]->GetCategoryName());
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                shotViews[i]->Draw(windowTitle.c_str(), hwnd);
+            }
+        }
+
+        // Render all assets views (dockable windows)
+        for (size_t i = 0; i < assetsViews.size(); ++i) {
+            if (assetsViews[i]) {
+                // Format: "JobName - Assets" (e.g., "MyJob - Assets")
+                std::string windowTitle = UFB::WideToUtf8(assetsViews[i]->GetJobName()) + " - Assets";
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                assetsViews[i]->Draw(windowTitle.c_str(), hwnd);
+            }
+        }
+
+        // Render all postings views (dockable windows)
+        for (size_t i = 0; i < postingsViews.size(); ++i) {
+            if (postingsViews[i]) {
+                // Format: "JobName - Postings" (e.g., "MyJob - Postings")
+                std::string windowTitle = UFB::WideToUtf8(postingsViews[i]->GetJobName()) + " - Postings";
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                postingsViews[i]->Draw(windowTitle.c_str(), hwnd);
+            }
+        }
+
+        // Render all tracker views (dockable windows)
+        for (size_t i = 0; i < trackerViews.size(); ++i) {
+            if (trackerViews[i]) {
+                // Format: "JobName - Tracker" (e.g., "MyJob - Tracker")
+                std::string windowTitle = UFB::WideToUtf8(trackerViews[i]->GetJobName()) + " - Tracker";
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                trackerViews[i]->Draw(windowTitle.c_str(), hwnd);
+            }
+        }
+
+        // Always focus Browser tab on first frame
+        if (needsInitialBrowserFocus) {
+            ImGui::SetWindowFocus("Browser");
+            needsInitialBrowserFocus = false;
+        }
+
         // Rendering
         ImGui::Render();
         int display_w, display_h;
@@ -834,8 +1487,8 @@ int main(int argc, char** argv)
     }
 
     // Save settings before cleanup
-    // Save settings (panel toggles no longer used - all panels in Projects window)
-    SaveSettings(window, true, true, true);
+    // Save settings including transcode queue panel state and open views
+    SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(), shotViews, assetsViews, postingsViews, trackerViews);
 
     // Cleanup
     try

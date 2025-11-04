@@ -11,6 +11,7 @@
 #include "metadata_manager.h"
 #include "subscription_manager.h"
 #include "backup_manager.h"
+#include "project_config.h"
 
 namespace UFB {
 
@@ -86,6 +87,10 @@ private:
     uint64_t GetLastSyncTime(const std::wstring& jobPath);
     void UpdateSyncTime(const std::wstring& jobPath, uint64_t timestamp);
     void RefreshActiveJobs();
+
+    // Shot metadata discovery
+    void DiscoverAndTrackShots(const std::wstring& jobPath);
+    void DiscoverShotsInCategory(const std::wstring& categoryPath, const std::string& folderType, const ProjectConfig& config);
 };
 
 } // namespace UFB
