@@ -46,6 +46,9 @@ public:
     // Get the current directory
     const std::wstring& GetCurrentDirectory() const { return m_currentDirectory; }
 
+    // Check if window is open (for cleanup of closed windows)
+    bool IsOpen() const { return m_isOpen; }
+
     // Handle external drag-drop from Windows Explorer
     void HandleExternalDrop(const std::vector<std::wstring>& droppedPaths);
 
@@ -72,6 +75,9 @@ public:
 
     // Callback for opening path in other browser
     std::function<void(const std::wstring& path)> onOpenInOtherBrowser;
+
+    // Callback for opening path in new standalone browser window
+    std::function<void(const std::wstring& path)> onOpenInNewWindow;
 
     // Callbacks for opening path in Browser 1 or Browser 2 (used in specialized views)
     std::function<void(const std::wstring& path)> onOpenInBrowser1;
@@ -211,6 +217,20 @@ private:
 
     // File extension filter (multi-selection)
     std::set<std::wstring> m_filterExtensions;  // Empty = show all, can contain multiple extensions and/or "[folders]"
+
+    // Search state
+    bool m_isSearchMode = false;                    // True when showing search results
+    char m_searchQuery[256] = {};                   // Current search query
+    std::wstring m_preSearchDirectory;              // Directory before search (to return to)
+    int m_searchResultCount = 0;                    // Number of search results found
+
+    // Search helper methods
+    void ExecuteSearch(const std::string& query);   // Execute es.exe and populate results
+    void ExitSearchMode();                          // Return to pre-search directory
+    void ShowInBrowser(const std::wstring& filePath); // Navigate to file's parent directory and select it
+
+    // Window open state (for close button)
+    bool m_isOpen = true;
 
     // External drag-drop state
     bool m_isHovered = false;

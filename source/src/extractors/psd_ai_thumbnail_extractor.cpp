@@ -19,7 +19,16 @@ PsdAiThumbnailExtractor::PsdAiThumbnailExtractor()
         L".eps",    // Encapsulated PostScript
         L".pdf",    // PDF documents
         L".hdr",    // Radiance HDR
-        L".pic"     // Softimage PIC
+        L".pic",    // Softimage PIC
+        L".webp",   // WebP
+        L".avif",   // AVIF
+        L".heic",   // HEIC (same decoder as AVIF)
+        L".heif",   // HEIF (same decoder as AVIF)
+        L".jxl",    // JPEG XL
+        L".jp2",    // JPEG 2000
+        L".j2k",    // JPEG 2000 codestream
+        L".jpf",    // JPEG 2000
+        L".jpx"     // JPEG 2000 extended
     };
 
     // Get paths to external tools (relative to executable)
@@ -71,25 +80,23 @@ HBITMAP PsdAiThumbnailExtractor::Extract(const std::wstring& path, int size)
         return nullptr;
     }
 
-    // Lock mutex to serialize PDF/AI extractions (prevents concurrent Ghostscript/ImageMagick processes)
-    // This prevents 4 threads from each spawning 4GB Ghostscript processes simultaneously
+    // Lock mutex to serialize extractions (prevents concurrent Ghostscript/ImageMagick processes)
+    // This prevents 4 threads from each spawning heavy processes simultaneously
     std::lock_guard<std::mutex> lock(s_extractionMutex);
 
-    if (ext == L".psd" || ext == L".hdr" || ext == L".pic")
-    {
-        // Use ImageMagick for PSD, HDR, and PIC formats
-        return ExtractPSD(path, size);
-    }
-    else if (ext == L".ai" || ext == L".eps" || ext == L".pdf")
+    if (ext == L".ai" || ext == L".eps" || ext == L".pdf")
     {
         // Use Ghostscript for vector/PDF formats
         return ExtractAI(path, size);
     }
-
-    return nullptr;
+    else
+    {
+        // Use ImageMagick for all other formats (PSD, HDR, PIC, WebP, AVIF, HEIC, HEIF, JXL, JP2)
+        return ExtractWithMagick(path, size);
+    }
 }
 
-HBITMAP PsdAiThumbnailExtractor::ExtractPSD(const std::wstring& path, int size)
+HBITMAP PsdAiThumbnailExtractor::ExtractWithMagick(const std::wstring& path, int size)
 {
     // Create temp output path with unique filename (process + thread + tick count)
     wchar_t tempPath[MAX_PATH];
@@ -97,10 +104,12 @@ HBITMAP PsdAiThumbnailExtractor::ExtractPSD(const std::wstring& path, int size)
     std::wstring uniqueId = std::to_wstring(GetCurrentProcessId()) + L"_" +
                             std::to_wstring(GetCurrentThreadId()) + L"_" +
                             std::to_wstring(GetTickCount64());
-    std::wstring outputPath = std::wstring(tempPath) + L"psd_thumb_" + uniqueId + L".png";
+    std::wstring outputPath = std::wstring(tempPath) + L"magick_thumb_" + uniqueId + L".png";
 
     // Build ImageMagick command
-    // magick "input.psd[0]" -resize 256x256 -background white -flatten output.png
+    // For multi-page formats (PSD, TIFF), use [0] to get first page/layer
+    // For single-page formats (WebP, AVIF, JXL, JP2), [0] is harmless
+    // magick "input[0]" -resize 256x256 -background white -flatten output.png
     std::wstring args = L"\"" + path + L"[0]\" -resize " + std::to_wstring(size) + L"x" + std::to_wstring(size) +
                         L" -background white -flatten \"" + outputPath + L"\"";
 

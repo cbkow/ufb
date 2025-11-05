@@ -406,10 +406,7 @@ void ProjectTrackerView::DrawItemsTable(const char* tableName, const char* itemT
                 else
                 {
                     // For shots/assets/postings: Open and Un-track options
-                    const char* openLabel = (item.itemType == "shot") ? "Open Shot" :
-                                           (item.itemType == "asset") ? "Open Asset" : "Open Posting";
-
-                    if (ImGui::MenuItem(openLabel))
+                    if (ImGui::MenuItem("Open in Window"))
                     {
                         // Call the appropriate callback based on item type
                         if (item.itemType == "shot" && onOpenShot)

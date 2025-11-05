@@ -4,6 +4,7 @@
 #include <vector>
 #include <optional>
 #include <filesystem>
+#include <memory>
 #include <sqlite3.h>
 
 namespace UFB {

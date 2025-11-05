@@ -5,7 +5,7 @@
 #include <string>
 #include <mutex>
 
-// PSD and AI thumbnail extractor using ImageMagick and Ghostscript
+// PSD, AI, WebP, AVIF, JXL, JP2 thumbnail extractor using ImageMagick and Ghostscript
 class PsdAiThumbnailExtractor : public ThumbnailExtractorInterface
 {
 public:
@@ -21,7 +21,7 @@ public:
     // Check if this extractor can handle the file extension
     bool CanHandle(const std::wstring& extension) override;
 
-    // Extract thumbnail from PSD/AI file
+    // Extract thumbnail from supported file formats
     HBITMAP Extract(const std::wstring& path, int size) override;
 
 private:
@@ -32,13 +32,13 @@ private:
     std::wstring m_magickPath;
     std::wstring m_ghostscriptPath;
 
-    // Static mutex to limit concurrent PDF/AI extractions (prevents memory exhaustion)
+    // Static mutex to limit concurrent extractions (prevents memory exhaustion)
     static std::mutex s_extractionMutex;
 
-    // Extract PSD using ImageMagick
-    HBITMAP ExtractPSD(const std::wstring& path, int size);
+    // Extract using ImageMagick (PSD, HDR, PIC, WebP, AVIF, JXL, JP2)
+    HBITMAP ExtractWithMagick(const std::wstring& path, int size);
 
-    // Extract AI using Ghostscript
+    // Extract AI/EPS/PDF using Ghostscript
     HBITMAP ExtractAI(const std::wstring& path, int size);
 
     // Run command and wait for completion

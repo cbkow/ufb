@@ -157,13 +157,6 @@ void SubscriptionPanel::DrawBookmarksSection()
                     ImGui::EndPopup();
                 }
 
-                // Tooltip with full path
-                if (ImGui::IsItemHovered())
-                {
-                    std::string path = WideToUtf8(bookmark.path);
-                    ImGui::SetTooltip("%s", path.c_str());
-                }
-
                 ImGui::PopID();
             }
         }

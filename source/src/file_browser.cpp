@@ -145,7 +145,7 @@ void FileBrowser::Draw(const char* title, HWND hwnd, bool withWindow)
     ImGui::PushID(this);
 
     if (withWindow)
-        ImGui::Begin(title);
+        ImGui::Begin(title, &m_isOpen);
 
     // Track hover state and window bounds for external drag-drop
     m_isHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
@@ -322,6 +322,13 @@ void FileBrowser::NavigateTo(const std::wstring& path)
 
 void FileBrowser::NavigateBack()
 {
+    // If in search mode, exit search first (which returns to pre-search directory)
+    if (m_isSearchMode)
+    {
+        ExitSearchMode();
+        return;
+    }
+
     if (m_backHistory.empty())
         return;
 
@@ -741,6 +748,16 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
         ImGui::TextDisabled("%s", nameUtf8);
         ImGui::Separator();
 
+        // Show in Browser (only in search mode)
+        if (m_isSearchMode)
+        {
+            if (ImGui::MenuItem("Show in Browser"))
+            {
+                ShowInBrowser(entry.fullPath);
+            }
+            ImGui::Separator();
+        }
+
         // Copy (file operation)
         if (ImGui::MenuItem("Copy"))
         {
@@ -830,6 +847,17 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
             if (ImGui::MenuItem("Open in Other Browser"))
             {
                 onOpenInOtherBrowser(entry.fullPath);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Open in New Window
+        if (onOpenInNewWindow)
+        {
+            if (ImGui::MenuItem("Open in New Window"))
+            {
+                std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
+                onOpenInNewWindow(pathToOpen);
                 ImGui::CloseCurrentPopup();
             }
         }
@@ -1212,7 +1240,8 @@ void FileBrowser::DrawNavigationBar()
     }
 
     // Back button (arrow left)
-    bool canGoBack = !m_backHistory.empty();
+    // Enable back button if we have history OR if we're in search mode
+    bool canGoBack = !m_backHistory.empty() || m_isSearchMode;
     if (!canGoBack)
         ImGui::BeginDisabled();
 
@@ -1400,6 +1429,29 @@ void FileBrowser::DrawNavigationBar()
         ImGui::EndPopup();
     }
 
+    ImGui::SameLine();
+
+    // Search input box
+    ImGui::SetNextItemWidth(200.0f);
+    if (ImGui::InputTextWithHint("##search", "Search...", m_searchQuery, sizeof(m_searchQuery), ImGuiInputTextFlags_EnterReturnsTrue))
+    {
+        // User pressed Enter - execute search
+        if (strlen(m_searchQuery) > 0)
+        {
+            ExecuteSearch(m_searchQuery);
+        }
+    }
+
+    // Exit Search button (only visible in search mode)
+    if (m_isSearchMode)
+    {
+        ImGui::SameLine();
+        if (ImGui::Button("Exit Search"))
+        {
+            ExitSearchMode();
+        }
+    }
+
     // Spacer, separator, spacer
     ImGui::SameLine();
     ImGui::Spacing();
@@ -1444,6 +1496,50 @@ void FileBrowser::DrawNavigationBar()
 
 void FileBrowser::DrawFileList(HWND hwnd)
 {
+    // Show search results banner if in search mode
+    if (m_isSearchMode)
+    {
+        ImVec4 bgColor = (m_searchResultCount == 0)
+            ? ImVec4(0.4f, 0.2f, 0.2f, 0.3f)  // Reddish for no results
+            : ImVec4(0.2f, 0.3f, 0.4f, 0.3f); // Blueish for results
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, bgColor);
+        ImGui::BeginChild("SearchBanner", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * (m_searchResultCount == 0 ? 2.5f : 1.5f)), true);
+
+        ImVec4 accentColor = GetAccentColor();
+        ImGui::PushStyleColor(ImGuiCol_Text, accentColor);
+
+        char bannerText[512];
+        if (m_searchResultCount == 0)
+        {
+            snprintf(bannerText, sizeof(bannerText), "Search Mode: No results found for \"%s\" in %s",
+                     m_searchQuery, UFB::WideToUtf8(m_preSearchDirectory).c_str());
+            ImGui::TextWrapped("%s", bannerText);
+
+            // Check if network path
+            if (m_preSearchDirectory.size() >= 2 && m_preSearchDirectory[0] == L'\\' && m_preSearchDirectory[1] == L'\\')
+            {
+                ImGui::TextDisabled("Note: Everything may not index network drives. Add this path in Everything settings to enable search.");
+            }
+            else
+            {
+                ImGui::TextDisabled("Possible causes: 1) Everything hasn't indexed this folder, 2) Folder is excluded in Everything settings,");
+                ImGui::TextDisabled("3) Cloud sync/junction point - check Everything > Options > Indexes > NTFS > 'Index folder junctions'");
+            }
+        }
+        else
+        {
+            snprintf(bannerText, sizeof(bannerText), "Search Mode: Found %d result%s for \"%s\" in %s",
+                     m_searchResultCount, (m_searchResultCount == 1 ? "" : "s"),
+                     m_searchQuery, UFB::WideToUtf8(m_preSearchDirectory).c_str());
+            ImGui::TextWrapped("%s", bannerText);
+        }
+
+        ImGui::PopStyleColor();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
     // Process completed thumbnails from background threads (convert HBITMAP to GL textures)
     m_thumbnailManager.ProcessCompletedThumbnails();
 
@@ -3131,5 +3227,218 @@ bool FileBrowser::CreateTimeFolder()
     {
         std::cerr << "[FileBrowser] Error creating time folder: " << e.what() << std::endl;
         return false;
+    }
+}
+
+void FileBrowser::ExecuteSearch(const std::string& query)
+{
+    if (query.empty())
+        return;
+
+    std::cout << "[FileBrowser] Executing search for: " << query << std::endl;
+
+    // Save current directory to return to later
+    m_preSearchDirectory = m_currentDirectory;
+
+    // Add current directory to back history so user can navigate back
+    if (!m_currentDirectory.empty())
+    {
+        m_backHistory.push_back(m_currentDirectory);
+        // Clear forward history when entering search (similar to navigating to new location)
+        m_forwardHistory.clear();
+    }
+
+    // Build es.exe command
+    // Use -path to limit search to current directory recursively
+    // Use -csv for easy parsing
+    std::string pathUtf8 = UFB::WideToUtf8(m_currentDirectory);
+    std::string command = "es.exe \"" + query + "\" -path \"" + pathUtf8 + "\" -csv -n 1000";
+
+    std::cout << "[FileBrowser] Command: " << command << std::endl;
+
+    // Execute command and capture output
+    std::string output;
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+    HANDLE hRead, hWrite;
+
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+    {
+        std::cerr << "[FileBrowser] Failed to create pipe" << std::endl;
+        return;
+    }
+
+    STARTUPINFOA si = { sizeof(STARTUPINFOA) };
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi;
+
+    if (CreateProcessA(NULL, const_cast<char*>(command.c_str()), NULL, NULL, TRUE,
+                       0, NULL, NULL, &si, &pi))
+    {
+        CloseHandle(hWrite);
+
+        // Read output
+        char buffer[4096];
+        DWORD bytesRead;
+
+        while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0)
+        {
+            buffer[bytesRead] = '\0';
+            output += buffer;
+        }
+
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseHandle(hRead);
+    }
+    else
+    {
+        CloseHandle(hWrite);
+        CloseHandle(hRead);
+        std::cerr << "[FileBrowser] Failed to execute es.exe" << std::endl;
+        return;
+    }
+
+    // Parse CSV output (format: Filename)
+    // First line is header, skip it
+    m_files.clear();
+    std::istringstream stream(output);
+    std::string line;
+    bool firstLine = true;
+
+    std::cout << "[FileBrowser] Raw output length: " << output.length() << " bytes" << std::endl;
+
+    while (std::getline(stream, line))
+    {
+        // Remove trailing carriage return if present (Windows line endings)
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        if (firstLine)
+        {
+            firstLine = false;
+            continue;  // Skip header
+        }
+
+        if (line.empty())
+            continue;
+
+        // Remove quotes if present
+        if (!line.empty() && line.front() == '\"' && line.back() == '\"')
+        {
+            line = line.substr(1, line.length() - 2);
+        }
+
+        std::cout << "[FileBrowser] Processing line: " << line << std::endl;
+
+        // Convert to wstring
+        int wchars_num = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, NULL, 0);
+        std::wstring wpath(wchars_num, 0);
+        MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, &wpath[0], wchars_num);
+        wpath.resize(wchars_num - 1);  // Remove null terminator
+
+        // Create FileEntry
+        try
+        {
+            if (std::filesystem::exists(wpath))
+            {
+                FileEntry entry;
+                entry.fullPath = wpath;
+                entry.name = std::filesystem::path(wpath).filename().wstring();
+                entry.isDirectory = std::filesystem::is_directory(wpath);
+                entry.size = entry.isDirectory ? 0 : std::filesystem::file_size(wpath);
+                entry.lastModified = std::filesystem::last_write_time(wpath);
+
+                m_files.push_back(entry);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[FileBrowser] Error processing file: " << e.what() << std::endl;
+        }
+    }
+
+    // Update search state
+    m_isSearchMode = true;
+    m_searchResultCount = static_cast<int>(m_files.size());
+    m_selectedIndices.clear();
+
+    // Sort results
+    SortFileList();
+
+    std::cout << "[FileBrowser] Search completed: " << m_searchResultCount << " results" << std::endl;
+
+    // Check if searching on network drive and warn user
+    if (m_searchResultCount == 0 && m_preSearchDirectory.size() >= 2)
+    {
+        // Check if it's a network path (starts with \\ or is mapped drive pointing to network)
+        if (m_preSearchDirectory[0] == L'\\' && m_preSearchDirectory[1] == L'\\')
+        {
+            std::cerr << "[FileBrowser] Warning: Searching on network path. Everything may not index network drives by default." << std::endl;
+            std::cerr << "[FileBrowser] Network path: " << UFB::WideToUtf8(m_preSearchDirectory) << std::endl;
+        }
+    }
+}
+
+void FileBrowser::ExitSearchMode()
+{
+    std::cout << "[FileBrowser] Exiting search mode" << std::endl;
+
+    m_isSearchMode = false;
+    m_searchResultCount = 0;
+    m_searchQuery[0] = '\0';  // Clear search query
+
+    // Return to pre-search directory
+    if (!m_preSearchDirectory.empty())
+    {
+        SetCurrentDirectory(m_preSearchDirectory);
+        m_preSearchDirectory.clear();
+    }
+    else
+    {
+        // Fallback: just refresh current directory
+        RefreshFileList();
+    }
+}
+
+void FileBrowser::ShowInBrowser(const std::wstring& filePath)
+{
+    std::cout << "[FileBrowser] ShowInBrowser: " << UFB::WideToUtf8(filePath) << std::endl;
+
+    try
+    {
+        std::filesystem::path path(filePath);
+
+        // Get parent directory
+        std::wstring parentDir = path.parent_path().wstring();
+
+        // Exit search mode first
+        if (m_isSearchMode)
+        {
+            ExitSearchMode();
+        }
+
+        // Navigate to parent directory
+        SetCurrentDirectory(parentDir);
+
+        // Find and select the file in the list
+        for (size_t i = 0; i < m_files.size(); ++i)
+        {
+            if (m_files[i].fullPath == filePath)
+            {
+                m_selectedIndices.clear();
+                m_selectedIndices.insert(static_cast<int>(i));
+                std::cout << "[FileBrowser] Selected file at index " << i << std::endl;
+                break;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FileBrowser] Error in ShowInBrowser: " << e.what() << std::endl;
     }
 }

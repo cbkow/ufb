@@ -15,11 +15,11 @@ WindowsShellExtractor::WindowsShellExtractor()
     // Populate supported extensions
     // Windows Shell can handle many formats, but we'll list common ones
     // Note: JPEG, PNG, TIFF are handled by ImageThumbnailExtractor for better performance
+    // Note: WebP, AVIF, JXL, JP2 are handled by PsdAiThumbnailExtractor with ImageMagick
 
-    // Images (common formats handled by ImageThumbnailExtractor: .jpg, .jpeg, .png, .tif, .tiff)
+    // Images (basic formats not handled by other extractors)
     m_supportedExtensions.insert(L".bmp");
     m_supportedExtensions.insert(L".gif");
-    m_supportedExtensions.insert(L".webp");
     m_supportedExtensions.insert(L".ico");
 
     // RAW formats (if codec installed)

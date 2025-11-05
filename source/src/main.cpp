@@ -89,6 +89,12 @@ struct TrackerViewData {
 };
 std::vector<TrackerViewData> saved_tracker_views;
 
+// Standalone browser window persistence
+struct BrowserWindowData {
+    std::wstring currentPath;
+};
+std::vector<BrowserWindowData> saved_browser_windows;
+
 static void glfw_error_callback(int error, const char* description)
 {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
@@ -263,7 +269,8 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
                   const std::vector<std::unique_ptr<ShotView>>& shotViews,
                   const std::vector<std::unique_ptr<AssetsView>>& assetsViews,
                   const std::vector<std::unique_ptr<PostingsView>>& postingsViews,
-                  const std::vector<std::unique_ptr<ProjectTrackerView>>& trackerViews) {
+                  const std::vector<std::unique_ptr<ProjectTrackerView>>& trackerViews,
+                  const std::vector<std::unique_ptr<FileBrowser>>& standaloneBrowsers) {
     try {
         json j;
 
@@ -330,6 +337,16 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
                 trackerViewData["job_path"] = UFB::WideToUtf8(trackerView->GetJobPath());
                 trackerViewData["job_name"] = UFB::WideToUtf8(trackerView->GetJobName());
                 j["tracker_views"].push_back(trackerViewData);
+            }
+        }
+
+        // Save open standalone browser windows
+        j["standalone_browsers"] = json::array();
+        for (const auto& browser : standaloneBrowsers) {
+            if (browser && browser->IsOpen()) {
+                json browserData;
+                browserData["current_path"] = UFB::WideToUtf8(browser->GetCurrentDirectory());
+                j["standalone_browsers"].push_back(browserData);
             }
         }
 
@@ -458,6 +475,19 @@ void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser
                 }
             }
             std::cout << "Loaded " << saved_tracker_views.size() << " tracker view(s) to restore" << std::endl;
+        }
+
+        // Load standalone browser windows
+        saved_browser_windows.clear();
+        if (j.contains("standalone_browsers") && j["standalone_browsers"].is_array()) {
+            for (const auto& browserJson : j["standalone_browsers"]) {
+                if (browserJson.contains("current_path")) {
+                    BrowserWindowData data;
+                    data.currentPath = UFB::Utf8ToWide(browserJson["current_path"].get<std::string>());
+                    saved_browser_windows.push_back(data);
+                }
+            }
+            std::cout << "Loaded " << saved_browser_windows.size() << " standalone browser(s) to restore" << std::endl;
         }
 
         std::cout << "Settings loaded from: " << settings_path << std::endl;
@@ -827,6 +857,9 @@ int main(int argc, char** argv)
     // Project tracker views management
     std::vector<std::unique_ptr<ProjectTrackerView>> trackerViews;
 
+    // Standalone browser windows management
+    std::vector<std::unique_ptr<FileBrowser>> standaloneBrowsers;
+
     // Set up shot view callbacks for both file browsers
     auto openShotViewCallback = [&shotViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& categoryPath, const std::wstring& categoryName) {
         // Check if this shot view is already open
@@ -1087,6 +1120,25 @@ int main(int argc, char** argv)
         fileBrowser1.SetCurrentDirectory(path);
     };
 
+    // Set up "Open in New Window" callback for all browsers
+    auto openInNewWindowCallback = [&standaloneBrowsers, &bookmarkManager, &subscriptionManager](const std::wstring& path) {
+        // Create new standalone browser
+        auto browser = std::make_unique<FileBrowser>();
+
+        // Initialize with shared managers
+        browser->Initialize(&bookmarkManager, &subscriptionManager);
+
+        // Set the path
+        browser->SetCurrentDirectory(path);
+
+        // Store and log
+        standaloneBrowsers.push_back(std::move(browser));
+        std::wcout << L"[Main] Opened standalone browser for: " << path << std::endl;
+    };
+
+    fileBrowser1.onOpenInNewWindow = openInNewWindowCallback;
+    fileBrowser2.onOpenInNewWindow = openInNewWindowCallback;
+
     // Setup GLFW drop callback for external drag-drop
     struct DropCallbackData {
         FileBrowser* browser1;
@@ -1248,6 +1300,18 @@ int main(int argc, char** argv)
         }
     }
 
+    // Restore saved standalone browser windows
+    std::cout << "[Main] Restoring " << saved_browser_windows.size() << " saved standalone browser(s)..." << std::endl;
+    for (const auto& savedBrowser : saved_browser_windows) {
+        if (std::filesystem::exists(savedBrowser.currentPath)) {
+            openInNewWindowCallback(savedBrowser.currentPath);
+            std::wcout << L"[Main] Restored standalone browser: " << savedBrowser.currentPath << std::endl;
+        } else {
+            std::wcout << L"[Main] Skipping standalone browser (path no longer exists): "
+                       << savedBrowser.currentPath << std::endl;
+        }
+    }
+
     // Track if we need to focus Browser on first frame
     bool needsInitialBrowserFocus = true;
 
@@ -1319,7 +1383,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.2", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.3", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -1458,6 +1522,31 @@ int main(int argc, char** argv)
             }
         }
 
+        // Render all standalone browser windows (dockable windows)
+        for (size_t i = 0; i < standaloneBrowsers.size(); ++i) {
+            if (standaloneBrowsers[i]) {
+                // Get current directory path for window title
+                std::wstring currentPath = standaloneBrowsers[i]->GetCurrentDirectory();
+                std::filesystem::path path(currentPath);
+                std::string windowTitle = "Browser - " + UFB::WideToUtf8(path.filename().wstring());
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                // Draw the browser (single panel, with window)
+                standaloneBrowsers[i]->Draw(windowTitle.c_str(), hwnd, true);
+            }
+        }
+
+        // Remove closed standalone browser windows
+        standaloneBrowsers.erase(
+            std::remove_if(standaloneBrowsers.begin(), standaloneBrowsers.end(),
+                [](const std::unique_ptr<FileBrowser>& browser) {
+                    return browser && !browser->IsOpen();
+                }),
+            standaloneBrowsers.end()
+        );
+
         // Always focus Browser tab on first frame
         if (needsInitialBrowserFocus) {
             ImGui::SetWindowFocus("Browser");
@@ -1488,7 +1577,7 @@ int main(int argc, char** argv)
 
     // Save settings before cleanup
     // Save settings including transcode queue panel state and open views
-    SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(), shotViews, assetsViews, postingsViews, trackerViews);
+    SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(), shotViews, assetsViews, postingsViews, trackerViews, standaloneBrowsers);
 
     // Cleanup
     try
