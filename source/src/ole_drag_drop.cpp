@@ -3,6 +3,88 @@
 #include <shlobj.h>
 
 //=============================================================================
+// FormatEnumerator Implementation
+//=============================================================================
+
+FormatEnumerator::FormatEnumerator(const std::vector<FORMATETC>& formats, ULONG index)
+    : m_refCount(1), m_formats(formats), m_index(index)
+{
+}
+
+STDMETHODIMP FormatEnumerator::QueryInterface(REFIID riid, void** ppv)
+{
+    if (!ppv)
+        return E_INVALIDARG;
+
+    *ppv = nullptr;
+
+    if (riid == IID_IUnknown || riid == IID_IEnumFORMATETC)
+    {
+        *ppv = static_cast<IEnumFORMATETC*>(this);
+        AddRef();
+        return S_OK;
+    }
+
+    return E_NOINTERFACE;
+}
+
+STDMETHODIMP_(ULONG) FormatEnumerator::AddRef()
+{
+    return InterlockedIncrement(&m_refCount);
+}
+
+STDMETHODIMP_(ULONG) FormatEnumerator::Release()
+{
+    LONG count = InterlockedDecrement(&m_refCount);
+    if (count == 0)
+    {
+        delete this;
+        return 0;
+    }
+    return count;
+}
+
+STDMETHODIMP FormatEnumerator::Next(ULONG celt, FORMATETC* rgelt, ULONG* pceltFetched)
+{
+    if (!rgelt)
+        return E_INVALIDARG;
+
+    ULONG fetched = 0;
+    while (m_index < m_formats.size() && fetched < celt)
+    {
+        rgelt[fetched] = m_formats[m_index];
+        m_index++;
+        fetched++;
+    }
+
+    if (pceltFetched)
+        *pceltFetched = fetched;
+
+    return (fetched == celt) ? S_OK : S_FALSE;
+}
+
+STDMETHODIMP FormatEnumerator::Skip(ULONG celt)
+{
+    m_index += celt;
+    return (m_index <= m_formats.size()) ? S_OK : S_FALSE;
+}
+
+STDMETHODIMP FormatEnumerator::Reset()
+{
+    m_index = 0;
+    return S_OK;
+}
+
+STDMETHODIMP FormatEnumerator::Clone(IEnumFORMATETC** ppenum)
+{
+    if (!ppenum)
+        return E_INVALIDARG;
+
+    *ppenum = new FormatEnumerator(m_formats, m_index);
+    return S_OK;
+}
+
+//=============================================================================
 // DropSource Implementation
 //=============================================================================
 
@@ -71,10 +153,11 @@ STDMETHODIMP DropSource::GiveFeedback(DWORD dwEffect)
 //=============================================================================
 
 FileDataObject::FileDataObject(const std::vector<std::wstring>& filePaths)
-    : m_refCount(1), m_filePaths(filePaths), m_hGlobal(nullptr)
+    : m_refCount(1), m_filePaths(filePaths), m_hGlobal(nullptr), m_preferredEffect(DROPEFFECT_COPY)
 {
-    // Register the CFSTR_SHELLIDLIST clipboard format
+    // Register clipboard formats
     m_cfShellIDList = RegisterClipboardFormat(CFSTR_SHELLIDLIST);
+    m_cfPreferredDropEffect = RegisterClipboardFormat(CFSTR_PREFERREDDROPEFFECT);
     CreateHDROP();
 }
 
@@ -210,8 +293,13 @@ STDMETHODIMP FileDataObject::GetData(FORMATETC* pformatetcIn, STGMEDIUM* pmedium
         return S_OK;
     }
     // Handle CFSTR_SHELLIDLIST format (required for Windows Explorer)
+    // TEMPORARILY DISABLED FOR INDESIGN COMPATIBILITY TESTING
     else if (pformatetcIn->cfFormat == m_cfShellIDList)
     {
+        std::wcout << L"[OLE] CFSTR_SHELLIDLIST requested but DISABLED for testing" << std::endl;
+        return DV_E_FORMATETC;  // Pretend we don't support this format
+
+        /* ORIGINAL IMPLEMENTATION - UNCOMMENT TO RE-ENABLE
         std::wcout << L"[OLE] Creating CFSTR_SHELLIDLIST for Windows Explorer" << std::endl;
 
         // Create PIDLs for each file path
@@ -309,6 +397,33 @@ STDMETHODIMP FileDataObject::GetData(FORMATETC* pformatetcIn, STGMEDIUM* pmedium
         std::wcout << L"[OLE] Created CFSTR_SHELLIDLIST with " << pidls.size() << L" items" << std::endl;
 
         return S_OK;
+        */
+    }
+    // Handle CFSTR_PREFERREDDROPEFFECT format
+    else if (pformatetcIn->cfFormat == m_cfPreferredDropEffect)
+    {
+        std::wcout << L"[OLE] Creating CFSTR_PREFERREDDROPEFFECT" << std::endl;
+
+        HGLOBAL hGlobal = GlobalAlloc(GHND, sizeof(DWORD));
+        if (!hGlobal)
+            return E_OUTOFMEMORY;
+
+        DWORD* pEffect = (DWORD*)GlobalLock(hGlobal);
+        if (!pEffect)
+        {
+            GlobalFree(hGlobal);
+            return E_OUTOFMEMORY;
+        }
+
+        *pEffect = m_preferredEffect;
+        GlobalUnlock(hGlobal);
+
+        pmedium->tymed = TYMED_HGLOBAL;
+        pmedium->hGlobal = hGlobal;
+        pmedium->pUnkForRelease = nullptr;
+
+        std::wcout << L"[OLE] Preferred drop effect: " << m_preferredEffect << std::endl;
+        return S_OK;
     }
 
     return DV_E_FORMATETC;
@@ -325,10 +440,15 @@ STDMETHODIMP FileDataObject::QueryGetData(FORMATETC* pformatetc)
     if (!pformatetc)
         return E_INVALIDARG;
 
-    // We support CF_HDROP and CFSTR_SHELLIDLIST with HGLOBAL
-    if ((pformatetc->cfFormat == CF_HDROP || pformatetc->cfFormat == m_cfShellIDList) &&
+    // TESTING: Support CF_HDROP and CFSTR_PREFERREDDROPEFFECT (CFSTR_SHELLIDLIST temporarily disabled)
+    if ((pformatetc->cfFormat == CF_HDROP || pformatetc->cfFormat == m_cfPreferredDropEffect) &&
         (pformatetc->tymed & TYMED_HGLOBAL))
         return S_OK;
+
+    // Original: We support CF_HDROP and CFSTR_SHELLIDLIST with HGLOBAL
+    // if ((pformatetc->cfFormat == CF_HDROP || pformatetc->cfFormat == m_cfShellIDList) &&
+    //     (pformatetc->tymed & TYMED_HGLOBAL))
+    //     return S_OK;
 
     return DV_E_FORMATETC;
 }
@@ -355,9 +475,31 @@ STDMETHODIMP FileDataObject::EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** p
 
     if (dwDirection == DATADIR_GET)
     {
-        // We could implement a proper enumerator, but for now we'll just return E_NOTIMPL
-        // Most drop targets will use QueryGetData instead
-        return E_NOTIMPL;
+        // Create format list - TESTING: only CF_HDROP for InDesign compatibility
+        std::vector<FORMATETC> formats;
+
+        FORMATETC fmtetc = {};
+        fmtetc.cfFormat = CF_HDROP;
+        fmtetc.ptd = nullptr;
+        fmtetc.dwAspect = DVASPECT_CONTENT;
+        fmtetc.lindex = -1;
+        fmtetc.tymed = TYMED_HGLOBAL;
+        formats.push_back(fmtetc);
+
+        // Add CFSTR_PREFERREDDROPEFFECT
+        fmtetc.cfFormat = m_cfPreferredDropEffect;
+        formats.push_back(fmtetc);
+
+        // TESTING: CFSTR_SHELLIDLIST disabled for InDesign compatibility
+        // Uncomment to re-enable:
+        /*
+        fmtetc.cfFormat = m_cfShellIDList;
+        formats.push_back(fmtetc);
+        */
+
+        *ppenumFormatEtc = new FormatEnumerator(formats);
+        std::wcout << L"[OLE] EnumFormatEtc: Created enumerator with " << formats.size() << L" format(s)" << std::endl;
+        return S_OK;
     }
 
     return E_NOTIMPL;

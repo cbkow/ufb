@@ -1970,6 +1970,39 @@ void FileBrowser::DrawListView(HWND hwnd)
                 // Drag source for file/folder (supports multi-select)
                 static bool transitionedToOLEDrag = false;
 
+#if OLE_DRAG_IMMEDIATE_MODE
+                // IMMEDIATE OLE DRAG MODE: Skip ImGui drag and go straight to Windows OLE
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                {
+                    // Build list of file paths for drag operation
+                    std::vector<std::wstring> filePaths;
+
+                    // If this item is part of selection, drag all selected items
+                    if (m_selectedIndices.find(i) != m_selectedIndices.end())
+                    {
+                        for (int idx : m_selectedIndices)
+                        {
+                            if (idx < m_files.size())
+                            {
+                                filePaths.push_back(m_files[idx].fullPath);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Not selected - drag just this one
+                        filePaths.push_back(entry.fullPath);
+                    }
+
+                    if (!filePaths.empty())
+                    {
+                        std::wcout << L"[FileBrowser] Starting immediate Windows OLE drag (no ImGui transition)" << std::endl;
+                        // Start Windows native drag and drop (this will block until drag completes)
+                        StartWindowsDragDrop(filePaths);
+                    }
+                }
+#else
+                // HYBRID DRAG MODE: Start with ImGui drag, transition to OLE when leaving window
                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                 {
                     if (!transitionedToOLEDrag)
@@ -2081,6 +2114,7 @@ void FileBrowser::DrawListView(HWND hwnd)
                     // Drag ended - reset flag
                     transitionedToOLEDrag = false;
                 }
+#endif // OLE_DRAG_IMMEDIATE_MODE
 
                 // ImGui context menu on right-click
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
@@ -2481,6 +2515,39 @@ void FileBrowser::DrawGridView(HWND hwnd)
         // Drag source for file/folder (supports multi-select)
         static bool transitionedToOLEDrag_grid = false;
 
+#if OLE_DRAG_IMMEDIATE_MODE
+        // IMMEDIATE OLE DRAG MODE: Skip ImGui drag and go straight to Windows OLE
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        {
+            // Build list of file paths for drag operation
+            std::vector<std::wstring> filePaths;
+
+            // If this item is part of selection, drag all selected items
+            if (m_selectedIndices.find(i) != m_selectedIndices.end())
+            {
+                for (int idx : m_selectedIndices)
+                {
+                    if (idx < m_files.size())
+                    {
+                        filePaths.push_back(m_files[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Not selected - drag just this one
+                filePaths.push_back(entry.fullPath);
+            }
+
+            if (!filePaths.empty())
+            {
+                std::wcout << L"[FileBrowser Grid] Starting immediate Windows OLE drag (no ImGui transition)" << std::endl;
+                // Start Windows native drag and drop (this will block until drag completes)
+                StartWindowsDragDrop(filePaths);
+            }
+        }
+#else
+        // HYBRID DRAG MODE: Start with ImGui drag, transition to OLE when leaving window
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
         {
             if (!transitionedToOLEDrag_grid)
@@ -2594,6 +2661,7 @@ void FileBrowser::DrawGridView(HWND hwnd)
             // Drag ended - reset flag
             transitionedToOLEDrag_grid = false;
         }
+#endif // OLE_DRAG_IMMEDIATE_MODE
 
         // Check if item is selected
         bool isSelected = (m_selectedIndices.find(i) != m_selectedIndices.end());
