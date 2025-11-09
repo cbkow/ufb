@@ -76,9 +76,10 @@ public:
     // Update (call each frame)
     void Update();
 
-    // Callbacks for opening file location in browsers
-    std::function<void(const std::wstring&)> onOpenInBrowser1;
-    std::function<void(const std::wstring&)> onOpenInBrowser2;
+    // Callbacks for opening file location in browsers and views
+    std::function<void(const std::wstring&)> onOpenInLeftBrowser;
+    std::function<void(const std::wstring&)> onOpenInRightBrowser;
+    std::function<void(const std::wstring&)> onOpenInNewWindow;
 
 private:
     // UI Rendering

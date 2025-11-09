@@ -1,9 +1,11 @@
 #include "subscription_manager.h"
+#include "metadata_manager.h"
 #include "utils.h"
 #include <iostream>
 #include <filesystem>
 #include <fstream>
 #include <windows.h>
+#include <nlohmann/json.hpp>
 
 namespace UFB {
 
@@ -28,6 +30,18 @@ bool SubscriptionManager::Initialize()
         std::cerr << "Failed to open database: " << sqlite3_errmsg(m_db) << std::endl;
         return false;
     }
+
+    // Configure SQLite for better concurrency
+    // Enable WAL mode for concurrent reads/writes
+    sqlite3_exec(m_db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
+
+    // Set busy timeout to 5 seconds (handles lock contention)
+    sqlite3_busy_timeout(m_db, 5000);
+
+    // Normal synchronous mode (safe with WAL)
+    sqlite3_exec(m_db, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
+
+    std::cout << "[SubscriptionManager] Configured SQLite: WAL mode, 5s busy timeout" << std::endl;
 
     // Create tables if they don't exist
     if (!CreateTables())
@@ -128,6 +142,8 @@ bool SubscriptionManager::ExecuteSQL(const char* sql)
 
 bool SubscriptionManager::SubscribeToJob(const std::wstring& jobPath, const std::wstring& jobName)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     // Convert wide strings to UTF-8
     std::string jobPathUtf8 = WideToUtf8(jobPath);
     std::string jobNameUtf8 = WideToUtf8(jobName);
@@ -200,6 +216,8 @@ bool SubscriptionManager::SubscribeToJob(const std::wstring& jobPath, const std:
 
 bool SubscriptionManager::UnsubscribeFromJob(const std::wstring& jobPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "DELETE FROM subscriptions WHERE job_path = ?;";
@@ -223,6 +241,8 @@ bool SubscriptionManager::UnsubscribeFromJob(const std::wstring& jobPath)
 
 bool SubscriptionManager::SetJobActive(const std::wstring& jobPath, bool active)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "UPDATE subscriptions SET is_active = ? WHERE job_path = ?;";
@@ -247,6 +267,8 @@ bool SubscriptionManager::SetJobActive(const std::wstring& jobPath, bool active)
 
 std::vector<Subscription> SubscriptionManager::GetAllSubscriptions()
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<Subscription> subscriptions;
 
     const char* sql = "SELECT id, job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count FROM subscriptions ORDER BY subscribed_time DESC;";
@@ -289,6 +311,8 @@ std::vector<Subscription> SubscriptionManager::GetAllSubscriptions()
 
 std::vector<Subscription> SubscriptionManager::GetActiveSubscriptions()
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<Subscription> subscriptions;
 
     const char* sql = "SELECT id, job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count FROM subscriptions WHERE is_active = 1 ORDER BY subscribed_time DESC;";
@@ -331,6 +355,8 @@ std::vector<Subscription> SubscriptionManager::GetActiveSubscriptions()
 
 std::optional<Subscription> SubscriptionManager::GetSubscription(const std::wstring& jobPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "SELECT id, job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count FROM subscriptions WHERE job_path = ?;";
@@ -375,6 +401,8 @@ std::optional<Subscription> SubscriptionManager::GetSubscription(const std::wstr
 
 void SubscriptionManager::UpdateSyncStatus(const std::wstring& jobPath, SyncStatus status, uint64_t timestamp)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
     std::string statusStr = SyncStatusToString(status);
 
@@ -399,6 +427,8 @@ void SubscriptionManager::UpdateSyncStatus(const std::wstring& jobPath, SyncStat
 
 void SubscriptionManager::UpdateShotCount(const std::wstring& jobPath, int count)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "UPDATE subscriptions SET shot_count = ? WHERE job_path = ?;";
@@ -445,6 +475,8 @@ std::optional<std::wstring> SubscriptionManager::GetJobPathForPath(const std::ws
 
 bool SubscriptionManager::CreateOrUpdateShotMetadata(const ShotMetadata& metadata)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     const char* sql = R"(
         INSERT INTO shot_metadata (shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -496,11 +528,25 @@ bool SubscriptionManager::CreateOrUpdateShotMetadata(const ShotMetadata& metadat
         return false;
     }
 
+    // Bridge to sync cache: Find which job this shot belongs to and sync
+    auto jobPath = GetJobPathForPath(metadata.shotPath);
+    if (jobPath.has_value())
+    {
+        BridgeToSyncCache(metadata, jobPath.value());
+    }
+    else
+    {
+        std::wcerr << L"[SubscriptionManager] Warning: Could not find job path for shot: "
+                   << metadata.shotPath << L" - not bridging to sync cache" << std::endl;
+    }
+
     return true;
 }
 
 std::optional<ShotMetadata> SubscriptionManager::GetShotMetadata(const std::wstring& shotPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string shotPathUtf8 = WideToUtf8(shotPath);
 
     const char* sql = "SELECT id, shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time FROM shot_metadata WHERE shot_path = ?;";
@@ -561,6 +607,8 @@ std::optional<ShotMetadata> SubscriptionManager::GetShotMetadata(const std::wstr
 
 std::vector<ShotMetadata> SubscriptionManager::GetAllShotMetadata(const std::wstring& jobPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<ShotMetadata> results;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
@@ -620,6 +668,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetAllShotMetadata(const std::wst
 
 std::vector<ShotMetadata> SubscriptionManager::GetShotMetadataByType(const std::wstring& jobPath, const std::string& folderType)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<ShotMetadata> results;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
@@ -679,6 +729,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetShotMetadataByType(const std::
 
 bool SubscriptionManager::DeleteShotMetadata(const std::wstring& shotPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::string shotPathUtf8 = WideToUtf8(shotPath);
 
     const char* sql = "DELETE FROM shot_metadata WHERE shot_path = ?;";
@@ -731,6 +783,8 @@ SyncStatus SubscriptionManager::StringToSyncStatus(const std::string& str)
 
 std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstring& jobPath, const std::string& itemType)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<ShotMetadata> results;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
@@ -790,6 +844,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstrin
 
 std::vector<ShotMetadata> SubscriptionManager::GetAllTrackedItems(const std::wstring& jobPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     std::vector<ShotMetadata> results;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
@@ -874,6 +930,8 @@ bool SubscriptionManager::CreateManualTask(const std::wstring& jobPath, const st
 
 bool SubscriptionManager::DeleteManualTask(int taskId)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
     const char* sql = "DELETE FROM shot_metadata WHERE id = ?;";
 
     sqlite3_stmt* stmt;
@@ -897,6 +955,244 @@ bool SubscriptionManager::DeleteManualTask(int taskId)
     }
 
     return true;
+}
+
+void SubscriptionManager::SetMetadataManager(MetadataManager* metaManager)
+{
+    m_metaManager = metaManager;
+}
+
+std::wstring SubscriptionManager::GetRelativePath(const std::wstring& absolutePath, const std::wstring& jobPath)
+{
+    try
+    {
+        std::filesystem::path absPath(absolutePath);
+        std::filesystem::path job(jobPath);
+        return std::filesystem::relative(absPath, job).wstring();
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Failed to compute relative path: " << e.what() << std::endl;
+        // Return absolute path as fallback
+        return absolutePath;
+    }
+}
+
+std::wstring SubscriptionManager::GetAbsolutePath(const std::wstring& relativePath, const std::wstring& jobPath)
+{
+    try
+    {
+        std::filesystem::path job(jobPath);
+        std::filesystem::path rel(relativePath);
+        return (job / rel).wstring();
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Failed to compute absolute path: " << e.what() << std::endl;
+        // Return relative path as fallback
+        return relativePath;
+    }
+}
+
+void SubscriptionManager::BridgeToSyncCache(const ShotMetadata& metadata, const std::wstring& jobPath)
+{
+    if (!m_metaManager)
+    {
+        std::wcerr << L"[SubscriptionManager] MetadataManager not set, cannot bridge to sync cache" << std::endl;
+        return;
+    }
+
+    // Convert ShotMetadata → Shot
+    Shot shot;
+    shot.shotPath = GetRelativePath(metadata.shotPath, jobPath);
+    shot.shotType = metadata.folderType;
+
+    // Extract display name from path
+    std::filesystem::path path(metadata.shotPath);
+    shot.displayName = path.filename().wstring();
+
+    // Create JSON metadata blob
+    nlohmann::json metaJson;
+    metaJson["status"] = metadata.status;
+    metaJson["category"] = metadata.category;
+    metaJson["priority"] = metadata.priority;
+    metaJson["dueDate"] = metadata.dueDate;
+    metaJson["artist"] = metadata.artist;
+    metaJson["note"] = metadata.note;
+    metaJson["links"] = metadata.links;
+    metaJson["isTracked"] = metadata.isTracked;
+    metaJson["itemType"] = metadata.itemType;
+    shot.metadata = metaJson.dump();
+
+    shot.createdTime = metadata.createdTime;
+    shot.modifiedTime = metadata.modifiedTime;
+    shot.deviceId = GetDeviceID();
+
+    // NEW ARCHITECTURE: Write to per-device change log (append-only, no contention!)
+    ChangeLogEntry entry;
+    entry.deviceId = shot.deviceId;
+    entry.timestamp = GetCurrentTimeMs();
+    entry.operation = "update";
+    entry.shotPath = shot.shotPath;
+    entry.data = shot;
+
+    if (!m_metaManager->AppendToChangeLog(jobPath, entry))
+    {
+        std::cerr << "[SubscriptionManager] Failed to append to change log" << std::endl;
+        return;
+    }
+
+    // Trigger immediate P2P notification with exact timestamp (if callback is registered)
+    if (m_localChangeCallback)
+    {
+        m_localChangeCallback(jobPath, entry.timestamp);
+    }
+
+    // Also update local cache immediately for local UI responsiveness
+    // We write directly to shot_cache to avoid infinite loop with BridgeFromSyncCache
+    std::string jobPathUtf8 = WideToUtf8(jobPath);
+    std::string shotPathUtf8 = WideToUtf8(shot.shotPath);
+    std::string displayNameUtf8 = WideToUtf8(shot.displayName);
+    uint64_t cachedAt = GetCurrentTimeMs();
+
+    const char* sql = R"(
+        INSERT INTO shot_cache (job_path, shot_path, shot_type, display_name, metadata, created_time, modified_time, device_id, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(job_path, shot_path) DO UPDATE SET
+            shot_type = excluded.shot_type,
+            display_name = excluded.display_name,
+            metadata = excluded.metadata,
+            created_time = excluded.created_time,
+            modified_time = excluded.modified_time,
+            device_id = excluded.device_id,
+            cached_at = excluded.cached_at;
+    )";
+
+    sqlite3* db = m_metaManager->GetDatabase();
+    if (!db)
+    {
+        std::cerr << "[SubscriptionManager] Failed to get database handle" << std::endl;
+        return;
+    }
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[SubscriptionManager] Failed to prepare cache update" << std::endl;
+        return;
+    }
+
+    sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, shot.shotType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, displayNameUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, shot.metadata.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 6, shot.createdTime);
+    sqlite3_bind_int64(stmt, 7, shot.modifiedTime);
+    sqlite3_bind_text(stmt, 8, shot.deviceId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 9, cachedAt);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE)
+    {
+        std::cerr << "[SubscriptionManager] Failed to update local cache" << std::endl;
+        return;
+    }
+
+    std::wcout << L"[SubscriptionManager] Bridged metadata to change log: " << shot.shotPath << std::endl;
+}
+
+void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstring& jobPath)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
+
+    // Convert Shot → ShotMetadata
+    ShotMetadata metadata;
+    metadata.shotPath = GetAbsolutePath(shot.shotPath, jobPath);
+    metadata.folderType = shot.shotType;
+    metadata.createdTime = shot.createdTime;
+    metadata.modifiedTime = shot.modifiedTime;
+
+    // Parse JSON metadata blob
+    try
+    {
+        nlohmann::json metaJson = nlohmann::json::parse(shot.metadata);
+
+        metadata.status = metaJson.value("status", "");
+        metadata.category = metaJson.value("category", "");
+        metadata.priority = metaJson.value("priority", 2);
+        metadata.dueDate = metaJson.value("dueDate", 0);
+        metadata.artist = metaJson.value("artist", "");
+        metadata.note = metaJson.value("note", "");
+        metadata.links = metaJson.value("links", "");
+        metadata.isTracked = metaJson.value("isTracked", false);
+        metadata.itemType = metaJson.value("itemType", "shot");
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Failed to parse metadata JSON: " << e.what() << std::endl;
+        // Continue with default values
+        metadata.itemType = "shot";
+        metadata.priority = 2;
+        metadata.isTracked = false;
+    }
+
+    // Write to shot_metadata table (but don't call BridgeToSyncCache again to avoid infinite loop!)
+    const char* sql = R"(
+        INSERT INTO shot_metadata (shot_path, item_type, folder_type, status, category, priority, due_date, artist, note, links, is_tracked, created_time, modified_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(shot_path) DO UPDATE SET
+            item_type = excluded.item_type,
+            folder_type = excluded.folder_type,
+            status = excluded.status,
+            category = excluded.category,
+            priority = excluded.priority,
+            due_date = excluded.due_date,
+            artist = excluded.artist,
+            note = excluded.note,
+            links = excluded.links,
+            is_tracked = excluded.is_tracked,
+            modified_time = excluded.modified_time;
+    )";
+
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[SubscriptionManager] Failed to prepare bridge from sync cache: " << sqlite3_errmsg(m_db) << std::endl;
+        return;
+    }
+
+    std::string shotPathUtf8 = WideToUtf8(metadata.shotPath);
+    std::string itemType = metadata.itemType.empty() ? "shot" : metadata.itemType;
+    sqlite3_bind_text(stmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, itemType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, metadata.folderType.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, metadata.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, metadata.category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, metadata.priority);
+    sqlite3_bind_int64(stmt, 7, metadata.dueDate);
+    sqlite3_bind_text(stmt, 8, metadata.artist.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, metadata.note.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, metadata.links.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 11, metadata.isTracked ? 1 : 0);
+    sqlite3_bind_int64(stmt, 12, metadata.createdTime);
+    sqlite3_bind_int64(stmt, 13, metadata.modifiedTime);
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE)
+    {
+        std::cerr << "[SubscriptionManager] Failed to bridge from sync cache: " << sqlite3_errmsg(m_db) << std::endl;
+        return;
+    }
+
+    std::wcout << L"[SubscriptionManager] Bridged from sync cache to shot_metadata: " << metadata.shotPath << std::endl;
 }
 
 } // namespace UFB

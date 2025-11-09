@@ -1,0 +1,370 @@
+{
+  "version": "1.0",
+  "users": [
+    {
+      "username": "default_user",
+      "displayName": "Default User"
+    }
+  ],
+  "folderTypes": {
+    "3d": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/3d/_t_project_name",
+      "addActionTemplateFile": "projectTemplate/3d/_t_project_name/project/template.blend",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "To Render", "color": "#F59E0B"},
+        {"name": "Rendering", "color": "#10B981"},
+        {"name": "Rendered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": false,
+        "Artist": true,
+        "Priority": false,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "ae": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/ae/_t_project_name",
+      "addActionTemplateFile": "projectTemplate/ae/_t_project_name/project/_template.aep",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "For Review", "color": "#F59E0B"},
+        {"name": "Retake", "color": "#EF4444"},
+        {"name": "Approved", "color": "#10B981"},
+        {"name": "Delivered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": true,
+        "Priority": true,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "audition": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/audition",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "For Review", "color": "#F59E0B"},
+        {"name": "Retake", "color": "#EF4444"},
+        {"name": "Approved", "color": "#10B981"},
+        {"name": "Delivered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": true,
+        "Priority": false,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "illustrator": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/illustrator/_t_project_name",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "For Review", "color": "#F59E0B"},
+        {"name": "Retake", "color": "#EF4444"},
+        {"name": "Approved", "color": "#10B981"},
+        {"name": "Delivered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": true,
+        "Priority": false,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "photoshop": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/photoshop/_t_project_name",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "For Review", "color": "#F59E0B"},
+        {"name": "Retake", "color": "#EF4444"},
+        {"name": "Approved", "color": "#10B981"},
+        {"name": "Delivered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": true,
+        "Priority": false,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "premiere": {
+      "isShot": true,
+      "addAction": "newShot",
+      "addActionTemplate": "projectTemplate/premiere/_t_project_name",
+      "addActionTemplateFile": "projectTemplate/premiere/_t_project_name/project/_template.prproj",
+      "statusOptions": [
+        {"name": "Not Started", "color": "#6B7280"},
+        {"name": "In Progress", "color": "#3B82F6"},
+        {"name": "For Review", "color": "#F59E0B"},
+        {"name": "Retake", "color": "#EF4444"},
+        {"name": "Approved", "color": "#10B981"},
+        {"name": "Delivered", "color": "#059669"}
+      ],
+      "categoryOptions": [
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "On Hold", "color": "#06B6D4"},
+        {"name": "Killed", "color": "#F97316"}
+      ],
+      "defaultMetadata": {
+        "Status": "Not Started",
+        "Category": "Offline",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": true,
+        "Priority": false,
+        "DueDate": true,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "assets": {
+      "isShot": false,
+      "isAsset": true,
+      "addAction": "newAsset",
+      "addActionTemplate": "projectTemplate/assets/000000_asset_nametype",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Available", "color": "#10B981"},
+        {"name": "In Use", "color": "#3B82F6"},
+        {"name": "Archived", "color": "#6B7280"},
+        {"name": "Needs Update", "color": "#F59E0B"}
+      ],
+      "categoryOptions": [
+        {"name": "Client Assets or Reference", "color": "#F97316"},
+        {"name": "Offline Prep or Reference", "color": "#06B6D4"},
+        {"name": "Online Prep or Reference", "color": "#8B5CF6"},
+        {"name": "Color Transfer", "color": "#EC4899"},
+        {"name": "Flame Retouch or Reference", "color": "#10B981"},
+        {"name": "Fonts", "color": "#3B82F6"},
+        {"name": "Logos", "color": "#F97316"},
+        {"name": "Stock", "color": "#06B6D4"},
+        {"name": "Audio", "color": "#8B5CF6"},
+        {"name": "Internal Reference", "color": "#EC4899"},
+        {"name": "Documents or Treatments", "color": "#10B981"},
+        {"name": "Misc", "color": "#3B82F6"}
+      ],
+      "defaultMetadata": {
+        "Status": "Available",
+        "Category": "Misc",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": false
+      },
+      "displayMetadata": {
+        "Status": false,
+        "Category": true,
+        "Artist": false,
+        "Priority": false,
+        "DueDate": false,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "postings": {
+      "isShot": false,
+      "isPosting": true,
+      "addAction": "newPosting",
+      "addActionTemplate": "projectTemplate/postings/000000a_shorthand_description",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Draft", "color": "#6B7280"},
+        {"name": "Review", "color": "#F59E0B"},
+        {"name": "Scheduled", "color": "#3B82F6"},
+        {"name": "Posted", "color": "#10B981"},
+        {"name": "Archived", "color": "#9CA3AF"}
+      ],
+      "categoryOptions": [
+        {"name": "Internal", "color": "#E4405F"},
+        {"name": "Client", "color": "#1877F2"},
+        {"name": "Offline", "color": "#8B5CF6"},
+        {"name": "Online", "color": "#EC4899"},
+        {"name": "Outside Vendor", "color": "#06B6D4"},
+        {"name": "Deliverable", "color": "#FF0000"}
+      ],
+      "defaultMetadata": {
+        "Status": "Draft",
+        "Category": "Internal",
+        "Priority": 2,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": true
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": false,
+        "Priority": false,
+        "DueDate": false,
+        "Notes": false,
+        "Links": false
+      }
+    },
+    "docs": {
+      "isShot": false,
+      "isDoc": true,
+      "addAction": "",
+      "addActionTemplate": "",
+      "addActionTemplateFile": "",
+      "statusOptions": [
+        {"name": "Draft", "color": "#6B7280"},
+        {"name": "Active", "color": "#10B981"},
+        {"name": "Archived", "color": "#9CA3AF"}
+      ],
+      "categoryOptions": [
+        {"name": "Deck", "color": "#F97316"},
+        {"name": "Script", "color": "#8B5CF6"},
+        {"name": "Notes", "color": "#EAB308"},
+        {"name": "Reference", "color": "#06B6D4"},
+        {"name": "Contract", "color": "#EF4444"}
+      ],
+      "defaultMetadata": {
+        "Status": "Active",
+        "Category": "Reference",
+        "Priority": 3,
+        "DueDate": null,
+        "Artist": "",
+        "Note": "",
+        "Links": [],
+        "IsTracked": false
+      },
+      "displayMetadata": {
+        "Status": true,
+        "Category": true,
+        "Artist": false,
+        "Priority": false,
+        "DueDate": false,
+        "Notes": false,
+        "Links": false
+      }
+    }
+  },
+  "priorityOptions": [1, 2, 3]
+}

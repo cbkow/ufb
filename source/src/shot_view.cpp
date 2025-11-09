@@ -2,6 +2,7 @@
 #include "file_browser.h"  // For FileEntry struct
 #include "bookmark_manager.h"
 #include "subscription_manager.h"
+#include "metadata_manager.h"
 #include "project_config.h"
 #include "utils.h"
 #include "ole_drag_drop.h"
@@ -74,12 +75,28 @@ ShotView::~ShotView()
 
 void ShotView::Initialize(const std::wstring& categoryPath, const std::wstring& categoryName,
                           UFB::BookmarkManager* bookmarkManager,
-                          UFB::SubscriptionManager* subscriptionManager)
+                          UFB::SubscriptionManager* subscriptionManager,
+                          UFB::MetadataManager* metadataManager)
 {
     m_categoryPath = categoryPath;
     m_categoryName = categoryName;
     m_bookmarkManager = bookmarkManager;
     m_subscriptionManager = subscriptionManager;
+    m_metadataManager = metadataManager;
+
+    // Register observer for real-time metadata updates
+    if (m_metadataManager)
+    {
+        std::wstring jobPath = std::filesystem::path(categoryPath).parent_path().wstring();
+        m_metadataManager->RegisterObserver([this, jobPath](const std::wstring& changedJobPath) {
+            // Only reload if the change is for our job
+            if (changedJobPath == jobPath)
+            {
+                std::wcout << L"[ShotView] Metadata changed for job, reloading..." << std::endl;
+                ReloadMetadata();
+            }
+        });
+    }
 
     // Initialize managers
     m_iconManager.Initialize();
@@ -432,6 +449,143 @@ void ShotView::Draw(const char* title, HWND hwnd)
 
         ImGui::EndGroup();
 
+        // Handle keyboard shortcuts (Ctrl+C, Ctrl+X, Ctrl+V, Delete, F2)
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+        {
+            ImGuiIO& io = ImGui::GetIO();
+
+            // Ctrl+C - Copy selected files
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C))
+            {
+                std::vector<std::wstring> paths;
+
+                // Check which panel has selection
+                if (!m_selectedProjectIndices.empty())
+                {
+                    for (int idx : m_selectedProjectIndices)
+                    {
+                        if (idx >= 0 && idx < m_projectFiles.size())
+                        {
+                            paths.push_back(m_projectFiles[idx].fullPath);
+                        }
+                    }
+                }
+                else if (!m_selectedRenderIndices.empty())
+                {
+                    for (int idx : m_selectedRenderIndices)
+                    {
+                        if (idx >= 0 && idx < m_renderFiles.size())
+                        {
+                            paths.push_back(m_renderFiles[idx].fullPath);
+                        }
+                    }
+                }
+
+                if (!paths.empty())
+                {
+                    CopyFilesToClipboard(paths);
+                }
+            }
+
+            // Ctrl+X - Cut selected files
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X))
+            {
+                std::vector<std::wstring> paths;
+
+                if (!m_selectedProjectIndices.empty())
+                {
+                    for (int idx : m_selectedProjectIndices)
+                    {
+                        if (idx >= 0 && idx < m_projectFiles.size())
+                        {
+                            paths.push_back(m_projectFiles[idx].fullPath);
+                        }
+                    }
+                }
+                else if (!m_selectedRenderIndices.empty())
+                {
+                    for (int idx : m_selectedRenderIndices)
+                    {
+                        if (idx >= 0 && idx < m_renderFiles.size())
+                        {
+                            paths.push_back(m_renderFiles[idx].fullPath);
+                        }
+                    }
+                }
+
+                if (!paths.empty())
+                {
+                    CutFilesToClipboard(paths);
+                }
+            }
+
+            // Ctrl+V - Paste files
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
+            {
+                PasteFilesFromClipboard();
+            }
+
+            // Delete - Delete selected files
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete))
+            {
+                std::vector<std::wstring> paths;
+
+                if (!m_selectedProjectIndices.empty())
+                {
+                    for (int idx : m_selectedProjectIndices)
+                    {
+                        if (idx >= 0 && idx < m_projectFiles.size())
+                        {
+                            paths.push_back(m_projectFiles[idx].fullPath);
+                        }
+                    }
+                }
+                else if (!m_selectedRenderIndices.empty())
+                {
+                    for (int idx : m_selectedRenderIndices)
+                    {
+                        if (idx >= 0 && idx < m_renderFiles.size())
+                        {
+                            paths.push_back(m_renderFiles[idx].fullPath);
+                        }
+                    }
+                }
+
+                if (!paths.empty())
+                {
+                    DeleteFilesToRecycleBin(paths);
+                }
+            }
+
+            // F2 - Rename (single file only)
+            if (ImGui::IsKeyPressed(ImGuiKey_F2))
+            {
+                // Only allow rename if exactly one file is selected
+                if (m_selectedProjectIndices.size() == 1)
+                {
+                    int idx = *m_selectedProjectIndices.begin();
+                    if (idx >= 0 && idx < m_projectFiles.size())
+                    {
+                        m_renameOriginalPath = m_projectFiles[idx].fullPath;
+                        std::wstring filename = m_projectFiles[idx].name;
+                        WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1, m_renameBuffer, sizeof(m_renameBuffer), nullptr, nullptr);
+                        m_showRenameDialog = true;
+                    }
+                }
+                else if (m_selectedRenderIndices.size() == 1)
+                {
+                    int idx = *m_selectedRenderIndices.begin();
+                    if (idx >= 0 && idx < m_renderFiles.size())
+                    {
+                        m_renameOriginalPath = m_renderFiles[idx].fullPath;
+                        std::wstring filename = m_renderFiles[idx].name;
+                        WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1, m_renameBuffer, sizeof(m_renameBuffer), nullptr, nullptr);
+                        m_showRenameDialog = true;
+                    }
+                }
+            }
+        }
+
         // Rename dialog modal
         if (m_showRenameDialog)
         {
@@ -503,12 +657,6 @@ void ShotView::Draw(const char* title, HWND hwnd)
     }
 
     ImGui::End();
-
-    // Check if window was closed via X button (check after End() so state is fully updated)
-    if (!m_isOpen && onClose)
-    {
-        onClose();
-    }
 }
 
 std::wstring ShotView::GetJobName() const
@@ -546,6 +694,48 @@ void ShotView::SetSelectedShot(const std::wstring& shotPath)
     }
 }
 
+void ShotView::SetSelectedShotAndFile(const std::wstring& shotPath, const std::wstring& filePath)
+{
+    // First select the shot
+    SetSelectedShot(shotPath);
+
+    // Clear previous file selections
+    m_selectedProjectIndices.clear();
+    m_selectedRenderIndices.clear();
+
+    // Canonicalize the file path for comparison
+    std::wstring canonicalFilePath;
+    try {
+        canonicalFilePath = std::filesystem::canonical(filePath).wstring();
+    } catch (...) {
+        canonicalFilePath = filePath;
+    }
+
+    // Try to find and select the file in project files
+    for (size_t i = 0; i < m_projectFiles.size(); i++)
+    {
+        if (m_projectFiles[i].fullPath == canonicalFilePath)
+        {
+            m_selectedProjectIndices.insert(static_cast<int>(i));
+            std::wcout << L"[ShotView] Selected file in project panel: " << m_projectFiles[i].name << std::endl;
+            return;
+        }
+    }
+
+    // Try to find and select the file in render files
+    for (size_t i = 0; i < m_renderFiles.size(); i++)
+    {
+        if (m_renderFiles[i].fullPath == canonicalFilePath)
+        {
+            m_selectedRenderIndices.insert(static_cast<int>(i));
+            std::wcout << L"[ShotView] Selected file in render panel: " << m_renderFiles[i].name << std::endl;
+            return;
+        }
+    }
+
+    std::wcout << L"[ShotView] File not found in project or render panels: " << canonicalFilePath << std::endl;
+}
+
 void ShotView::DrawShotsPanel(HWND hwnd)
 {
     // Store window position and size
@@ -579,23 +769,6 @@ void ShotView::DrawShotsPanel(HWND hwnd)
 
     ImGui::Text("Shots");
 
-    // Place buttons at the end of the line
-    // Calculate the space needed: 3 buttons + spacing
-    float buttonWidth = font_icons ? 25.0f : 30.0f;  // Icon buttons are smaller
-    float spacing = ImGui::GetStyle().ItemSpacing.x;
-    float totalWidth = buttonWidth * 3 + spacing * 2;
-    float availWidth = ImGui::GetContentRegionAvail().x;
-
-    // Only move to the right if there's enough space (subtract a bit more for safety)
-    if (availWidth > totalWidth + 10.0f)
-    {
-        ImGui::SameLine(availWidth - totalWidth - 20.0f);
-    }
-    else
-    {
-        ImGui::SameLine();
-    }
-
     // Add new shot button
     if (font_icons)
     {
@@ -620,6 +793,201 @@ void ShotView::DrawShotsPanel(HWND hwnd)
         ImGui::SetTooltip("Add New Shot");
 
     ImGui::SameLine();
+
+    // ===== COMPACT FILTER BUTTONS =====
+
+    // Status Filter Button
+    int statusCount = static_cast<int>(m_filterStatuses.size());
+    std::string statusLabel = "Status" + (statusCount > 0 ? " (" + std::to_string(statusCount) + ")" : "");
+    if (ImGui::Button(statusLabel.c_str()))
+    {
+        ImGui::OpenPopup("StatusFilterPopup");
+    }
+
+    // Status Filter Popup
+    if (ImGui::BeginPopup("StatusFilterPopup"))
+    {
+        ImGui::Text("Filter by Status:");
+        ImGui::Separator();
+        for (const auto& status : m_availableStatuses)
+        {
+            bool isSelected = (m_filterStatuses.find(status) != m_filterStatuses.end());
+            if (ImGui::Checkbox(status.c_str(), &isSelected))
+            {
+                if (isSelected)
+                    m_filterStatuses.insert(status);
+                else
+                    m_filterStatuses.erase(status);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterStatuses.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Category Filter Button
+    int categoryCount = static_cast<int>(m_filterCategories.size());
+    std::string categoryLabel = "Category" + (categoryCount > 0 ? " (" + std::to_string(categoryCount) + ")" : "");
+    if (ImGui::Button(categoryLabel.c_str()))
+    {
+        ImGui::OpenPopup("CategoryFilterPopup");
+    }
+
+    // Category Filter Popup
+    if (ImGui::BeginPopup("CategoryFilterPopup"))
+    {
+        ImGui::Text("Filter by Category:");
+        ImGui::Separator();
+        for (const auto& category : m_availableCategories)
+        {
+            bool isSelected = (m_filterCategories.find(category) != m_filterCategories.end());
+            if (ImGui::Checkbox(category.c_str(), &isSelected))
+            {
+                if (isSelected)
+                    m_filterCategories.insert(category);
+                else
+                    m_filterCategories.erase(category);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterCategories.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Artist Filter Button
+    int artistCount = static_cast<int>(m_filterArtists.size());
+    std::string artistLabel = "Artist" + (artistCount > 0 ? " (" + std::to_string(artistCount) + ")" : "");
+    if (ImGui::Button(artistLabel.c_str()))
+    {
+        ImGui::OpenPopup("ArtistFilterPopup");
+    }
+
+    // Artist Filter Popup
+    if (ImGui::BeginPopup("ArtistFilterPopup"))
+    {
+        ImGui::Text("Filter by Artist:");
+        ImGui::Separator();
+        for (const auto& artist : m_availableArtists)
+        {
+            bool isSelected = (m_filterArtists.find(artist) != m_filterArtists.end());
+            if (ImGui::Checkbox(artist.c_str(), &isSelected))
+            {
+                if (isSelected)
+                    m_filterArtists.insert(artist);
+                else
+                    m_filterArtists.erase(artist);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterArtists.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Priority Filter Button
+    int priorityCount = static_cast<int>(m_filterPriorities.size());
+    std::string priorityLabel = "Priority" + (priorityCount > 0 ? " (" + std::to_string(priorityCount) + ")" : "");
+    if (ImGui::Button(priorityLabel.c_str()))
+    {
+        ImGui::OpenPopup("PriorityFilterPopup");
+    }
+
+    // Priority Filter Popup
+    if (ImGui::BeginPopup("PriorityFilterPopup"))
+    {
+        ImGui::Text("Filter by Priority:");
+        ImGui::Separator();
+        const char* priorityLabels[] = { "High", "Medium", "Low" };
+        for (int priority : m_availablePriorities)
+        {
+            if (priority >= 1 && priority <= 3)
+            {
+                bool isSelected = (m_filterPriorities.find(priority) != m_filterPriorities.end());
+                if (ImGui::Checkbox(priorityLabels[priority - 1], &isSelected))
+                {
+                    if (isSelected)
+                        m_filterPriorities.insert(priority);
+                    else
+                        m_filterPriorities.erase(priority);
+                }
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterPriorities.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Due Date Filter Button
+    const char* dueDateOptions[] = { "All", "Today", "Yesterday", "Last 7 days", "Last 30 days", "This year" };
+    std::string dueDateLabel = "Due Date";
+    if (m_filterDueDate > 0)
+    {
+        dueDateLabel = std::string(dueDateOptions[m_filterDueDate]);
+    }
+    if (ImGui::Button(dueDateLabel.c_str()))
+    {
+        ImGui::OpenPopup("DueDateFilterPopup");
+    }
+
+    // Due Date Filter Popup
+    if (ImGui::BeginPopup("DueDateFilterPopup"))
+    {
+        ImGui::Text("Filter by Due Date:");
+        ImGui::Separator();
+        for (int i = 0; i < 6; i++)
+        {
+            bool isSelected = (m_filterDueDate == i);
+            if (ImGui::Selectable(dueDateOptions[i], isSelected))
+            {
+                m_filterDueDate = i;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Clear Filters Button
+    int totalActiveFilters = statusCount + categoryCount + artistCount + priorityCount + (m_filterDueDate > 0 ? 1 : 0);
+    if (totalActiveFilters > 0)
+    {
+        if (font_icons) ImGui::PushFont(font_icons);
+        if (ImGui::SmallButton(U8("\uE14C##clearFilters")))  // Material Icons close
+        {
+            m_filterStatuses.clear();
+            m_filterCategories.clear();
+            m_filterArtists.clear();
+            m_filterPriorities.clear();
+            m_filterDueDate = 0;
+        }
+        if (font_icons) ImGui::PopFont();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Clear All Filters");
+        ImGui::SameLine();
+    }
 
     // Columns filter button
     if (font_icons)
@@ -761,24 +1129,24 @@ void ShotView::DrawShotsPanel(HWND hwnd)
         // Name column (always first)
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort);
 
-        // Metadata columns (conditional)
+        // Metadata columns (conditional) - widths adjusted for typical shot content
         if (m_visibleColumns["Status"])
-            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 140.0f);
 
         if (m_visibleColumns["Category"])
-            ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 130.0f);
 
         if (m_visibleColumns["Artist"])
-            ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+            ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 150.0f);
 
         if (m_visibleColumns["Priority"])
-            ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 110.0f);
 
         if (m_visibleColumns["DueDate"])
-            ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 110.0f);
 
         if (m_visibleColumns["Notes"])
-            ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+            ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthFixed, 300.0f);
 
         if (m_visibleColumns["Links"])
             ImGui::TableSetupColumn("Links", ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -902,6 +1270,10 @@ void ShotView::DrawShotsPanel(HWND hwnd)
         for (int i = 0; i < m_shots.size(); i++)
         {
             const FileEntry& entry = m_shots[i];
+
+            // Apply filters - skip if doesn't pass
+            if (!PassesFilters(entry))
+                continue;
 
             // Set minimum row height (match transcoding queue style)
             ImGui::TableNextRow(ImGuiTableRowFlags_None, 35.0f);
@@ -1556,7 +1928,6 @@ void ShotView::DrawProjectsPanel(HWND hwnd)
     ImGui::Text("Projects");
 
     // Refresh button
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
     if (font_icons)
     {
         ImGui::PushFont(font_icons);
@@ -1690,6 +2061,12 @@ void ShotView::DrawProjectsPanel(HWND hwnd)
             // Context menu
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
             {
+                // If right-clicked item is not in selection, select only it
+                if (!isSelected)
+                {
+                    m_selectedProjectIndices.clear();
+                    m_selectedProjectIndices.insert(i);
+                }
                 ImGui::OpenPopup("project_context_menu");
             }
 
@@ -2082,6 +2459,12 @@ void ShotView::DrawRendersPanel(HWND hwnd)
             // Context menu
             if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
             {
+                // If right-clicked item is not in selection, select only it
+                if (!isSelected)
+                {
+                    m_selectedRenderIndices.clear();
+                    m_selectedRenderIndices.insert(i);
+                }
                 ImGui::OpenPopup("render_context_menu");
             }
 
@@ -2128,20 +2511,91 @@ void ShotView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType
         WideCharToMultiByte(CP_UTF8, 0, entry.name.c_str(), -1, nameUtf8, sizeof(nameUtf8), nullptr, nullptr);
 
         // Header with filename
-        ImGui::TextDisabled("%s", nameUtf8);
+        int selectionCount = 0;
+        if (panelType == PanelType::Projects)
+            selectionCount = static_cast<int>(m_selectedProjectIndices.size());
+        else if (panelType == PanelType::Renders)
+            selectionCount = static_cast<int>(m_selectedRenderIndices.size());
+
+        if (selectionCount > 1)
+        {
+            ImGui::TextDisabled("%d items selected", selectionCount);
+        }
+        else
+        {
+            ImGui::TextDisabled("%s", nameUtf8);
+        }
         ImGui::Separator();
 
-        // Copy (file operation) - simplified since shot view doesn't have multi-select
+        // Copy (file operation) - supports multi-select
         if (ImGui::MenuItem("Copy"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            if (panelType == PanelType::Projects && !m_selectedProjectIndices.empty())
+            {
+                // Copy all selected project files
+                for (int idx : m_selectedProjectIndices)
+                {
+                    if (idx >= 0 && idx < m_projectFiles.size())
+                    {
+                        paths.push_back(m_projectFiles[idx].fullPath);
+                    }
+                }
+            }
+            else if (panelType == PanelType::Renders && !m_selectedRenderIndices.empty())
+            {
+                // Copy all selected render files
+                for (int idx : m_selectedRenderIndices)
+                {
+                    if (idx >= 0 && idx < m_renderFiles.size())
+                    {
+                        paths.push_back(m_renderFiles[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: copy just this file
+                paths.push_back(entry.fullPath);
+            }
+
             CopyFilesToClipboard(paths);
         }
 
-        // Cut (file operation)
+        // Cut (file operation) - supports multi-select
         if (ImGui::MenuItem("Cut"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            if (panelType == PanelType::Projects && !m_selectedProjectIndices.empty())
+            {
+                // Cut all selected project files
+                for (int idx : m_selectedProjectIndices)
+                {
+                    if (idx >= 0 && idx < m_projectFiles.size())
+                    {
+                        paths.push_back(m_projectFiles[idx].fullPath);
+                    }
+                }
+            }
+            else if (panelType == PanelType::Renders && !m_selectedRenderIndices.empty())
+            {
+                // Cut all selected render files
+                for (int idx : m_selectedRenderIndices)
+                {
+                    if (idx >= 0 && idx < m_renderFiles.size())
+                    {
+                        paths.push_back(m_renderFiles[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: cut just this file
+                paths.push_back(entry.fullPath);
+            }
+
             CutFilesToClipboard(paths);
         }
 
@@ -2180,10 +2634,23 @@ void ShotView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType
             RevealInExplorer(entry.fullPath);
         }
 
+        // Open in New Window
+        if (onOpenInNewWindow)
+        {
+            if (ImGui::MenuItem("Open in New Window"))
+            {
+                // For files, open the parent directory; for directories, open the directory itself
+                std::filesystem::path targetPath(entry.fullPath);
+                std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                onOpenInNewWindow(pathToOpen);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
         // Open in Browser 1 and Browser 2
         if (onOpenInBrowser1)
         {
-            if (ImGui::MenuItem("Open in Browser 1"))
+            if (ImGui::MenuItem("Open in the Left Browser"))
             {
                 // For files, open the parent directory; for directories, open the directory itself
                 std::filesystem::path targetPath(entry.fullPath);
@@ -2195,7 +2662,7 @@ void ShotView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType
 
         if (onOpenInBrowser2)
         {
-            if (ImGui::MenuItem("Open in Browser 2"))
+            if (ImGui::MenuItem("Open in the Right Browser"))
             {
                 // For files, open the parent directory; for directories, open the directory itself
                 std::filesystem::path targetPath(entry.fullPath);
@@ -2317,6 +2784,48 @@ void ShotView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType
             }
         }
 
+        // Submit to Deadline (only for .blend files in Projects panel)
+        if (!entry.isDirectory && panelType == PanelType::Projects)
+        {
+            // Check if this is a .blend file
+            std::filesystem::path filePath(entry.fullPath);
+            std::wstring ext = filePath.extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+            if (ext == L".blend" && onSubmitToDeadline)
+            {
+                // Use bright variant of accent color
+                ImVec4 accentColor = GetAccentColor();
+                ImVec4 brightAccent = ImVec4(
+                    accentColor.x * 1.3f,
+                    accentColor.y * 1.3f,
+                    accentColor.z * 1.3f,
+                    1.0f
+                );
+                ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+                if (ImGui::MenuItem("Submit to Deadline"))
+                {
+                    // Get job name from shot name
+                    std::wstring jobName = GetJobName() + L" - " + m_categoryName;
+                    if (m_selectedShotIndex >= 0 && m_selectedShotIndex < m_shots.size())
+                    {
+                        jobName = jobName + L" - " + m_shots[m_selectedShotIndex].name;
+                    }
+
+                    // Call callback with single blend file
+                    if (onSubmitToDeadline)
+                    {
+                        onSubmitToDeadline(entry.fullPath, jobName);
+                    }
+
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGui::PopStyleColor();
+            }
+        }
+
         ImGui::Separator();
 
         // Rename
@@ -2378,12 +2887,79 @@ void ShotView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType
             ImGui::PopStyleColor();
         }
 
+        // Copy ufb:/// link
+        {
+            ImVec4 accentColor = GetAccentColor();
+            ImVec4 brightAccent = ImVec4(
+                accentColor.x * 1.3f,
+                accentColor.y * 1.3f,
+                accentColor.z * 1.3f,
+                1.0f
+            );
+            ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+            if (ImGui::MenuItem("Copy ufb:/// link"))
+            {
+                // Generate URI for this path
+                std::string uri = UFB::BuildPathURI(entry.fullPath);
+
+                // Copy to clipboard
+                ImGui::SetClipboardText(uri.c_str());
+
+                std::wcout << L"[ShotView] Copied ufb:/// link to clipboard: "
+                           << UFB::Utf8ToWide(uri) << std::endl;
+
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::PopStyleColor();
+        }
+
         ImGui::Separator();
 
-        // Delete
+        // More Options - opens Windows context menu
+        if (ImGui::MenuItem("More Options..."))
+        {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            ShowContextMenu(hwnd, entry.fullPath, mousePos);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::Separator();
+
+        // Delete - supports multi-select
         if (ImGui::MenuItem("Delete"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            if (panelType == PanelType::Projects && !m_selectedProjectIndices.empty())
+            {
+                // Delete all selected project files
+                for (int idx : m_selectedProjectIndices)
+                {
+                    if (idx >= 0 && idx < m_projectFiles.size())
+                    {
+                        paths.push_back(m_projectFiles[idx].fullPath);
+                    }
+                }
+            }
+            else if (panelType == PanelType::Renders && !m_selectedRenderIndices.empty())
+            {
+                // Delete all selected render files
+                for (int idx : m_selectedRenderIndices)
+                {
+                    if (idx >= 0 && idx < m_renderFiles.size())
+                    {
+                        paths.push_back(m_renderFiles[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: delete just this file
+                paths.push_back(entry.fullPath);
+            }
+
             DeleteFilesToRecycleBin(paths);
         }
 
@@ -2560,6 +3136,110 @@ void ShotView::DeleteFilesToRecycleBin(const std::vector<std::wstring>& paths)
     }
 }
 
+void ShotView::ShowContextMenu(HWND hwnd, const std::wstring& path, const ImVec2& screenPos)
+{
+    // Get the full native Windows shell context menu with all options
+    HRESULT hr = CoInitialize(nullptr);
+
+    // Parse the file path to get parent folder and item
+    std::filesystem::path fsPath(path);
+    std::wstring parentPath = fsPath.parent_path().wstring();
+    std::wstring fileName = fsPath.filename().wstring();
+
+    // Get the desktop folder interface
+    IShellFolder* pDesktopFolder = nullptr;
+    hr = SHGetDesktopFolder(&pDesktopFolder);
+    if (FAILED(hr) || !pDesktopFolder)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Parse the parent path to get its PIDL
+    LPITEMIDLIST pidlParent = nullptr;
+    hr = pDesktopFolder->ParseDisplayName(hwnd, nullptr, (LPWSTR)parentPath.c_str(), nullptr, &pidlParent, nullptr);
+    if (FAILED(hr) || !pidlParent)
+    {
+        pDesktopFolder->Release();
+        CoUninitialize();
+        return;
+    }
+
+    // Get the IShellFolder for the parent directory
+    IShellFolder* pParentFolder = nullptr;
+    hr = pDesktopFolder->BindToObject(pidlParent, nullptr, IID_IShellFolder, (void**)&pParentFolder);
+    CoTaskMemFree(pidlParent);
+    pDesktopFolder->Release();
+
+    if (FAILED(hr) || !pParentFolder)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Parse the file name to get its PIDL relative to parent
+    LPITEMIDLIST pidlItem = nullptr;
+    hr = pParentFolder->ParseDisplayName(hwnd, nullptr, (LPWSTR)fileName.c_str(), nullptr, &pidlItem, nullptr);
+    if (FAILED(hr) || !pidlItem)
+    {
+        pParentFolder->Release();
+        CoUninitialize();
+        return;
+    }
+
+    // Get the IContextMenu interface
+    IContextMenu* pContextMenu = nullptr;
+    LPCITEMIDLIST pidlArray[1] = { pidlItem };
+    hr = pParentFolder->GetUIObjectOf(hwnd, 1, pidlArray, IID_IContextMenu, nullptr, (void**)&pContextMenu);
+    CoTaskMemFree(pidlItem);
+    pParentFolder->Release();
+
+    if (FAILED(hr) || !pContextMenu)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Create the context menu
+    HMENU hMenu = CreatePopupMenu();
+    if (hMenu)
+    {
+        // Populate the menu with shell items
+        hr = pContextMenu->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE);
+
+        if (SUCCEEDED(hr))
+        {
+            // Convert ImGui screen coordinates to Windows coordinates
+            POINT pt;
+            pt.x = (LONG)screenPos.x;
+            pt.y = (LONG)screenPos.y;
+
+            // Show the menu
+            int cmd = TrackPopupMenuEx(hMenu, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, hwnd, nullptr);
+
+            // Execute the selected command
+            if (cmd > 0)
+            {
+                CMINVOKECOMMANDINFOEX info = { 0 };
+                info.cbSize = sizeof(info);
+                info.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+                info.hwnd = hwnd;
+                info.lpVerb = MAKEINTRESOURCEA(cmd - 1);
+                info.lpVerbW = MAKEINTRESOURCEW(cmd - 1);
+                info.nShow = SW_SHOWNORMAL;
+                info.ptInvoke = pt;
+
+                pContextMenu->InvokeCommand((LPCMINVOKECOMMANDINFO)&info);
+            }
+        }
+
+        DestroyMenu(hMenu);
+    }
+
+    pContextMenu->Release();
+    CoUninitialize();
+}
+
 std::string ShotView::FormatFileSize(uintmax_t size)
 {
     const char* units[] = { "B", "KB", "MB", "GB", "TB" };
@@ -2618,6 +3298,19 @@ void ShotView::LoadMetadata()
     {
         m_shotMetadataMap[metadata.shotPath] = metadata;
     }
+
+    // Collect available filter values from metadata
+    CollectAvailableFilterValues();
+}
+
+void ShotView::ReloadMetadata()
+{
+    // Reload metadata from database (called by observer when remote changes arrive)
+    LoadMetadata();
+
+    // Note: We don't need to refresh shots here - just updating the metadata map
+    // The UI will pick up the new metadata on next frame
+    std::wcout << L"[ShotView] Metadata reloaded successfully" << std::endl;
 }
 
 void ShotView::LoadColumnVisibility()
@@ -2911,4 +3604,148 @@ bool ShotView::CreateNewShot(const std::string& shotName)
         std::cerr << "[ShotView] Error creating shot: " << e.what() << std::endl;
         return false;
     }
+}
+
+void ShotView::CollectAvailableFilterValues()
+{
+    // Clear previous values
+    m_availableStatuses.clear();
+    m_availableCategories.clear();
+    m_availableArtists.clear();
+    m_availablePriorities.clear();
+
+    if (!m_projectConfig || !m_projectConfig->IsLoaded())
+        return;
+
+    // Get folder type (category name as UTF-8)
+    std::string folderType = UFB::WideToUtf8(m_categoryName);
+
+    // Get status options from ProjectConfig
+    auto statusOptions = m_projectConfig->GetStatusOptions(folderType);
+    for (const auto& statusOpt : statusOptions)
+    {
+        m_availableStatuses.insert(statusOpt.name);
+    }
+
+    // Get category options from ProjectConfig
+    auto categoryOptions = m_projectConfig->GetCategoryOptions(folderType);
+    for (const auto& categoryOpt : categoryOptions)
+    {
+        m_availableCategories.insert(categoryOpt.name);
+    }
+
+    // Get users (artists) from ProjectConfig
+    auto users = m_projectConfig->GetUsers();
+    for (const auto& user : users)
+    {
+        m_availableArtists.insert(user.displayName);
+    }
+
+    // Get priority options from ProjectConfig
+    auto priorityOptions = m_projectConfig->GetPriorityOptions();
+    for (int priority : priorityOptions)
+    {
+        m_availablePriorities.insert(priority);
+    }
+}
+
+bool ShotView::PassesFilters(const FileEntry& entry)
+{
+    // Get metadata for this shot
+    auto it = m_shotMetadataMap.find(entry.fullPath);
+    if (it == m_shotMetadataMap.end())
+    {
+        // No metadata - only show if all filters are empty (showing all)
+        return m_filterStatuses.empty() && m_filterCategories.empty() &&
+               m_filterArtists.empty() && m_filterPriorities.empty() && m_filterDueDate == 0;
+    }
+
+    const UFB::ShotMetadata& metadata = it->second;
+
+    // Check status filter
+    if (!m_filterStatuses.empty())
+    {
+        if (m_filterStatuses.find(metadata.status) == m_filterStatuses.end())
+            return false;
+    }
+
+    // Check category filter
+    if (!m_filterCategories.empty())
+    {
+        if (m_filterCategories.find(metadata.category) == m_filterCategories.end())
+            return false;
+    }
+
+    // Check artist filter
+    if (!m_filterArtists.empty())
+    {
+        if (m_filterArtists.find(metadata.artist) == m_filterArtists.end())
+            return false;
+    }
+
+    // Check priority filter
+    if (!m_filterPriorities.empty())
+    {
+        if (m_filterPriorities.find(metadata.priority) == m_filterPriorities.end())
+            return false;
+    }
+
+    // Check due date filter
+    if (m_filterDueDate != 0 && metadata.dueDate > 0)
+    {
+        auto now = std::chrono::system_clock::now();
+        auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+        auto dueDateMs = metadata.dueDate;
+        auto diff = dueDateMs - nowMs;
+
+        bool passes = false;
+        switch (m_filterDueDate)
+        {
+            case 1: // Today
+            {
+                // Due date is within next 24 hours
+                passes = (diff >= 0 && diff < 24 * 60 * 60 * 1000);
+                break;
+            }
+            case 2: // Yesterday
+            {
+                // Due date was within last 24 hours
+                passes = (diff < 0 && diff > -24 * 60 * 60 * 1000);
+                break;
+            }
+            case 3: // Last 7 days
+            {
+                // Due date is within next 7 days
+                passes = (diff >= 0 && diff < 7 * 24 * 60 * 60 * 1000);
+                break;
+            }
+            case 4: // Last 30 days
+            {
+                // Due date is within next 30 days
+                passes = (diff >= 0 && diff < 30 * 24 * 60 * 60 * 1000);
+                break;
+            }
+            case 5: // This year
+            {
+                // Due date is within this calendar year
+                auto dueTime = std::chrono::system_clock::time_point(std::chrono::milliseconds(dueDateMs));
+                std::time_t dueTimeT = std::chrono::system_clock::to_time_t(dueTime);
+                std::time_t nowTimeT = std::chrono::system_clock::to_time_t(now);
+
+                std::tm dueTm;
+                std::tm nowTm;
+                localtime_s(&dueTm, &dueTimeT);
+                localtime_s(&nowTm, &nowTimeT);
+
+                passes = (dueTm.tm_year == nowTm.tm_year);
+                break;
+            }
+        }
+
+        if (!passes)
+            return false;
+    }
+
+    return true;
 }

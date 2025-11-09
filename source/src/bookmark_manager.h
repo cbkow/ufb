@@ -34,6 +34,10 @@ public:
     std::optional<Bookmark> GetBookmark(int bookmarkId);
     std::optional<Bookmark> GetBookmarkByPath(const std::wstring& path);
 
+    // Export/Import bookmarks
+    bool ExportBookmarksToJSON(const std::wstring& filePath);
+    bool ImportBookmarksFromJSON(const std::wstring& filePath);
+
 private:
     sqlite3* m_db = nullptr;
 

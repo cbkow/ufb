@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <mutex>
 #include <functional>
 #include <filesystem>
 #include "imgui.h"
@@ -42,6 +43,9 @@ public:
 
     // Set the current directory
     void SetCurrentDirectory(const std::wstring& path);
+
+    // Set the current directory and select a specific file
+    void SetCurrentDirectoryAndSelectFile(const std::wstring& directoryPath, const std::wstring& filePathToSelect);
 
     // Get the current directory
     const std::wstring& GetCurrentDirectory() const { return m_currentDirectory; }
@@ -83,6 +87,10 @@ public:
     std::function<void(const std::wstring& path)> onOpenInBrowser1;
     std::function<void(const std::wstring& path)> onOpenInBrowser2;
 
+    // Callback for adding custom context menu items
+    // Called during context menu rendering, passes selected file paths
+    std::function<void(const std::vector<std::wstring>&)> onCustomContextMenu;
+
 private:
     // Refresh the file list for the current directory
     void RefreshFileList();
@@ -98,6 +106,9 @@ private:
 
     // Navigate to a specific directory
     void NavigateTo(const std::wstring& path);
+
+    // Create new job folder from template
+    void CreateJobFromTemplate(const std::string& jobNumber, const std::string& jobName);
 
     // Show context menu for a file/folder (Windows native menu)
     void ShowContextMenu(HWND hwnd, const std::wstring& path, const ImVec2& screenPos);
@@ -133,6 +144,7 @@ private:
 
     // List of files in current directory
     std::vector<FileEntry> m_files;
+    mutable std::mutex m_filesMutex;  // Protects m_files from concurrent access
 
     // Icon manager
     IconManager m_iconManager;
@@ -211,6 +223,11 @@ private:
     // New u.f.b. folder dialog state
     bool m_showNewUFBFolderDialog = false;
     char m_newUFBFolderNameBuffer[256] = {};
+
+    // New job dialog state
+    bool m_showNewJobDialog = false;
+    char m_newJobNumberBuffer[64] = {};
+    char m_newJobNameBuffer[256] = {};
 
     // Path bar edit state
     char m_pathBuffer[1024] = {};

@@ -5,6 +5,8 @@
 #include <optional>
 #include <filesystem>
 #include <memory>
+#include <functional>
+#include <mutex>
 #include <sqlite3.h>
 
 namespace UFB {
@@ -55,6 +57,9 @@ struct ShotMetadata
 // Typedef for clarity (Shot/Asset/Posting/Task metadata all use same structure)
 using ItemMetadata = ShotMetadata;
 
+// Forward declaration
+class MetadataManager;
+
 class SubscriptionManager
 {
 public:
@@ -63,6 +68,9 @@ public:
 
     // Initialize the subscription database
     bool Initialize();
+
+    // Set MetadataManager for bridging shot_metadata <-> shot_cache
+    void SetMetadataManager(MetadataManager* metaManager);
 
     // Shutdown and cleanup
     void Shutdown();
@@ -99,18 +107,40 @@ public:
     bool CreateManualTask(const std::wstring& jobPath, const std::string& taskName, const ShotMetadata& metadata);
     bool DeleteManualTask(int taskId);
 
+    // Metadata bridging (for MetadataManager to call)
+    void BridgeFromSyncCache(const struct Shot& shot, const std::wstring& jobPath);
+
     // Get database handle for other managers (BookmarkManager, etc.)
     sqlite3* GetDatabase() const { return m_db; }
+
+    // Register callback for when local changes are made (for immediate P2P notifications)
+    void RegisterLocalChangeCallback(std::function<void(const std::wstring& jobPath, uint64_t timestamp)> callback)
+    {
+        m_localChangeCallback = callback;
+    }
+
+    // Metadata bridging - convert ShotMetadata to change log entry (for initial discovery)
+    void BridgeToSyncCache(const ShotMetadata& metadata, const std::wstring& jobPath);
 
 private:
     sqlite3* m_db = nullptr;
     std::filesystem::path m_dbPath;
+    MetadataManager* m_metaManager = nullptr;  // For bridging metadata systems
+    std::function<void(const std::wstring& jobPath, uint64_t timestamp)> m_localChangeCallback;  // For immediate P2P notifications
+
+    // Thread safety - protect all database operations
+    // Using recursive_mutex to allow re-entrant locking (some functions call other locked functions)
+    mutable std::recursive_mutex m_dbMutex;
 
     // Internal helpers
     bool CreateTables();
     bool ExecuteSQL(const char* sql);
     std::string SyncStatusToString(SyncStatus status);
     SyncStatus StringToSyncStatus(const std::string& str);
+
+    // Path helpers
+    std::wstring GetRelativePath(const std::wstring& absolutePath, const std::wstring& jobPath);
+    std::wstring GetAbsolutePath(const std::wstring& relativePath, const std::wstring& jobPath);
 };
 
 } // namespace UFB

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
@@ -29,17 +30,25 @@
 #include "bookmark_manager.h"
 #include "subscription_panel.h"
 #include "transcode_queue_panel.h"
+#include "deadline_queue_panel.h"
+#include "deadline_submit_dialog.h"
+#include "settings_dialog.h"
 #include "project_config.h"
 #include "shot_view.h"
 #include "assets_view.h"
 #include "postings_view.h"
 #include "project_tracker_view.h"
+#include "aggregated_tracker_view.h"
 #include "utils.h"
 
 using json = nlohmann::json;
 
 // Windows accent color toggle state
 bool use_windows_accent_color = true;
+
+// UI Settings
+float g_fontScale = 1.0f;
+std::string g_frameioApiKey;
 
 // Font pointers
 ImFont* font_regular = nullptr;
@@ -94,6 +103,406 @@ struct BrowserWindowData {
     std::wstring currentPath;
 };
 std::vector<BrowserWindowData> saved_browser_windows;
+
+// ============================================================================
+// SINGLE INSTANCE AND COMMAND-LINE PATH HANDLING
+// ============================================================================
+
+// Pending path from command-line or another instance
+struct PendingPathAction {
+    std::wstring path;
+    bool shouldShow = false;
+
+    // Path analysis results
+    bool isInSyncedJob = false;
+    std::wstring jobPath;
+
+    // Shot view info (if applicable)
+    bool hasShotCategory = false;
+    std::wstring categoryPath;
+    std::wstring categoryName;
+    std::wstring specificShotPath;  // Empty if opening category, otherwise the specific shot
+
+    // Assets view info (if applicable)
+    bool hasAssetsFolder = false;
+    std::wstring assetsFolderPath;
+    std::wstring assetsJobName;
+    std::wstring specificAssetPath;  // Empty if opening folder, otherwise the specific asset
+
+    // Postings view info (if applicable)
+    bool hasPostingsFolder = false;
+    std::wstring postingsFolderPath;
+    std::wstring postingsJobName;
+    std::wstring specificPostingPath;  // Empty if opening folder, otherwise the specific posting
+};
+
+static PendingPathAction g_pendingPath;
+
+// Static members for window procedure and single-instance
+static WNDPROC g_originalWndProc = nullptr;
+static HWND g_hwnd = nullptr;
+
+// Forward declarations for callbacks (will be set in main)
+static std::function<void(const std::wstring&, const std::wstring&)> g_openShotViewCallback;
+static std::function<void(const std::wstring&, const std::wstring&)> g_openAssetsViewCallback;
+static std::function<void(const std::wstring&, const std::wstring&)> g_openPostingsViewCallback;
+static std::function<void(const std::wstring&)> g_openInBrowser1Callback;
+static std::function<void(const std::wstring&)> g_openInBrowser2Callback;
+static std::function<void(const std::wstring&)> g_openInNewWindowCallback;
+
+// Pointers to the view vectors (will be set in main)
+static std::vector<std::unique_ptr<ShotView>>* g_shotViews = nullptr;
+static std::vector<std::unique_ptr<AssetsView>>* g_assetsViews = nullptr;
+static std::vector<std::unique_ptr<PostingsView>>* g_postingsViews = nullptr;
+
+// Pointer to subscription manager (will be set in main)
+static UFB::SubscriptionManager* g_subscriptionManager = nullptr;
+
+// Shot category names for detection
+static const std::set<std::wstring> g_shotCategories = {
+    L"3d", L"ae", L"audition", L"illustrator", L"photoshop", L"premiere"
+};
+
+// Forward declaration
+static void AnalyzePath(const std::wstring& path);
+
+// Custom window procedure to handle WM_COPYDATA from other instances
+static LRESULT CALLBACK CustomWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_COPYDATA) {
+        COPYDATASTRUCT* pcds = (COPYDATASTRUCT*)lParam;
+        if (pcds->dwData == 1) {  // Our message ID
+            std::string received = (char*)pcds->lpData;
+            std::wstring receivedPath;
+
+            // Check if it's a ufb:/// URI
+            if (received.substr(0, 7) == "ufb:///") {
+                std::cout << "[SingleInstance] Received ufb:/// URI from another instance" << std::endl;
+                receivedPath = UFB::ParsePathURI(received);
+                if (receivedPath.empty()) {
+                    std::cerr << "[SingleInstance] ERROR: Failed to parse URI: " << received << std::endl;
+                    return 0;
+                }
+                std::wcout << L"[SingleInstance] Parsed path from URI: " << receivedPath << std::endl;
+            } else {
+                // Regular path
+                receivedPath = UFB::Utf8ToWide(received);
+                std::wcout << L"[SingleInstance] Received path from another instance: " << receivedPath << std::endl;
+            }
+
+            // Analyze the path and show the modal
+            AnalyzePath(receivedPath);
+            g_pendingPath.shouldShow = true;
+
+            // Bring window to front
+            SetForegroundWindow(hwnd);
+            ShowWindow(hwnd, SW_RESTORE);
+            return 0;
+        }
+    }
+
+    return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
+}
+
+// Find existing instance window by looking for our unique property
+static HWND FindExistingInstanceWindow() {
+    HWND result = NULL;
+
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+        // Check if this window has our unique property
+        HANDLE prop = GetPropW(hwnd, L"ufb_SingleInstanceWindow");
+        if (prop == (HANDLE)0x554642) {  // "UFB" in hex
+            HWND* result = (HWND*)lParam;
+            *result = hwnd;
+            return FALSE;  // Stop enumeration
+        }
+        return TRUE;  // Continue enumeration
+    }, (LPARAM)&result);
+
+    return result;
+}
+
+// Setup single-instance messaging
+static void SetupSingleInstanceMessaging(HWND hwnd) {
+    g_hwnd = hwnd;
+
+    // Store a unique property on the window so other instances can identify it
+    SetPropW(hwnd, L"ufb_SingleInstanceWindow", (HANDLE)0x554642);  // "UFB" in hex
+
+    // Hook window procedure to handle WM_COPYDATA
+    if (!g_originalWndProc) {
+        g_originalWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)CustomWndProc);
+    }
+
+    std::cout << "[SingleInstance] Messaging setup complete - window tagged for IPC" << std::endl;
+}
+
+// Analyze path to determine what type of view to open
+static void AnalyzePath(const std::wstring& path) {
+    g_pendingPath = {};  // Reset
+    g_pendingPath.path = path;
+
+    if (!g_subscriptionManager) {
+        std::wcout << L"[PathAnalysis] SubscriptionManager not available yet" << std::endl;
+        return;
+    }
+
+    // Check if path is in a synced job
+    auto jobPathOptional = g_subscriptionManager->GetJobPathForPath(path);
+    if (jobPathOptional.has_value()) {
+        g_pendingPath.jobPath = jobPathOptional.value();
+        g_pendingPath.isInSyncedJob = true;
+    } else {
+        g_pendingPath.jobPath.clear();
+        g_pendingPath.isInSyncedJob = false;
+    }
+
+    if (!g_pendingPath.isInSyncedJob) {
+        std::wcout << L"[PathAnalysis] Path is not in a synced job: " << path << std::endl;
+        return;
+    }
+
+    std::wcout << L"[PathAnalysis] Path is in synced job: " << g_pendingPath.jobPath << std::endl;
+
+    // Walk up the path to find shot category, assets, or postings folder
+    std::filesystem::path current = std::filesystem::path(path);
+    std::filesystem::path jobFsPath = std::filesystem::path(g_pendingPath.jobPath);
+
+    while (current != jobFsPath && current.has_parent_path()) {
+        std::wstring folderName = current.filename().wstring();
+        std::wstring lowerFolderName = folderName;
+        std::transform(lowerFolderName.begin(), lowerFolderName.end(), lowerFolderName.begin(), ::towlower);
+
+        // Check if this is a shot category folder
+        if (g_shotCategories.count(lowerFolderName)) {
+            g_pendingPath.hasShotCategory = true;
+            g_pendingPath.categoryPath = current.wstring();
+            g_pendingPath.categoryName = folderName;
+
+            // Check if there's a specific shot folder below the category
+            if (std::filesystem::path(path) != current && std::filesystem::path(path).string().find(current.string()) == 0) {
+                // Get the immediate child of the category path
+                std::filesystem::path relativePath = std::filesystem::path(path).lexically_relative(current);
+                if (relativePath.begin() != relativePath.end()) {
+                    g_pendingPath.specificShotPath = (current / *relativePath.begin()).wstring();
+                }
+            }
+
+            std::wcout << L"[PathAnalysis] Found shot category: " << g_pendingPath.categoryName
+                       << L" at " << g_pendingPath.categoryPath << std::endl;
+            if (!g_pendingPath.specificShotPath.empty()) {
+                std::wcout << L"[PathAnalysis] Specific shot: " << g_pendingPath.specificShotPath << std::endl;
+            }
+            break;
+        }
+
+        // Check if this is assets folder
+        if (lowerFolderName == L"assets") {
+            g_pendingPath.hasAssetsFolder = true;
+            g_pendingPath.assetsFolderPath = current.wstring();
+            g_pendingPath.assetsJobName = current.parent_path().filename().wstring();
+
+            // Check if there's a specific asset below
+            if (std::filesystem::path(path) != current && std::filesystem::path(path).string().find(current.string()) == 0) {
+                std::filesystem::path relativePath = std::filesystem::path(path).lexically_relative(current);
+                if (relativePath.begin() != relativePath.end()) {
+                    g_pendingPath.specificAssetPath = (current / *relativePath.begin()).wstring();
+                }
+            }
+
+            std::wcout << L"[PathAnalysis] Found assets folder: " << g_pendingPath.assetsFolderPath << std::endl;
+            if (!g_pendingPath.specificAssetPath.empty()) {
+                std::wcout << L"[PathAnalysis] Specific asset: " << g_pendingPath.specificAssetPath << std::endl;
+            }
+            break;
+        }
+
+        // Check if this is postings folder
+        if (lowerFolderName == L"postings") {
+            g_pendingPath.hasPostingsFolder = true;
+            g_pendingPath.postingsFolderPath = current.wstring();
+            g_pendingPath.postingsJobName = current.parent_path().filename().wstring();
+
+            // Check if there's a specific posting below
+            if (std::filesystem::path(path) != current && std::filesystem::path(path).string().find(current.string()) == 0) {
+                std::filesystem::path relativePath = std::filesystem::path(path).lexically_relative(current);
+                if (relativePath.begin() != relativePath.end()) {
+                    g_pendingPath.specificPostingPath = (current / *relativePath.begin()).wstring();
+                }
+            }
+
+            std::wcout << L"[PathAnalysis] Found postings folder: " << g_pendingPath.postingsFolderPath << std::endl;
+            if (!g_pendingPath.specificPostingPath.empty()) {
+                std::wcout << L"[PathAnalysis] Specific posting: " << g_pendingPath.specificPostingPath << std::endl;
+            }
+            break;
+        }
+
+        current = current.parent_path();
+    }
+}
+
+// Render the path action modal
+static void RenderPathActionModal() {
+    if (g_pendingPath.shouldShow) {
+        ImGui::OpenPopup("Open Path##PathActionModal");
+        g_pendingPath.shouldShow = false;  // Only open once
+    }
+
+    // Center the modal in the visible area (not just the main viewport)
+    // Use current window (DockSpace) center for proper positioning with docking
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImVec2 work_pos = viewport->WorkPos;
+    ImVec2 work_size = viewport->WorkSize;
+    ImVec2 center = ImVec2(work_pos.x + work_size.x * 0.5f, work_pos.y + work_size.y * 0.5f);
+    ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Open Path##PathActionModal", NULL,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+
+        ImGui::TextWrapped("Choose where to open:");
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.9f, 1.0f, 1.0f));
+        ImGui::TextWrapped("%s", UFB::WideToUtf8(g_pendingPath.path).c_str());
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Show special view option for Shot View
+        if (g_pendingPath.hasShotCategory && g_openShotViewCallback && g_shotViews) {
+            if (ImGui::Button("Open in Shot View", ImVec2(300, 0))) {
+                std::wcout << L"[Modal] Opening Shot View for category: " << g_pendingPath.categoryName << std::endl;
+                g_openShotViewCallback(g_pendingPath.categoryPath, g_pendingPath.categoryName);
+
+                // After opening, select the specific shot if we have one
+                if (!g_pendingPath.specificShotPath.empty()) {
+                    for (const auto& sv : *g_shotViews) {
+                        if (sv && sv->GetCategoryPath() == g_pendingPath.categoryPath) {
+                            // Check if we have a deeper file path to select
+                            if (g_pendingPath.path != g_pendingPath.specificShotPath &&
+                                std::filesystem::exists(g_pendingPath.path) &&
+                                std::filesystem::is_regular_file(g_pendingPath.path)) {
+                                // We have a specific file to select in the shot view
+                                sv->SetSelectedShotAndFile(g_pendingPath.specificShotPath, g_pendingPath.path);
+                                std::wcout << L"[Modal] Selected shot and file: " << g_pendingPath.path << std::endl;
+                            } else {
+                                // Just select the shot
+                                sv->SetSelectedShot(g_pendingPath.specificShotPath);
+                                std::wcout << L"[Modal] Selected shot: " << g_pendingPath.specificShotPath << std::endl;
+                            }
+                            std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(g_pendingPath.categoryName);
+                            ImGui::SetWindowFocus(windowTitle.c_str());
+                            break;
+                        }
+                    }
+                }
+
+                g_pendingPath.shouldShow = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Show special view option for Assets View
+        if (g_pendingPath.hasAssetsFolder && g_openAssetsViewCallback && g_assetsViews) {
+            if (ImGui::Button("Open in Assets View", ImVec2(300, 0))) {
+                std::wcout << L"[Modal] Opening Assets View for: " << g_pendingPath.assetsFolderPath << std::endl;
+                g_openAssetsViewCallback(g_pendingPath.assetsFolderPath, g_pendingPath.assetsJobName);
+
+                // After opening, select the specific asset if we have one
+                if (!g_pendingPath.specificAssetPath.empty()) {
+                    for (const auto& av : *g_assetsViews) {
+                        if (av && av->GetAssetsFolderPath() == g_pendingPath.assetsFolderPath) {
+                            // Check if we have a deeper file path to select
+                            if (g_pendingPath.path != g_pendingPath.specificAssetPath &&
+                                std::filesystem::exists(g_pendingPath.path) &&
+                                std::filesystem::is_regular_file(g_pendingPath.path)) {
+                                // We have a specific file to select in the asset view
+                                av->SetSelectedAssetAndFile(g_pendingPath.specificAssetPath, g_pendingPath.path);
+                                std::wcout << L"[Modal] Selected asset and file: " << g_pendingPath.path << std::endl;
+                            } else {
+                                // Just select the asset
+                                av->SetSelectedAsset(g_pendingPath.specificAssetPath);
+                                std::wcout << L"[Modal] Selected asset: " << g_pendingPath.specificAssetPath << std::endl;
+                            }
+                            std::string windowTitle = UFB::WideToUtf8(g_pendingPath.assetsJobName) + " - Assets";
+                            ImGui::SetWindowFocus(windowTitle.c_str());
+                            break;
+                        }
+                    }
+                }
+
+                g_pendingPath.shouldShow = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Show special view option for Postings View
+        if (g_pendingPath.hasPostingsFolder && g_openPostingsViewCallback && g_postingsViews) {
+            if (ImGui::Button("Open in Postings View", ImVec2(300, 0))) {
+                std::wcout << L"[Modal] Opening Postings View for: " << g_pendingPath.postingsFolderPath << std::endl;
+                g_openPostingsViewCallback(g_pendingPath.postingsFolderPath, g_pendingPath.postingsJobName);
+
+                // After opening, select the specific posting if we have one
+                if (!g_pendingPath.specificPostingPath.empty()) {
+                    for (const auto& pv : *g_postingsViews) {
+                        if (pv && pv->GetPostingsFolderPath() == g_pendingPath.postingsFolderPath) {
+                            // Check if we have a deeper file path to select
+                            if (g_pendingPath.path != g_pendingPath.specificPostingPath &&
+                                std::filesystem::exists(g_pendingPath.path) &&
+                                std::filesystem::is_regular_file(g_pendingPath.path)) {
+                                // We have a specific file to select in the posting view
+                                pv->SetSelectedPostingAndFile(g_pendingPath.specificPostingPath, g_pendingPath.path);
+                                std::wcout << L"[Modal] Selected posting and file: " << g_pendingPath.path << std::endl;
+                            } else {
+                                // Just select the posting
+                                pv->SetSelectedPosting(g_pendingPath.specificPostingPath);
+                                std::wcout << L"[Modal] Selected posting: " << g_pendingPath.specificPostingPath << std::endl;
+                            }
+                            std::string windowTitle = UFB::WideToUtf8(g_pendingPath.postingsJobName) + " - Postings";
+                            ImGui::SetWindowFocus(windowTitle.c_str());
+                            break;
+                        }
+                    }
+                }
+
+                g_pendingPath.shouldShow = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Always show browser options
+        if (g_openInBrowser1Callback && ImGui::Button("Open in Left Browser", ImVec2(300, 0))) {
+            std::wcout << L"[Modal] Opening in Left Browser: " << g_pendingPath.path << std::endl;
+            g_openInBrowser1Callback(g_pendingPath.path);
+            g_pendingPath.shouldShow = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (g_openInBrowser2Callback && ImGui::Button("Open in Right Browser", ImVec2(300, 0))) {
+            std::wcout << L"[Modal] Opening in Right Browser: " << g_pendingPath.path << std::endl;
+            g_openInBrowser2Callback(g_pendingPath.path);
+            g_pendingPath.shouldShow = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (g_openInNewWindowCallback && ImGui::Button("Open in New Window", ImVec2(300, 0))) {
+            std::wcout << L"[Modal] Opening in New Window: " << g_pendingPath.path << std::endl;
+            // Pass the original path - the callback will handle file vs directory
+            g_openInNewWindowCallback(g_pendingPath.path);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::Spacing();
+
+        if (ImGui::Button("Cancel", ImVec2(300, 0))) {
+            g_pendingPath.shouldShow = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
+}
 
 static void glfw_error_callback(int error, const char* description)
 {
@@ -296,6 +705,14 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
         j["panels"]["show_transcode_queue"] = showTranscodeQueue;
         j["panels"]["use_windows_accent"] = use_windows_accent_color;
 
+        // Save UI settings
+        j["ui"]["font_scale"] = g_fontScale;
+        if (!g_frameioApiKey.empty()) {
+            j["ui"]["frameio_api_key"] = UFB::Base64Encode(g_frameioApiKey);
+        } else {
+            j["ui"]["frameio_api_key"] = "";
+        }
+
         // Save open shot views (category path and name)
         j["shot_views"] = json::array();
         for (const auto& shotView : shotViews) {
@@ -408,6 +825,18 @@ void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser
             showBrowser2 = j["panels"].value("show_browser2", true);
             showTranscodeQueue = j["panels"].value("show_transcode_queue", false);
             use_windows_accent_color = j["panels"].value("use_windows_accent", true);
+        }
+
+        // Load UI settings
+        if (j.contains("ui")) {
+            g_fontScale = j["ui"].value("font_scale", 1.0f);
+            std::string encodedApiKey = j["ui"].value("frameio_api_key", "");
+            if (!encodedApiKey.empty()) {
+                g_frameioApiKey = UFB::Base64Decode(encodedApiKey);
+            } else {
+                g_frameioApiKey.clear();
+            }
+            std::cout << "Loaded UI settings: font_scale=" << g_fontScale << std::endl;
         }
 
         // Load shot views
@@ -536,7 +965,7 @@ void LoadCustomFonts() {
     std::filesystem::path monoPath = exeDir / "assets" / "fonts" / "JetBrainsMono-Regular.ttf";
     std::filesystem::path iconsPath = exeDir / "assets" / "fonts" / "MaterialSymbolsSharp-Regular.ttf";
 
-    // Load fonts (smaller sizes)
+    // Load fonts at base sizes (scaling will be applied via FontGlobalScale)
     if (std::filesystem::exists(interPath)) {
         font_regular = io.Fonts->AddFontFromFileTTF(interPath.string().c_str(), 18.0f);
     }
@@ -564,6 +993,101 @@ void LoadCustomFonts() {
 
 int main(int argc, char** argv)
 {
+    // Set AppUserModelID for Windows 11 taskbar/start menu integration
+    #ifdef _WIN32
+    SetCurrentProcessExplicitAppUserModelID(L"cbkow.ufb");
+    std::cout << "[Main] Set AppUserModelID to: cbkow.ufb" << std::endl;
+    #endif
+
+    // Set working directory to executable's directory
+    // This ensures assets are found regardless of how the app is launched
+    try {
+        std::filesystem::path exe_path = std::filesystem::absolute(argv[0]);
+        std::filesystem::path exe_dir = exe_path.parent_path();
+        std::filesystem::current_path(exe_dir);
+        std::cout << "[Main] Set working directory to: " << exe_dir.string() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[Main] Warning: Failed to set working directory: " << e.what() << std::endl;
+    }
+
+    // Parse command-line arguments
+    std::wstring cmdLinePath;
+    if (argc > 1) {
+        std::string arg = argv[1];
+
+        // Check if it's a ufb:/// URI
+        if (arg.substr(0, 7) == "ufb:///") {
+            std::cout << "[Main] Detected ufb:/// URI from command-line" << std::endl;
+            cmdLinePath = UFB::ParsePathURI(arg);
+            if (!cmdLinePath.empty()) {
+                std::wcout << L"[Main] Parsed path from URI: " << cmdLinePath << std::endl;
+            } else {
+                std::cerr << "[Main] ERROR: Failed to parse URI: " << arg << std::endl;
+            }
+        } else {
+            // Regular path - convert to wide string
+            cmdLinePath = UFB::Utf8ToWide(arg);
+            std::wcout << L"[Main] Command-line path: " << cmdLinePath << std::endl;
+        }
+    }
+
+    // Single instance enforcement using named mutex and window messaging
+    // This prevents multiple instances and allows new instances to pass paths to the existing instance
+    static HANDLE single_instance_mutex = CreateMutexW(NULL, TRUE, L"Local\\ufb_SingleInstanceMutex");
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::cout << "[Main] Another instance is already running - attempting to pass command to it" << std::endl;
+
+        // Find the existing instance's window
+        HWND existing_window = FindExistingInstanceWindow();
+
+        if (existing_window) {
+            // Send the path if we have one
+            if (!cmdLinePath.empty()) {
+                std::string pathToSend = UFB::WideToUtf8(cmdLinePath);
+                std::cout << "[Main] Sending path to existing instance: " << pathToSend << std::endl;
+
+                // Use WM_COPYDATA to send the path to existing instance
+                COPYDATASTRUCT cds;
+                cds.dwData = 1;  // Message ID
+                cds.cbData = static_cast<DWORD>(pathToSend.length() + 1);
+                cds.lpData = (PVOID)pathToSend.c_str();
+
+                SendMessageW(existing_window, WM_COPYDATA, 0, (LPARAM)&cds);
+
+                std::cout << "[Main] Path sent successfully - exiting" << std::endl;
+            } else {
+                // No path to open, just bring existing window to front
+                std::cout << "[Main] No path to send - just bringing window to front" << std::endl;
+            }
+
+            // Bring existing window to front
+            SetForegroundWindow(existing_window);
+            ShowWindow(existing_window, SW_RESTORE);
+        } else {
+            std::cout << "[Main] ERROR: Could not find existing instance window" << std::endl;
+            MessageBoxW(
+                NULL,
+                L"u.f.b. is already running, but could not communicate with the existing instance.",
+                L"Application Already Running",
+                MB_OK | MB_ICONWARNING
+            );
+        }
+
+        if (single_instance_mutex) {
+            CloseHandle(single_instance_mutex);
+        }
+        return 0;  // Exit gracefully
+    }
+
+    std::cout << "[Main] This is the first instance - continuing startup" << std::endl;
+
+    // Load settings EARLY so we have g_fontScale and window dimensions before initialization
+    bool unused1 = true, unused2 = true, unused3 = true;
+    bool showTranscodeQueue = false;
+    LoadSettings(unused1, unused2, unused3, showTranscodeQueue);
+    std::cout << "[Main] Settings loaded early: font_scale=" << g_fontScale << std::endl;
+
     // Setup window
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit())
@@ -575,8 +1099,10 @@ int main(int argc, char** argv)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // Create window with graphics context
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "u.f.b.", nullptr, nullptr);
+    // Create window with graphics context using saved dimensions (or defaults)
+    int initialWidth = (window_state.width > 0) ? window_state.width : 1280;
+    int initialHeight = (window_state.height > 0) ? window_state.height : 720;
+    GLFWwindow* window = glfwCreateWindow(initialWidth, initialHeight, "u.f.b.", nullptr, nullptr);
     if (window == nullptr)
         return 1;
 
@@ -601,6 +1127,10 @@ int main(int argc, char** argv)
 
     // Load custom fonts (UnionPlayer fonts)
     LoadCustomFonts();
+
+    // Apply font scale from settings
+    io.FontGlobalScale = g_fontScale;
+    std::cout << "Applied font scale: " << g_fontScale << "x" << std::endl;
 
     // Enable docking
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
@@ -636,6 +1166,9 @@ int main(int argc, char** argv)
         SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
         SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
     }
+
+    // Setup single-instance messaging for IPC
+    SetupSingleInstanceMessaging(hwnd);
 #endif
 
     // Initialize global project template on first run
@@ -684,6 +1217,9 @@ int main(int argc, char** argv)
         std::cerr << "Failed to initialize MetadataManager" << std::endl;
         return 1;
     }
+
+    // Bridge metadata systems: connect subscription manager to metadata manager
+    subscriptionManager.SetMetadataManager(&metadataManager);
 
     // Initialize backup manager
     UFB::BackupManager backupManager;
@@ -806,6 +1342,31 @@ int main(int argc, char** argv)
     // Initialize transcode queue panel
     UFB::TranscodeQueuePanel transcodeQueuePanel;
 
+    // Initialize deadline queue panel and submit dialog
+    DeadlineQueuePanel deadlineQueuePanel;
+    deadlineQueuePanel.Initialize();
+
+    DeadlineSubmitDialog deadlineSubmitDialog;
+
+    // Initialize settings dialog
+    SettingsDialog settingsDialog;
+    settingsDialog.SetFontScale(g_fontScale);
+    // settingsDialog.SetFrameioApiKey(g_frameioApiKey);  // Frame.io integration removed
+    settingsDialog.SetFonts(font_regular, font_mono);
+
+    // Wire up deadline submit dialog to queue panel
+    deadlineSubmitDialog.onJobSubmitted = [&deadlineQueuePanel](const DeadlineJob& job) {
+        deadlineQueuePanel.AddRenderJob(job);
+
+        bool wasOpen = deadlineQueuePanel.IsOpen();
+        deadlineQueuePanel.Show();  // Automatically show the queue panel when jobs are added
+
+        if (wasOpen) {
+            // Only try to focus if it was already open
+            ImGui::SetWindowFocus("Deadline Queue");
+        }
+    };
+
     // Set up callbacks for subscription panel
     subscriptionPanel.onNavigateToPath = [&fileBrowser1](const std::wstring& path) {
         fileBrowser1.SetCurrentDirectory(path);  // Default to Browser 1
@@ -832,19 +1393,6 @@ int main(int argc, char** argv)
         ImGui::SetWindowFocus("Transcode Queue");  // Switch to the Transcode Queue tab
     };
 
-    // Set up callbacks to open file location in browsers and switch to Browser tab
-    transcodeQueuePanel.onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
-        fileBrowser1.SetCurrentDirectory(path);
-        // Focus the Browser window to switch to that tab
-        ImGui::SetWindowFocus("Browser");
-    };
-
-    transcodeQueuePanel.onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) {
-        fileBrowser2.SetCurrentDirectory(path);
-        // Focus the Browser window to switch to that tab
-        ImGui::SetWindowFocus("Browser");
-    };
-
     // Shot views management
     std::vector<std::unique_ptr<ShotView>> shotViews;
 
@@ -857,11 +1405,59 @@ int main(int argc, char** argv)
     // Project tracker views management
     std::vector<std::unique_ptr<ProjectTrackerView>> trackerViews;
 
+    // Aggregated tracker view (single instance for all projects)
+    std::unique_ptr<AggregatedTrackerView> aggregatedTrackerView;
+
     // Standalone browser windows management
     std::vector<std::unique_ptr<FileBrowser>> standaloneBrowsers;
 
+    // Set up "Open in New Window" callback for all browsers (defined early so custom views can use it)
+    auto openInNewWindowCallback = [&standaloneBrowsers, &bookmarkManager, &subscriptionManager](const std::wstring& path) {
+        // Create new standalone browser
+        auto browser = std::make_unique<FileBrowser>();
+
+        // Initialize with shared managers
+        browser->Initialize(&bookmarkManager, &subscriptionManager);
+
+        // Check if path is a file or directory
+        if (std::filesystem::exists(path) && std::filesystem::is_regular_file(path)) {
+            // If it's a file, open parent directory and select the file
+            std::wstring parentDir = std::filesystem::path(path).parent_path().wstring();
+            browser->SetCurrentDirectoryAndSelectFile(parentDir, path);
+            std::wcout << L"[Main] Opened standalone browser for directory: " << parentDir
+                       << L" with selected file: " << std::filesystem::path(path).filename().wstring() << std::endl;
+        } else {
+            // If it's a directory, just open it
+            browser->SetCurrentDirectory(path);
+            std::wcout << L"[Main] Opened standalone browser for: " << path << std::endl;
+        }
+
+        // Store browser
+        standaloneBrowsers.push_back(std::move(browser));
+    };
+
+    // Wire up settings dialog callback
+    settingsDialog.onSettingsSaved = [&window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &standaloneBrowsers, &settingsDialog]() {
+        // Update global settings from dialog
+        g_fontScale = settingsDialog.GetFontScale();
+        // g_frameioApiKey = settingsDialog.GetFrameioApiKey();  // Frame.io integration removed
+
+        std::cout << "[Settings] Applying font scale: " << g_fontScale << "x" << std::endl;
+        // std::cout << "[Settings] API key " << (g_frameioApiKey.empty() ? "cleared" : "set") << std::endl;
+
+        // Apply font scale immediately (no restart needed)
+        ImGui::GetIO().FontGlobalScale = g_fontScale;
+
+        // Save settings immediately
+        SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(),
+                    shotViews, assetsViews, postingsViews, trackerViews, standaloneBrowsers);
+
+        std::cout << "[Settings] Settings saved to settings.json successfully" << std::endl;
+        std::cout << "[Settings] Font scale applied immediately (no restart needed)" << std::endl;
+    };
+
     // Set up shot view callbacks for both file browsers
-    auto openShotViewCallback = [&shotViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& categoryPath, const std::wstring& categoryName) {
+    auto openShotViewCallback = [&shotViews, &bookmarkManager, &subscriptionManager, &metadataManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, &deadlineSubmitDialog, &openInNewWindowCallback, hwnd](const std::wstring& categoryPath, const std::wstring& categoryName) {
         // Check if this shot view is already open
         for (const auto& sv : shotViews) {
             if (sv && sv->GetCategoryPath() == categoryPath) {
@@ -872,18 +1468,7 @@ int main(int argc, char** argv)
 
         // Create new shot view
         auto shotView = std::make_unique<ShotView>();
-        shotView->Initialize(categoryPath, categoryName, &bookmarkManager, &subscriptionManager);
-
-        // Set up close callback
-        shotView->onClose = [&shotViews, categoryPath]() {
-            // Find and remove this shot view
-            for (auto it = shotViews.begin(); it != shotViews.end(); ++it) {
-                if ((*it) && (*it)->GetCategoryPath() == categoryPath) {
-                    shotViews.erase(it);
-                    break;
-                }
-            }
-        };
+        shotView->Initialize(categoryPath, categoryName, &bookmarkManager, &subscriptionManager, &metadataManager);
 
         // Set up "Open in Browser" callbacks and switch to Browser tab
         shotView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
@@ -897,6 +1482,8 @@ int main(int argc, char** argv)
             fileBrowser2.SetCurrentDirectory(path);
             ImGui::SetWindowFocus("Browser");
         };
+
+        shotView->onOpenInNewWindow = openInNewWindowCallback;
         std::wcout << L"[ShotView] Callbacks set for: " << categoryPath << std::endl;
 
         // Set up transcode callback
@@ -906,6 +1493,11 @@ int main(int argc, char** argv)
             ImGui::SetWindowFocus("Transcode Queue");
         };
 
+        // Set up deadline submission callback
+        shotView->onSubmitToDeadline = [&deadlineSubmitDialog](const std::wstring& blendFilePath, const std::wstring& jobName) {
+            deadlineSubmitDialog.Show(blendFilePath, jobName);
+        };
+
         shotViews.push_back(std::move(shotView));
         std::wcout << L"[Main] Opened shot view for: " << categoryPath << std::endl;
     };
@@ -913,8 +1505,58 @@ int main(int argc, char** argv)
     fileBrowser1.onOpenShotView = openShotViewCallback;
     fileBrowser2.onOpenShotView = openShotViewCallback;
 
+    // Set up transcode queue panel callbacks
+    transcodeQueuePanel.onOpenInLeftBrowser = [&fileBrowser1](const std::wstring& path) {
+        fileBrowser1.SetCurrentDirectory(path);
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    transcodeQueuePanel.onOpenInRightBrowser = [&fileBrowser2](const std::wstring& path) {
+        fileBrowser2.SetCurrentDirectory(path);
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    transcodeQueuePanel.onOpenInNewWindow = openInNewWindowCallback;
+
+    // Set up deadline queue panel callbacks
+    deadlineQueuePanel.onOpenInLeftBrowser = [&fileBrowser1](const std::wstring& path) {
+        fileBrowser1.SetCurrentDirectory(path);
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    deadlineQueuePanel.onOpenInRightBrowser = [&fileBrowser2](const std::wstring& path) {
+        fileBrowser2.SetCurrentDirectory(path);
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    deadlineQueuePanel.onOpenInNewWindow = openInNewWindowCallback;
+
+    deadlineQueuePanel.onOpenInShotView = [&openShotViewCallback, &shotViews](const std::wstring& path) {
+        // Path is a directory containing .blend files. We need to:
+        // 1. Extract the parent category (e.g., "D:\Job\ae" from "D:\Job\ae\shot01")
+        // 2. Open that category in shot view
+        // 3. Select the shot folder
+        std::filesystem::path filePath(path);
+        std::wstring shotPath = filePath.wstring();
+        std::wstring categoryPath = filePath.parent_path().wstring();
+        std::wstring categoryName = filePath.parent_path().filename().wstring();
+
+        // Open or focus the shot view for this category
+        openShotViewCallback(categoryPath, categoryName);
+
+        // Set the selected shot in the newly opened/focused view and focus the window
+        for (const auto& sv : shotViews) {
+            if (sv && sv->GetCategoryPath() == categoryPath) {
+                sv->SetSelectedShot(shotPath);
+                std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                ImGui::SetWindowFocus(windowTitle.c_str());
+                break;
+            }
+        }
+    };
+
     // Set up assets view callbacks for both file browsers
-    auto openAssetsViewCallback = [&assetsViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& assetsFolderPath, const std::wstring& jobName) {
+    auto openAssetsViewCallback = [&assetsViews, &bookmarkManager, &subscriptionManager, &metadataManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, &openInNewWindowCallback, hwnd](const std::wstring& assetsFolderPath, const std::wstring& jobName) {
         // Check if this assets view is already open
         for (const auto& av : assetsViews) {
             if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
@@ -925,17 +1567,7 @@ int main(int argc, char** argv)
 
         // Create new assets view
         auto assetsView = std::make_unique<AssetsView>();
-        assetsView->Initialize(assetsFolderPath, jobName, &bookmarkManager, &subscriptionManager);
-
-        // Set up close callback
-        assetsView->onClose = [&assetsViews, assetsFolderPath]() {
-            for (auto it = assetsViews.begin(); it != assetsViews.end(); ++it) {
-                if ((*it) && (*it)->GetAssetsFolderPath() == assetsFolderPath) {
-                    assetsViews.erase(it);
-                    break;
-                }
-            }
-        };
+        assetsView->Initialize(assetsFolderPath, jobName, &bookmarkManager, &subscriptionManager, &metadataManager);
 
         // Set up browser callbacks
         assetsView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
@@ -949,6 +1581,8 @@ int main(int argc, char** argv)
             fileBrowser2.SetCurrentDirectory(path);
             ImGui::SetWindowFocus("Browser");
         };
+
+        assetsView->onOpenInNewWindow = openInNewWindowCallback;
 
         // Set up transcode callback
         assetsView->onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
@@ -969,7 +1603,7 @@ int main(int argc, char** argv)
     fileBrowser2.onOpenAssetsView = openAssetsViewCallback;
 
     // Set up postings view callbacks for both file browsers
-    auto openPostingsViewCallback = [&postingsViews, &bookmarkManager, &subscriptionManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, hwnd](const std::wstring& postingsFolderPath, const std::wstring& jobName) {
+    auto openPostingsViewCallback = [&postingsViews, &bookmarkManager, &subscriptionManager, &metadataManager, &fileBrowser1, &fileBrowser2, &transcodeQueuePanel, &openInNewWindowCallback, hwnd](const std::wstring& postingsFolderPath, const std::wstring& jobName) {
         // Check if this postings view is already open
         for (const auto& pv : postingsViews) {
             if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
@@ -980,17 +1614,7 @@ int main(int argc, char** argv)
 
         // Create new postings view
         auto postingsView = std::make_unique<PostingsView>();
-        postingsView->Initialize(postingsFolderPath, jobName, &bookmarkManager, &subscriptionManager);
-
-        // Set up close callback
-        postingsView->onClose = [&postingsViews, postingsFolderPath]() {
-            for (auto it = postingsViews.begin(); it != postingsViews.end(); ++it) {
-                if ((*it) && (*it)->GetPostingsFolderPath() == postingsFolderPath) {
-                    postingsViews.erase(it);
-                    break;
-                }
-            }
-        };
+        postingsView->Initialize(postingsFolderPath, jobName, &bookmarkManager, &subscriptionManager, &metadataManager);
 
         // Set up browser callbacks
         postingsView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) {
@@ -1004,6 +1628,8 @@ int main(int argc, char** argv)
             fileBrowser2.SetCurrentDirectory(path);
             ImGui::SetWindowFocus("Browser");
         };
+
+        postingsView->onOpenInNewWindow = openInNewWindowCallback;
 
         // Set up transcode callback
         postingsView->onTranscodeToMP4 = [&transcodeQueuePanel](const std::vector<std::wstring>& paths) {
@@ -1020,7 +1646,7 @@ int main(int argc, char** argv)
     fileBrowser2.onOpenPostingsView = openPostingsViewCallback;
 
     // Set up project tracker view callback for subscription panel
-    subscriptionPanel.onOpenProjectTracker = [&trackerViews, &subscriptionManager, &openShotViewCallback, &openAssetsViewCallback, &openPostingsViewCallback, &shotViews, &assetsViews, &postingsViews, hwnd](const std::wstring& jobPath, const std::wstring& jobName) {
+    subscriptionPanel.onOpenProjectTracker = [&trackerViews, &subscriptionManager, &metadataManager, &openShotViewCallback, &openAssetsViewCallback, &openPostingsViewCallback, &shotViews, &assetsViews, &postingsViews, hwnd](const std::wstring& jobPath, const std::wstring& jobName) {
         // Check if this tracker view is already open
         for (const auto& tv : trackerViews) {
             if (tv && tv->GetJobPath() == jobPath) {
@@ -1031,17 +1657,7 @@ int main(int argc, char** argv)
 
         // Create new tracker view
         auto trackerView = std::make_unique<ProjectTrackerView>();
-        trackerView->Initialize(jobPath, jobName, &subscriptionManager, nullptr);
-
-        // Set up close callback
-        trackerView->onClose = [&trackerViews, jobPath]() {
-            for (auto it = trackerViews.begin(); it != trackerViews.end(); ++it) {
-                if ((*it) && (*it)->GetJobPath() == jobPath) {
-                    trackerViews.erase(it);
-                    break;
-                }
-            }
-        };
+        trackerView->Initialize(jobPath, jobName, &subscriptionManager, &metadataManager, nullptr);
 
         // Set up callbacks for opening items in their respective views
         trackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
@@ -1120,22 +1736,7 @@ int main(int argc, char** argv)
         fileBrowser1.SetCurrentDirectory(path);
     };
 
-    // Set up "Open in New Window" callback for all browsers
-    auto openInNewWindowCallback = [&standaloneBrowsers, &bookmarkManager, &subscriptionManager](const std::wstring& path) {
-        // Create new standalone browser
-        auto browser = std::make_unique<FileBrowser>();
-
-        // Initialize with shared managers
-        browser->Initialize(&bookmarkManager, &subscriptionManager);
-
-        // Set the path
-        browser->SetCurrentDirectory(path);
-
-        // Store and log
-        standaloneBrowsers.push_back(std::move(browser));
-        std::wcout << L"[Main] Opened standalone browser for: " << path << std::endl;
-    };
-
+    // Assign "Open in New Window" callback to main browsers (callback defined earlier)
     fileBrowser1.onOpenInNewWindow = openInNewWindowCallback;
     fileBrowser2.onOpenInNewWindow = openInNewWindowCallback;
 
@@ -1205,14 +1806,12 @@ int main(int argc, char** argv)
         std::cout << "[Main] Drop ignored (no target browser)" << std::endl;
     });
 
-    // Load settings BEFORE creating window so we can use saved dimensions
-    // Note: Individual panel toggles no longer used - all panels always shown
-    bool unused1 = true, unused2 = true, unused3 = true;  // Temporary for compatibility
-    bool showTranscodeQueue = false;
-    LoadSettings(unused1, unused2, unused3, showTranscodeQueue);
+    // Note: Settings already loaded early in main() for font scale and window dimensions
 
-    // Apply saved window size
-    glfwSetWindowSize(window, window_state.width, window_state.height);
+    // Apply saved window size (in case it changed during initialization)
+    if (window_state.width > 0 && window_state.height > 0) {
+        glfwSetWindowSize(window, window_state.width, window_state.height);
+    }
 
     // Apply saved window position if valid
     if (window_state.x >= 0 && window_state.y >= 0) {
@@ -1244,6 +1843,60 @@ int main(int argc, char** argv)
             saved_imgui_layout.clear();
         }
     }
+
+    // ========================================================================
+    // WIRE UP GLOBAL CALLBACKS FOR SINGLE-INSTANCE PATH HANDLING
+    // ========================================================================
+
+    std::cout << "[Main] Wiring up global callbacks for path handling..." << std::endl;
+
+    // Set global callback pointers
+    g_openShotViewCallback = openShotViewCallback;
+    g_openAssetsViewCallback = openAssetsViewCallback;
+    g_openPostingsViewCallback = openPostingsViewCallback;
+
+    g_openInBrowser1Callback = [&fileBrowser1](const std::wstring& path) {
+        if (std::filesystem::exists(path) && std::filesystem::is_regular_file(path)) {
+            // If it's a file, open parent directory and select the file
+            std::wstring parentDir = std::filesystem::path(path).parent_path().wstring();
+            fileBrowser1.SetCurrentDirectoryAndSelectFile(parentDir, path);
+        } else {
+            // If it's a directory, just open it
+            fileBrowser1.SetCurrentDirectory(path);
+        }
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    g_openInBrowser2Callback = [&fileBrowser2](const std::wstring& path) {
+        if (std::filesystem::exists(path) && std::filesystem::is_regular_file(path)) {
+            // If it's a file, open parent directory and select the file
+            std::wstring parentDir = std::filesystem::path(path).parent_path().wstring();
+            fileBrowser2.SetCurrentDirectoryAndSelectFile(parentDir, path);
+        } else {
+            // If it's a directory, just open it
+            fileBrowser2.SetCurrentDirectory(path);
+        }
+        ImGui::SetWindowFocus("Browser");
+    };
+
+    g_openInNewWindowCallback = openInNewWindowCallback;
+
+    // Set global view vector pointers
+    g_shotViews = &shotViews;
+    g_assetsViews = &assetsViews;
+    g_postingsViews = &postingsViews;
+
+    // Set global subscription manager pointer
+    g_subscriptionManager = &subscriptionManager;
+
+    // If we have a command-line path, analyze it and show the modal
+    if (!cmdLinePath.empty()) {
+        std::wcout << L"[Main] Analyzing command-line path: " << cmdLinePath << std::endl;
+        AnalyzePath(cmdLinePath);
+        g_pendingPath.shouldShow = true;
+    }
+
+    std::cout << "[Main] Global callbacks wired up successfully" << std::endl;
 
     // Restore saved shot views after loading settings
     std::cout << "[Main] Restoring " << saved_shot_views.size() << " saved shot view(s)..." << std::endl;
@@ -1373,6 +2026,139 @@ int main(int argc, char** argv)
                 if (ImGui::MenuItem("Transcode Queue", nullptr, &transcodeQueueOpen)) {
                     transcodeQueuePanel.Toggle();
                 }
+                bool deadlineQueueOpen = deadlineQueuePanel.IsOpen();
+                if (ImGui::MenuItem("Deadline Queue", nullptr, &deadlineQueueOpen)) {
+                    deadlineQueuePanel.Toggle();
+                }
+                bool aggregatedTrackerOpen = (aggregatedTrackerView && aggregatedTrackerView->IsOpen());
+                if (ImGui::MenuItem("All Projects Tracker", nullptr, &aggregatedTrackerOpen)) {
+                    if (!aggregatedTrackerView) {
+                        // Create and initialize aggregated tracker view
+                        aggregatedTrackerView = std::make_unique<AggregatedTrackerView>();
+                        aggregatedTrackerView->Initialize(&subscriptionManager, &metadataManager);
+
+                        // Set up callbacks for opening items (same as individual tracker views)
+                        aggregatedTrackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
+                            std::filesystem::path path(shotPath);
+                            std::wstring categoryPath = path.parent_path().wstring();
+                            std::wstring categoryName = path.parent_path().filename().wstring();
+                            openShotViewCallback(categoryPath, categoryName);
+                            for (const auto& sv : shotViews) {
+                                if (sv && sv->GetCategoryPath() == categoryPath) {
+                                    sv->SetSelectedShot(shotPath);
+                                    std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                                    ImGui::SetWindowFocus(windowTitle.c_str());
+                                    break;
+                                }
+                            }
+                        };
+
+                        aggregatedTrackerView->onOpenAsset = [&openAssetsViewCallback, &assetsViews](const std::wstring& assetPath) {
+                            std::filesystem::path path(assetPath);
+                            std::wstring assetsFolderPath = path.parent_path().wstring();
+                            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                            openAssetsViewCallback(assetsFolderPath, jobName);
+                            for (const auto& av : assetsViews) {
+                                if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                                    av->SetSelectedAsset(assetPath);
+                                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Assets";
+                                    ImGui::SetWindowFocus(windowTitle.c_str());
+                                    break;
+                                }
+                            }
+                        };
+
+                        aggregatedTrackerView->onOpenPosting = [&openPostingsViewCallback, &postingsViews](const std::wstring& postingPath) {
+                            std::filesystem::path path(postingPath);
+                            std::wstring postingsFolderPath = path.parent_path().wstring();
+                            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                            openPostingsViewCallback(postingsFolderPath, jobName);
+                            for (const auto& pv : postingsViews) {
+                                if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                                    pv->SetSelectedPosting(postingPath);
+                                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Postings";
+                                    ImGui::SetWindowFocus(windowTitle.c_str());
+                                    break;
+                                }
+                            }
+                        };
+
+                        // Browser/window callbacks
+                        aggregatedTrackerView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) { fileBrowser1.SetCurrentDirectory(path); };
+                        aggregatedTrackerView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) { fileBrowser2.SetCurrentDirectory(path); };
+                        aggregatedTrackerView->onOpenInNewWindow = openInNewWindowCallback;
+
+                        // Callback to open individual project tracker
+                        aggregatedTrackerView->onOpenProjectTracker = [&trackerViews, &subscriptionManager, &metadataManager, &openShotViewCallback, &openAssetsViewCallback, &openPostingsViewCallback, &shotViews, &assetsViews, &postingsViews, &fileBrowser1, &fileBrowser2, &openInNewWindowCallback](const std::wstring& jobPath, const std::wstring& jobName) {
+                            // Check if this tracker view is already open
+                            for (const auto& tv : trackerViews) {
+                                if (tv && tv->GetJobPath() == jobPath) {
+                                    return;
+                                }
+                            }
+                            // Open the individual project tracker (reuse the existing callback from subscriptionPanel)
+                            auto trackerView = std::make_unique<ProjectTrackerView>();
+                            trackerView->Initialize(jobPath, jobName, &subscriptionManager, &metadataManager, nullptr);
+                            trackerView->onClose = [&trackerViews, jobPath]() {
+                                for (auto it = trackerViews.begin(); it != trackerViews.end(); ++it) {
+                                    if ((*it) && (*it)->GetJobPath() == jobPath) {
+                                        trackerViews.erase(it);
+                                        break;
+                                    }
+                                }
+                            };
+                            trackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
+                                std::filesystem::path path(shotPath);
+                                std::wstring categoryPath = path.parent_path().wstring();
+                                std::wstring categoryName = path.parent_path().filename().wstring();
+                                openShotViewCallback(categoryPath, categoryName);
+                                for (const auto& sv : shotViews) {
+                                    if (sv && sv->GetCategoryPath() == categoryPath) {
+                                        sv->SetSelectedShot(shotPath);
+                                        std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                                        ImGui::SetWindowFocus(windowTitle.c_str());
+                                        break;
+                                    }
+                                }
+                            };
+                            trackerView->onOpenAsset = [&openAssetsViewCallback, &assetsViews](const std::wstring& assetPath) {
+                                std::filesystem::path path(assetPath);
+                                std::wstring assetsFolderPath = path.parent_path().wstring();
+                                std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                                openAssetsViewCallback(assetsFolderPath, jobName);
+                                for (const auto& av : assetsViews) {
+                                    if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                                        av->SetSelectedAsset(assetPath);
+                                        std::string windowTitle = UFB::WideToUtf8(jobName) + " - Assets";
+                                        ImGui::SetWindowFocus(windowTitle.c_str());
+                                        break;
+                                    }
+                                }
+                            };
+                            trackerView->onOpenPosting = [&openPostingsViewCallback, &postingsViews](const std::wstring& postingPath) {
+                                std::filesystem::path path(postingPath);
+                                std::wstring postingsFolderPath = path.parent_path().wstring();
+                                std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                                openPostingsViewCallback(postingsFolderPath, jobName);
+                                for (const auto& pv : postingsViews) {
+                                    if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                                        pv->SetSelectedPosting(postingPath);
+                                        std::string windowTitle = UFB::WideToUtf8(jobName) + " - Postings";
+                                        ImGui::SetWindowFocus(windowTitle.c_str());
+                                        break;
+                                    }
+                                }
+                            };
+                            trackerView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) { fileBrowser1.SetCurrentDirectory(path); };
+                            trackerView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) { fileBrowser2.SetCurrentDirectory(path); };
+                            trackerView->onOpenInNewWindow = openInNewWindowCallback;
+                            trackerViews.push_back(std::move(trackerView));
+                        };
+                    } else {
+                        // Close the view
+                        aggregatedTrackerView.reset();
+                    }
+                }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Windows Accent Color", nullptr, use_windows_accent_color)) {
                     use_windows_accent_color = !use_windows_accent_color;
@@ -1383,8 +2169,64 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.4", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.5", nullptr, false);
                 ImGui::EndDisabled();
+                ImGui::Separator();
+
+                if (ImGui::MenuItem("Export Bookmarks..."))
+                {
+                    // Open save file dialog
+                    wchar_t filename[MAX_PATH] = L"";
+                    OPENFILENAMEW ofn = {};
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = glfwGetWin32Window(window);
+                    ofn.lpstrFilter = L"JSON Files\0*.json\0All Files\0*.*\0";
+                    ofn.lpstrFile = filename;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.lpstrDefExt = L"json";
+                    ofn.lpstrTitle = L"Export Bookmarks";
+                    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+                    if (GetSaveFileNameW(&ofn))
+                    {
+                        if (bookmarkManager.ExportBookmarksToJSON(filename))
+                        {
+                            std::wcout << L"[Main] Bookmarks exported successfully" << std::endl;
+                        }
+                        else
+                        {
+                            std::wcerr << L"[Main] Failed to export bookmarks" << std::endl;
+                        }
+                    }
+                }
+
+                if (ImGui::MenuItem("Import Bookmarks..."))
+                {
+                    // Open file dialog
+                    wchar_t filename[MAX_PATH] = L"";
+                    OPENFILENAMEW ofn = {};
+                    ofn.lStructSize = sizeof(ofn);
+                    ofn.hwndOwner = glfwGetWin32Window(window);
+                    ofn.lpstrFilter = L"JSON Files\0*.json\0All Files\0*.*\0";
+                    ofn.lpstrFile = filename;
+                    ofn.nMaxFile = MAX_PATH;
+                    ofn.lpstrTitle = L"Import Bookmarks";
+                    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+                    if (GetOpenFileNameW(&ofn))
+                    {
+                        if (bookmarkManager.ImportBookmarksFromJSON(filename))
+                        {
+                            std::wcout << L"[Main] Bookmarks imported successfully" << std::endl;
+                            // Note: Bookmarks will be automatically available in file browsers
+                        }
+                        else
+                        {
+                            std::wcerr << L"[Main] Failed to import bookmarks" << std::endl;
+                        }
+                    }
+                }
+
                 ImGui::Separator();
 
                 if (ImGui::MenuItem("About"))
@@ -1399,6 +2241,12 @@ int main(int argc, char** argv)
                 {
                     ShellExecuteW(nullptr, L"open", L"https://github.com/cbkow/ufb/releases", nullptr, nullptr, SW_SHOWNORMAL);
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Settings...")) {
+                    settingsDialog.RefreshValues(g_fontScale, "");  // Frame.io integration removed
+                    settingsDialog.Show();
+                }
+                
                 ImGui::EndMenu();
             }
 
@@ -1470,6 +2318,20 @@ int main(int argc, char** argv)
 
         transcodeQueuePanel.Render();  // Render UI
 
+        // Deadline Queue Panel (dockable window)
+        deadlineQueuePanel.ProcessQueue();  // Process deadline jobs
+
+        // Dock into main dockspace on first use
+        ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+        deadlineQueuePanel.Draw("Deadline Queue");  // Render UI
+
+        // Deadline Submit Dialog (modal)
+        deadlineSubmitDialog.Draw();
+
+        // Settings Dialog (modal)
+        settingsDialog.Draw();
+
         // Render all shot views (dockable windows)
         for (size_t i = 0; i < shotViews.size(); ++i) {
             if (shotViews[i]) {
@@ -1522,6 +2384,14 @@ int main(int argc, char** argv)
             }
         }
 
+        // Render aggregated tracker view (dockable window)
+        if (aggregatedTrackerView) {
+            // Dock into main dockspace on first use
+            ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+            aggregatedTrackerView->Draw("All Projects - Tracker", hwnd);
+        }
+
         // Render all standalone browser windows (dockable windows)
         for (size_t i = 0; i < standaloneBrowsers.size(); ++i) {
             if (standaloneBrowsers[i]) {
@@ -1547,11 +2417,55 @@ int main(int argc, char** argv)
             standaloneBrowsers.end()
         );
 
+        // Remove closed shot views
+        shotViews.erase(
+            std::remove_if(shotViews.begin(), shotViews.end(),
+                [](const std::unique_ptr<ShotView>& view) {
+                    return view && !view->IsOpen();
+                }),
+            shotViews.end()
+        );
+
+        // Remove closed assets views
+        assetsViews.erase(
+            std::remove_if(assetsViews.begin(), assetsViews.end(),
+                [](const std::unique_ptr<AssetsView>& view) {
+                    return view && !view->IsOpen();
+                }),
+            assetsViews.end()
+        );
+
+        // Remove closed postings views
+        postingsViews.erase(
+            std::remove_if(postingsViews.begin(), postingsViews.end(),
+                [](const std::unique_ptr<PostingsView>& view) {
+                    return view && !view->IsOpen();
+                }),
+            postingsViews.end()
+        );
+
+        // Remove closed tracker views
+        trackerViews.erase(
+            std::remove_if(trackerViews.begin(), trackerViews.end(),
+                [](const std::unique_ptr<ProjectTrackerView>& view) {
+                    return view && !view->IsOpen();
+                }),
+            trackerViews.end()
+        );
+
+        // Close aggregated tracker view if requested
+        if (aggregatedTrackerView && !aggregatedTrackerView->IsOpen()) {
+            aggregatedTrackerView.reset();
+        }
+
         // Always focus Browser tab on first frame
         if (needsInitialBrowserFocus) {
             ImGui::SetWindowFocus("Browser");
             needsInitialBrowserFocus = false;
         }
+
+        // Render the path action modal (for command-line paths or paths from other instances)
+        RenderPathActionModal();
 
         // Rendering
         ImGui::Render();

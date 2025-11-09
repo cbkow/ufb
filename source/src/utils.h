@@ -27,4 +27,14 @@ std::string WideToUtf8(const std::wstring& wstr);
 // Convert UTF-8 string to wstring
 std::wstring Utf8ToWide(const std::string& str);
 
+// URI encoding/decoding for path sharing
+std::string EncodeURIComponent(const std::string& str);
+std::string DecodeURIComponent(const std::string& str);
+std::string BuildPathURI(const std::wstring& path);
+std::wstring ParsePathURI(const std::string& uri);
+
+// Base64 encoding/decoding for API keys
+std::string Base64Encode(const std::string& input);
+std::string Base64Decode(const std::string& input);
+
 } // namespace UFB

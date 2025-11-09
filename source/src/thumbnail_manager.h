@@ -85,6 +85,9 @@ public:
     // Clear all cached thumbnails
     void ClearCache();
 
+    // Clear all pending thumbnail requests and in-flight tracking
+    void ClearPendingRequests();
+
     // Get cache statistics
     int GetCacheSize() const { return static_cast<int>(m_cache.size()); }
     int GetPendingRequests() const;

@@ -2,6 +2,8 @@
 #include "utils.h"
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace UFB {
 
@@ -287,6 +289,124 @@ std::optional<Bookmark> BookmarkManager::GetBookmarkByPath(const std::wstring& p
 
     sqlite3_finalize(stmt);
     return std::nullopt;
+}
+
+bool BookmarkManager::ExportBookmarksToJSON(const std::wstring& filePath)
+{
+    try
+    {
+        // Get all bookmarks
+        auto bookmarks = GetAllBookmarks();
+
+        // Create JSON array
+        nlohmann::json jsonArray = nlohmann::json::array();
+
+        for (const auto& bookmark : bookmarks)
+        {
+            nlohmann::json bookmarkJson;
+            bookmarkJson["path"] = WideToUtf8(bookmark.path);
+            bookmarkJson["name"] = WideToUtf8(bookmark.displayName);
+            bookmarkJson["isProject"] = bookmark.isProjectFolder;
+
+            jsonArray.push_back(bookmarkJson);
+        }
+
+        // Create root object
+        nlohmann::json root;
+        root["version"] = 1;
+        root["bookmarks"] = jsonArray;
+
+        // Write to file
+        std::ofstream outFile(filePath);
+        if (!outFile.is_open())
+        {
+            std::wcerr << L"[BookmarkManager] Failed to open file for writing: " << filePath << std::endl;
+            return false;
+        }
+
+        outFile << root.dump(2);  // Pretty print with 2-space indent
+        outFile.close();
+
+        std::wcout << L"[BookmarkManager] Exported " << bookmarks.size() << L" bookmarks to: " << filePath << std::endl;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[BookmarkManager] Failed to export bookmarks: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool BookmarkManager::ImportBookmarksFromJSON(const std::wstring& filePath)
+{
+    try
+    {
+        // Read file
+        std::ifstream inFile(filePath);
+        if (!inFile.is_open())
+        {
+            std::wcerr << L"[BookmarkManager] Failed to open file for reading: " << filePath << std::endl;
+            return false;
+        }
+
+        nlohmann::json root;
+        inFile >> root;
+        inFile.close();
+
+        // Validate format
+        if (!root.contains("bookmarks") || !root["bookmarks"].is_array())
+        {
+            std::wcerr << L"[BookmarkManager] Invalid bookmark file format" << std::endl;
+            return false;
+        }
+
+        // Import bookmarks
+        const auto& bookmarksArray = root["bookmarks"];
+        int imported = 0;
+        int skipped = 0;
+
+        for (const auto& bookmarkJson : bookmarksArray)
+        {
+            if (!bookmarkJson.contains("path") || !bookmarkJson.contains("name"))
+            {
+                std::wcerr << L"[BookmarkManager] Skipping invalid bookmark entry" << std::endl;
+                skipped++;
+                continue;
+            }
+
+            std::wstring path = Utf8ToWide(bookmarkJson["path"].get<std::string>());
+            std::wstring name = Utf8ToWide(bookmarkJson["name"].get<std::string>());
+            bool isProject = bookmarkJson.value("isProject", false);
+
+            // Check if bookmark already exists
+            auto existing = GetBookmarkByPath(path);
+            if (existing.has_value())
+            {
+                std::wcout << L"[BookmarkManager] Skipping duplicate bookmark: " << path << std::endl;
+                skipped++;
+                continue;
+            }
+
+            // Add bookmark
+            if (AddBookmark(path, name, isProject))
+            {
+                imported++;
+            }
+            else
+            {
+                std::wcerr << L"[BookmarkManager] Failed to import bookmark: " << path << std::endl;
+                skipped++;
+            }
+        }
+
+        std::wcout << L"[BookmarkManager] Import complete: " << imported << L" imported, " << skipped << L" skipped" << std::endl;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[BookmarkManager] Failed to import bookmarks: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 } // namespace UFB

@@ -2,6 +2,7 @@
 #include "file_browser.h"  // For FileEntry struct
 #include "bookmark_manager.h"
 #include "subscription_manager.h"
+#include "metadata_manager.h"
 #include "project_config.h"
 #include "utils.h"
 #include "ole_drag_drop.h"
@@ -74,12 +75,14 @@ PostingsView::~PostingsView()
 
 void PostingsView::Initialize(const std::wstring& postingsFolderPath, const std::wstring& jobName,
                           UFB::BookmarkManager* bookmarkManager,
-                          UFB::SubscriptionManager* subscriptionManager)
+                          UFB::SubscriptionManager* subscriptionManager,
+                          UFB::MetadataManager* metadataManager)
 {
     m_postingsFolderPath = postingsFolderPath;
     m_jobName = jobName;
     m_bookmarkManager = bookmarkManager;
     m_subscriptionManager = subscriptionManager;
+    m_metadataManager = metadataManager;
 
     // Initialize managers
     m_iconManager.Initialize();
@@ -112,6 +115,19 @@ void PostingsView::Initialize(const std::wstring& postingsFolderPath, const std:
     std::wstring jobPath = std::filesystem::path(postingsFolderPath).parent_path().wstring();
     m_projectConfig = new UFB::ProjectConfig();
     bool configLoaded = m_projectConfig->LoadProjectConfig(jobPath);
+
+    // Register observer for real-time metadata updates
+    if (m_metadataManager)
+    {
+        m_metadataManager->RegisterObserver([this, jobPath](const std::wstring& changedJobPath) {
+            // Only reload if the change is for our job
+            if (changedJobPath == jobPath)
+            {
+                std::wcout << L"[PostingsView] Metadata changed for job, reloading..." << std::endl;
+                ReloadMetadata();
+            }
+        });
+    }
 
     if (!configLoaded)
     {
@@ -163,6 +179,24 @@ void PostingsView::SetSelectedPosting(const std::wstring& postingPath)
 
             // Update file browser to show this posting's contents
             m_fileBrowser.SetCurrentDirectory(postingPath);
+            break;
+        }
+    }
+}
+
+void PostingsView::SetSelectedPostingAndFile(const std::wstring& postingPath, const std::wstring& filePath)
+{
+    // Find the posting in the postings list and select it
+    for (size_t i = 0; i < m_postingItems.size(); i++)
+    {
+        if (m_postingItems[i].fullPath == postingPath)
+        {
+            m_selectedPostingIndex = static_cast<int>(i);
+
+            // Update file browser to show this posting's contents and select the file
+            std::wstring parentDir = std::filesystem::path(filePath).parent_path().wstring();
+            m_fileBrowser.SetCurrentDirectoryAndSelectFile(parentDir, filePath);
+            std::wcout << L"[PostingsView] Selected posting and file in browser: " << filePath << std::endl;
             break;
         }
     }
@@ -253,6 +287,33 @@ void PostingsView::Draw(const char* title, HWND hwnd)
         ImGui::BeginChild("BrowserPanel", ImVec2(rightWidth, availSize.y), false);  // No built-in border
         DrawBrowserPanel(hwnd);
         ImGui::EndChild();
+
+        // Handle keyboard shortcuts (Ctrl+C, Ctrl+X, Ctrl+V, Delete, F2)
+        // Note: FileBrowser (right panel) handles its own shortcuts, this is for the postings panel (left)
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+        {
+            ImGuiIO& io = ImGui::GetIO();
+
+            // Only handle shortcuts for postings panel if it's the focused child
+            // The FileBrowser panel will handle shortcuts for files selected there
+
+            // For now, F2 for rename when a posting is selected
+            if (ImGui::IsKeyPressed(ImGuiKey_F2))
+            {
+                // Only allow rename if exactly one posting is selected
+                if (m_selectedPostingIndices.size() == 1)
+                {
+                    int idx = *m_selectedPostingIndices.begin();
+                    if (idx >= 0 && idx < m_postingItems.size())
+                    {
+                        m_renameOriginalPath = m_postingItems[idx].fullPath;
+                        std::wstring filename = m_postingItems[idx].name;
+                        WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1, m_renameBuffer, sizeof(m_renameBuffer), nullptr, nullptr);
+                        m_showRenameDialog = true;
+                    }
+                }
+            }
+        }
 
         // Add new posting modal dialog
         if (m_showAddPostingDialog)
@@ -365,12 +426,6 @@ void PostingsView::Draw(const char* title, HWND hwnd)
     }
 
     ImGui::End();
-
-    // Check if window was closed via X button (check after End() so state is fully updated)
-    if (!m_isOpen && onClose)
-    {
-        onClose();
-    }
 }
 
 void PostingsView::DrawPostingsPanel(HWND hwnd)
@@ -406,23 +461,6 @@ void PostingsView::DrawPostingsPanel(HWND hwnd)
 
     ImGui::Text("Postings");
 
-    // Place buttons at the end of the line
-    // Calculate the space needed: 3 buttons + spacing
-    float buttonWidth = font_icons ? 25.0f : 30.0f;  // Icon buttons are smaller
-    float spacing = ImGui::GetStyle().ItemSpacing.x;
-    float totalWidth = buttonWidth * 3 + spacing * 2;
-    float availWidth = ImGui::GetContentRegionAvail().x;
-
-    // Only move to the right if there's enough space (subtract a bit more for safety)
-    if (availWidth > totalWidth + 10.0f)
-    {
-        ImGui::SameLine(availWidth - totalWidth - 16.0f);
-    }
-    else
-    {
-        ImGui::SameLine();
-    }
-
     // Add new posting button
     if (font_icons)
     {
@@ -447,6 +485,125 @@ void PostingsView::DrawPostingsPanel(HWND hwnd)
         ImGui::SetTooltip("Add New Posting");
 
     ImGui::SameLine();
+
+    // ===== COMPACT FILTER BUTTONS =====
+
+    // Status Filter Button
+    int statusCount = static_cast<int>(m_filterStatuses.size());
+    std::string statusLabel = "Status" + (statusCount > 0 ? " (" + std::to_string(statusCount) + ")" : "");
+    if (ImGui::Button(statusLabel.c_str()))
+    {
+        ImGui::OpenPopup("StatusFilterPopup");
+    }
+
+    // Status Filter Popup
+    if (ImGui::BeginPopup("StatusFilterPopup"))
+    {
+        ImGui::Text("Filter by Status:");
+        ImGui::Separator();
+        for (const auto& status : m_availableStatuses)
+        {
+            bool isSelected = (m_filterStatuses.find(status) != m_filterStatuses.end());
+            if (ImGui::Checkbox(status.c_str(), &isSelected))
+            {
+                if (isSelected)
+                    m_filterStatuses.insert(status);
+                else
+                    m_filterStatuses.erase(status);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterStatuses.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Category Filter Button
+    int categoryCount = static_cast<int>(m_filterCategories.size());
+    std::string categoryLabel = "Category" + (categoryCount > 0 ? " (" + std::to_string(categoryCount) + ")" : "");
+    if (ImGui::Button(categoryLabel.c_str()))
+    {
+        ImGui::OpenPopup("CategoryFilterPopup");
+    }
+
+    // Category Filter Popup
+    if (ImGui::BeginPopup("CategoryFilterPopup"))
+    {
+        ImGui::Text("Filter by Category:");
+        ImGui::Separator();
+        for (const auto& category : m_availableCategories)
+        {
+            bool isSelected = (m_filterCategories.find(category) != m_filterCategories.end());
+            if (ImGui::Checkbox(category.c_str(), &isSelected))
+            {
+                if (isSelected)
+                    m_filterCategories.insert(category);
+                else
+                    m_filterCategories.erase(category);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Clear All"))
+        {
+            m_filterCategories.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Date Modified Filter Button
+    const char* dateOptions[] = { "All", "Today", "Yesterday", "Last 7 days", "Last 30 days", "This year" };
+    std::string dateLabel = "Date Modified";
+    if (m_filterDateModified > 0)
+    {
+        dateLabel = std::string(dateOptions[m_filterDateModified]);
+    }
+    if (ImGui::Button(dateLabel.c_str()))
+    {
+        ImGui::OpenPopup("DateModifiedFilterPopup");
+    }
+
+    // Date Modified Filter Popup
+    if (ImGui::BeginPopup("DateModifiedFilterPopup"))
+    {
+        ImGui::Text("Filter by Date Modified:");
+        ImGui::Separator();
+        for (int i = 0; i < 6; i++)
+        {
+            bool isSelected = (m_filterDateModified == i);
+            if (ImGui::Selectable(dateOptions[i], isSelected))
+            {
+                m_filterDateModified = i;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SameLine();
+
+    // Clear Filters Button
+    int totalActiveFilters = statusCount + categoryCount + (m_filterDateModified > 0 ? 1 : 0);
+    if (totalActiveFilters > 0)
+    {
+        if (font_icons) ImGui::PushFont(font_icons);
+        if (ImGui::SmallButton(U8("\uE14C##clearFilters")))  // Material Icons close
+        {
+            m_filterStatuses.clear();
+            m_filterCategories.clear();
+            m_filterDateModified = 0;
+        }
+        if (font_icons) ImGui::PopFont();
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Clear All Filters");
+        ImGui::SameLine();
+    }
 
     // Columns filter button
     if (font_icons)
@@ -573,24 +730,24 @@ void PostingsView::DrawPostingsPanel(HWND hwnd)
         // Name column (always first)
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort);
 
-        // Metadata columns (conditional)
+        // Metadata columns (conditional) - widths adjusted for typical posting content
         if (m_visibleColumns["Status"])
-            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 140.0f);
 
         if (m_visibleColumns["Category"])
-            ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 130.0f);
 
         if (m_visibleColumns["Artist"])
-            ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+            ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 150.0f);
 
         if (m_visibleColumns["Priority"])
-            ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+            ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 110.0f);
 
         if (m_visibleColumns["DueDate"])
-            ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+            ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 110.0f);
 
         if (m_visibleColumns["Notes"])
-            ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+            ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthFixed, 300.0f);
 
         if (m_visibleColumns["Links"])
             ImGui::TableSetupColumn("Links", ImGuiTableColumnFlags_WidthFixed, 60.0f);
@@ -714,6 +871,10 @@ void PostingsView::DrawPostingsPanel(HWND hwnd)
         for (int i = 0; i < m_postingItems.size(); i++)
         {
             const FileEntry& entry = m_postingItems[i];
+
+            // Apply filters - skip if doesn't pass
+            if (!PassesFilters(entry))
+                continue;
 
             // Set minimum row height
             ImGui::TableNextRow(ImGuiTableRowFlags_None, 35.0f);
@@ -1175,17 +1336,52 @@ void PostingsView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
         ImGui::TextDisabled("%s", nameUtf8);
         ImGui::Separator();
 
-        // Copy (file operation)
+        // Copy (file operation) - supports multi-select
         if (ImGui::MenuItem("Copy"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            // If multiple postings are selected in the postings panel, copy all of them
+            if (!m_selectedPostingIndices.empty())
+            {
+                for (int idx : m_selectedPostingIndices)
+                {
+                    if (idx >= 0 && idx < m_postingItems.size())
+                    {
+                        paths.push_back(m_postingItems[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: copy just this entry
+                paths.push_back(entry.fullPath);
+            }
+
             CopyFilesToClipboard(paths);
         }
 
-        // Cut (file operation)
+        // Cut (file operation) - supports multi-select
         if (ImGui::MenuItem("Cut"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            if (!m_selectedPostingIndices.empty())
+            {
+                for (int idx : m_selectedPostingIndices)
+                {
+                    if (idx >= 0 && idx < m_postingItems.size())
+                    {
+                        paths.push_back(m_postingItems[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: cut just this entry
+                paths.push_back(entry.fullPath);
+            }
+
             CutFilesToClipboard(paths);
         }
 
@@ -1222,6 +1418,19 @@ void PostingsView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
         if (ImGui::MenuItem("Reveal in Explorer"))
         {
             RevealInExplorer(entry.fullPath);
+        }
+
+        // Open in New Window
+        if (onOpenInNewWindow)
+        {
+            if (ImGui::MenuItem("Open in New Window"))
+            {
+                // For files, open the parent directory; for directories, open the directory itself
+                std::filesystem::path targetPath(entry.fullPath);
+                std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                onOpenInNewWindow(pathToOpen);
+                ImGui::CloseCurrentPopup();
+            }
         }
 
         // Open in Browser 1 and Browser 2
@@ -1359,10 +1568,37 @@ void PostingsView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
         ImGui::Separator();
 
-        // Delete
+        // More Options - opens Windows context menu
+        if (ImGui::MenuItem("More Options..."))
+        {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            ShowContextMenu(hwnd, entry.fullPath, mousePos);
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::Separator();
+
+        // Delete - supports multi-select
         if (ImGui::MenuItem("Delete"))
         {
-            std::vector<std::wstring> paths = { entry.fullPath };
+            std::vector<std::wstring> paths;
+
+            if (!m_selectedPostingIndices.empty())
+            {
+                for (int idx : m_selectedPostingIndices)
+                {
+                    if (idx >= 0 && idx < m_postingItems.size())
+                    {
+                        paths.push_back(m_postingItems[idx].fullPath);
+                    }
+                }
+            }
+            else
+            {
+                // Fallback: delete just this entry
+                paths.push_back(entry.fullPath);
+            }
+
             DeleteFilesToRecycleBin(paths);
         }
 
@@ -1529,6 +1765,110 @@ void PostingsView::DeleteFilesToRecycleBin(const std::vector<std::wstring>& path
     }
 }
 
+void PostingsView::ShowContextMenu(HWND hwnd, const std::wstring& path, const ImVec2& screenPos)
+{
+    // Get the full native Windows shell context menu with all options
+    HRESULT hr = CoInitialize(nullptr);
+
+    // Parse the file path to get parent folder and item
+    std::filesystem::path fsPath(path);
+    std::wstring parentPath = fsPath.parent_path().wstring();
+    std::wstring fileName = fsPath.filename().wstring();
+
+    // Get the desktop folder interface
+    IShellFolder* pDesktopFolder = nullptr;
+    hr = SHGetDesktopFolder(&pDesktopFolder);
+    if (FAILED(hr) || !pDesktopFolder)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Parse the parent path to get its PIDL
+    LPITEMIDLIST pidlParent = nullptr;
+    hr = pDesktopFolder->ParseDisplayName(hwnd, nullptr, (LPWSTR)parentPath.c_str(), nullptr, &pidlParent, nullptr);
+    if (FAILED(hr) || !pidlParent)
+    {
+        pDesktopFolder->Release();
+        CoUninitialize();
+        return;
+    }
+
+    // Get the IShellFolder for the parent directory
+    IShellFolder* pParentFolder = nullptr;
+    hr = pDesktopFolder->BindToObject(pidlParent, nullptr, IID_IShellFolder, (void**)&pParentFolder);
+    CoTaskMemFree(pidlParent);
+    pDesktopFolder->Release();
+
+    if (FAILED(hr) || !pParentFolder)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Parse the file name to get its PIDL relative to parent
+    LPITEMIDLIST pidlItem = nullptr;
+    hr = pParentFolder->ParseDisplayName(hwnd, nullptr, (LPWSTR)fileName.c_str(), nullptr, &pidlItem, nullptr);
+    if (FAILED(hr) || !pidlItem)
+    {
+        pParentFolder->Release();
+        CoUninitialize();
+        return;
+    }
+
+    // Get the IContextMenu interface
+    IContextMenu* pContextMenu = nullptr;
+    LPCITEMIDLIST pidlArray[1] = { pidlItem };
+    hr = pParentFolder->GetUIObjectOf(hwnd, 1, pidlArray, IID_IContextMenu, nullptr, (void**)&pContextMenu);
+    CoTaskMemFree(pidlItem);
+    pParentFolder->Release();
+
+    if (FAILED(hr) || !pContextMenu)
+    {
+        CoUninitialize();
+        return;
+    }
+
+    // Create the context menu
+    HMENU hMenu = CreatePopupMenu();
+    if (hMenu)
+    {
+        // Populate the menu with shell items
+        hr = pContextMenu->QueryContextMenu(hMenu, 0, 1, 0x7FFF, CMF_NORMAL | CMF_EXPLORE);
+
+        if (SUCCEEDED(hr))
+        {
+            // Convert ImGui screen coordinates to Windows coordinates
+            POINT pt;
+            pt.x = (LONG)screenPos.x;
+            pt.y = (LONG)screenPos.y;
+
+            // Show the menu
+            int cmd = TrackPopupMenuEx(hMenu, TPM_RETURNCMD | TPM_LEFTBUTTON, pt.x, pt.y, hwnd, nullptr);
+
+            // Execute the selected command
+            if (cmd > 0)
+            {
+                CMINVOKECOMMANDINFOEX info = { 0 };
+                info.cbSize = sizeof(info);
+                info.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
+                info.hwnd = hwnd;
+                info.lpVerb = MAKEINTRESOURCEA(cmd - 1);
+                info.lpVerbW = MAKEINTRESOURCEW(cmd - 1);
+                info.nShow = SW_SHOWNORMAL;
+                info.ptInvoke = pt;
+
+                pContextMenu->InvokeCommand((LPCMINVOKECOMMANDINFO)&info);
+            }
+        }
+
+        DestroyMenu(hMenu);
+    }
+
+    pContextMenu->Release();
+    CoUninitialize();
+}
+
 std::string PostingsView::FormatFileSize(uintmax_t size)
 {
     const char* units[] = { "B", "KB", "MB", "GB", "TB" };
@@ -1587,6 +1927,19 @@ void PostingsView::LoadMetadata()
     {
         m_postingMetadataMap[metadata.shotPath] = metadata;
     }
+
+    // Collect available filter values from metadata
+    CollectAvailableFilterValues();
+}
+
+void PostingsView::ReloadMetadata()
+{
+    // Reload metadata from database (called by observer when remote changes arrive)
+    LoadMetadata();
+
+    // Note: We don't need to refresh postings here - just updating the metadata map
+    // The UI will pick up the new metadata on next frame
+    std::wcout << L"[PostingsView] Metadata reloaded successfully" << std::endl;
 }
 
 void PostingsView::LoadColumnVisibility()
@@ -1852,4 +2205,92 @@ bool PostingsView::CreateNewPosting(const std::string& postingName)
         std::cerr << "[PostingsView] Error creating posting: " << e.what() << std::endl;
         return false;
     }
+}
+
+void PostingsView::CollectAvailableFilterValues()
+{
+    // Clear previous values
+    m_availableStatuses.clear();
+    m_availableCategories.clear();
+
+    if (!m_projectConfig || !m_projectConfig->IsLoaded())
+        return;
+
+    // Get status options from ProjectConfig (postings folder type)
+    auto statusOptions = m_projectConfig->GetStatusOptions("postings");
+    for (const auto& statusOpt : statusOptions)
+    {
+        m_availableStatuses.insert(statusOpt.name);
+    }
+
+    // Get category options from ProjectConfig (postings folder type)
+    auto categoryOptions = m_projectConfig->GetCategoryOptions("postings");
+    for (const auto& categoryOpt : categoryOptions)
+    {
+        m_availableCategories.insert(categoryOpt.name);
+    }
+}
+
+bool PostingsView::PassesFilters(const FileEntry& entry)
+{
+    // Get metadata for this posting
+    auto it = m_postingMetadataMap.find(entry.fullPath);
+    if (it == m_postingMetadataMap.end())
+    {
+        // No metadata - only show if all filters are empty (showing all)
+        return m_filterStatuses.empty() && m_filterCategories.empty() && m_filterDateModified == 0;
+    }
+
+    const UFB::ShotMetadata& metadata = it->second;
+
+    // Check status filter
+    if (!m_filterStatuses.empty())
+    {
+        if (m_filterStatuses.find(metadata.status) == m_filterStatuses.end())
+            return false;
+    }
+
+    // Check category filter
+    if (!m_filterCategories.empty())
+    {
+        if (m_filterCategories.find(metadata.category) == m_filterCategories.end())
+            return false;
+    }
+
+    // Check date modified filter
+    if (m_filterDateModified != 0)
+    {
+        // Use file system modified time
+        auto fileModifiedTime = entry.lastModified;
+        auto now = std::filesystem::file_time_type::clock::now();
+        auto diff = std::chrono::duration_cast<std::chrono::hours>(now - fileModifiedTime).count();
+
+        bool passes = false;
+        switch (m_filterDateModified)
+        {
+            case 1: // Today
+                passes = (diff < 24);
+                break;
+            case 2: // Yesterday
+                passes = (diff >= 24 && diff < 48);
+                break;
+            case 3: // Last 7 days
+                passes = (diff < 7 * 24);
+                break;
+            case 4: // Last 30 days
+                passes = (diff < 30 * 24);
+                break;
+            case 5: // This year
+            {
+                // Check if modified within this calendar year (365 days)
+                passes = (diff < 365 * 24);
+                break;
+            }
+        }
+
+        if (!passes)
+            return false;
+    }
+
+    return true;
 }

@@ -15,6 +15,7 @@
 namespace UFB {
     class BookmarkManager;
     class SubscriptionManager;
+    class MetadataManager;
     class ProjectConfig;
     struct ShotMetadata;
 }
@@ -30,7 +31,8 @@ public:
     // Initialize with shot category path (e.g., "D:\Projects\MyJob\ae")
     void Initialize(const std::wstring& categoryPath, const std::wstring& categoryName,
                     UFB::BookmarkManager* bookmarkManager = nullptr,
-                    UFB::SubscriptionManager* subscriptionManager = nullptr);
+                    UFB::SubscriptionManager* subscriptionManager = nullptr,
+                    UFB::MetadataManager* metadataManager = nullptr);
 
     // Shutdown and cleanup
     void Shutdown();
@@ -47,8 +49,14 @@ public:
     // Get the job name (parent folder of category)
     std::wstring GetJobName() const;
 
+    // Check if window is open
+    bool IsOpen() const { return m_isOpen; }
+
     // Set the selected shot by path
     void SetSelectedShot(const std::wstring& shotPath);
+
+    // Set the selected shot and optionally select a file in project or render panel
+    void SetSelectedShotAndFile(const std::wstring& shotPath, const std::wstring& filePath);
 
     // Callback for closing this view
     std::function<void()> onClose;
@@ -56,9 +64,13 @@ public:
     // Callback for transcoding video files
     std::function<void(const std::vector<std::wstring>&)> onTranscodeToMP4;
 
+    // Callback for submitting .blend files to Deadline
+    std::function<void(const std::wstring& blendFilePath, const std::wstring& jobName)> onSubmitToDeadline;
+
     // Callbacks for opening path in browsers
     std::function<void(const std::wstring& path)> onOpenInBrowser1;
     std::function<void(const std::wstring& path)> onOpenInBrowser2;
+    std::function<void(const std::wstring& path)> onOpenInNewWindow;
 
     // Public settings (share with FileBrowser)
     static bool showHiddenFiles;
@@ -71,6 +83,7 @@ private:
     // Manager dependencies
     UFB::BookmarkManager* m_bookmarkManager = nullptr;
     UFB::SubscriptionManager* m_subscriptionManager = nullptr;
+    UFB::MetadataManager* m_metadataManager = nullptr;
     UFB::ProjectConfig* m_projectConfig = nullptr;
 
     // Icon and thumbnail managers
@@ -121,6 +134,9 @@ private:
     // Show context menu for a file/folder (ImGui context menu with same options as FileBrowser)
     void ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry, PanelType panelType);
 
+    // Show native Windows shell context menu
+    void ShowContextMenu(HWND hwnd, const std::wstring& path, const ImVec2& screenPos);
+
     // Helper functions (same as FileBrowser)
     void CopyToClipboard(const std::wstring& text);
     void CopyFilesToClipboard(const std::vector<std::wstring>& paths);
@@ -139,6 +155,7 @@ private:
 
     // Metadata helpers
     void LoadMetadata();                                          // Load shot metadata from SubscriptionManager
+    void ReloadMetadata();                                        // Reload metadata (called by observer)
     void LoadColumnVisibility();                                  // Load column visibility from ProjectConfig
     void SaveColumnVisibility();                                  // Save column visibility to ProjectConfig
     ImVec4 GetStatusColor(const std::string& status);             // Get status color from ProjectConfig
@@ -197,4 +214,22 @@ private:
 
     // Helper method to create a new shot from template
     bool CreateNewShot(const std::string& shotName);
+
+    // Filter state
+    std::set<std::string> m_filterStatuses;        // Selected statuses (empty = all)
+    std::set<std::string> m_filterCategories;      // Selected categories (empty = all)
+    std::set<std::string> m_filterArtists;         // Selected artists (empty = all)
+    std::set<int> m_filterPriorities;              // Selected priorities (empty = all)
+    int m_filterDueDate = 0;                       // 0=All, 1=Today, 2=Yesterday, 3=Last 7 days, 4=Last 30 days, 5=This year
+    bool m_showArtistDropdown = false;             // Show artist multi-select dropdown
+
+    // Available filter values (populated from metadata)
+    std::set<std::string> m_availableStatuses;
+    std::set<std::string> m_availableCategories;
+    std::set<std::string> m_availableArtists;
+    std::set<int> m_availablePriorities;
+
+    // Filter helpers
+    void CollectAvailableFilterValues();           // Collect unique values from metadata
+    bool PassesFilters(const FileEntry& entry);    // Check if entry passes all active filters
 };

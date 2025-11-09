@@ -3,6 +3,7 @@
 #include "utils.h"
 #include <fstream>
 #include <iostream>
+#include <algorithm>
 
 namespace UFB {
 
@@ -30,6 +31,11 @@ bool MetadataManager::Initialize(SubscriptionManager* subManager)
         std::cerr << "Failed to open database: " << sqlite3_errmsg(m_db) << std::endl;
         return false;
     }
+
+    // Set busy timeout to 5 seconds (handles lock contention)
+    sqlite3_busy_timeout(m_db, 5000);
+
+    std::cout << "[MetadataManager] Configured SQLite: 5s busy timeout" << std::endl;
 
     // Create cache table if it doesn't exist
     if (!CreateCacheTable())
@@ -341,8 +347,10 @@ std::vector<Shot> MetadataManager::GetCachedShots(const std::wstring& jobPath)
     return shots;
 }
 
-void MetadataManager::UpdateCache(const std::wstring& jobPath, const std::vector<Shot>& shots)
+void MetadataManager::UpdateCache(const std::wstring& jobPath, const std::vector<Shot>& shots, bool notifyObservers)
 {
+    std::wcout << L"[MetadataManager] UpdateCache called for: " << jobPath << L" with " << shots.size() << L" shots (notify=" << notifyObservers << L")" << std::endl;
+
     // Clear existing cache for this job
     ClearCache(jobPath);
 
@@ -350,6 +358,18 @@ void MetadataManager::UpdateCache(const std::wstring& jobPath, const std::vector
     for (const auto& shot : shots)
     {
         InsertOrUpdateCache(jobPath, shot);
+    }
+
+    // Optionally notify observers that metadata has changed
+    if (notifyObservers)
+    {
+        std::wcout << L"[MetadataManager] Calling NotifyObservers for: " << jobPath << std::endl;
+        NotifyObservers(jobPath);
+        std::wcout << L"[MetadataManager] NotifyObservers completed" << std::endl;
+    }
+    else
+    {
+        std::wcout << L"[MetadataManager] Skipping NotifyObservers (caller will notify manually)" << std::endl;
     }
 }
 
@@ -508,7 +528,18 @@ bool MetadataManager::InsertOrUpdateCache(const std::wstring& jobPath, const Sho
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    return (rc == SQLITE_DONE);
+    if (rc != SQLITE_DONE)
+    {
+        return false;
+    }
+
+    // Bridge to shot_metadata: sync cache updates to UI metadata table
+    if (m_subManager)
+    {
+        m_subManager->BridgeFromSyncCache(shot, jobPath);
+    }
+
+    return true;
 }
 
 bool MetadataManager::DeleteFromCache(const std::wstring& jobPath, const std::wstring& shotPath)
@@ -570,6 +601,367 @@ bool MetadataManager::EnsureUFBDirectory(const std::wstring& jobPath)
 {
     std::filesystem::path ufbDir = std::filesystem::path(jobPath) / L".ufb";
     return EnsureDirectoryExists(ufbDir);
+}
+
+//=============================================================================
+// Change Log Implementation (Per-Device Append-Only)
+//=============================================================================
+
+std::filesystem::path MetadataManager::GetChangesDirectory(const std::wstring& jobPath)
+{
+    return std::filesystem::path(jobPath) / L".ufb" / L"changes";
+}
+
+std::filesystem::path MetadataManager::GetChangeLogPath(const std::wstring& jobPath, const std::string& deviceId)
+{
+    std::filesystem::path changesDir = GetChangesDirectory(jobPath);
+    std::wstring filename = L"device-" + Utf8ToWide(deviceId) + L".json";
+    return changesDir / filename;
+}
+
+nlohmann::json MetadataManager::ChangeLogEntryToJson(const ChangeLogEntry& entry)
+{
+    nlohmann::json json;
+    json["deviceId"] = entry.deviceId;
+    json["timestamp"] = entry.timestamp;
+    json["operation"] = entry.operation;
+    json["shotPath"] = WideToUtf8(entry.shotPath);
+
+    if (entry.operation == "update")
+    {
+        json["data"] = ShotToJson(entry.data);
+    }
+
+    return json;
+}
+
+ChangeLogEntry MetadataManager::JsonToChangeLogEntry(const nlohmann::json& json)
+{
+    ChangeLogEntry entry;
+    entry.deviceId = json.value("deviceId", "");
+    entry.timestamp = json.value("timestamp", 0ULL);
+    entry.operation = json.value("operation", "");
+    entry.shotPath = Utf8ToWide(json.value("shotPath", ""));
+
+    if (json.contains("data"))
+    {
+        entry.data = JsonToShot(json["data"], entry.shotPath);
+    }
+
+    return entry;
+}
+
+bool MetadataManager::AppendToChangeLog(const std::wstring& jobPath, const ChangeLogEntry& entry)
+{
+    try
+    {
+        // Ensure changes directory exists
+        std::filesystem::path changesDir = GetChangesDirectory(jobPath);
+        if (!std::filesystem::exists(changesDir))
+        {
+            std::filesystem::create_directories(changesDir);
+        }
+
+        // Get change log path for this device
+        std::filesystem::path logPath = GetChangeLogPath(jobPath, entry.deviceId);
+
+        // Read existing entries (if file exists)
+        std::vector<nlohmann::json> entries;
+        if (std::filesystem::exists(logPath))
+        {
+            std::ifstream inFile(logPath);
+            if (inFile.is_open())
+            {
+                nlohmann::json doc = nlohmann::json::parse(inFile);
+                if (doc.is_array())
+                {
+                    entries = doc.get<std::vector<nlohmann::json>>();
+                }
+                inFile.close();
+            }
+        }
+
+        // Append new entry
+        entries.push_back(ChangeLogEntryToJson(entry));
+
+        // Write back to file
+        std::ofstream outFile(logPath);
+        if (!outFile.is_open())
+        {
+            std::cerr << "[MetadataManager] Failed to open change log for writing: " << logPath << std::endl;
+            return false;
+        }
+
+        nlohmann::json doc = entries;
+        outFile << doc.dump(2);  // Pretty print with 2-space indent
+        outFile.close();
+
+        std::wcout << L"[MetadataManager] Appended change log entry: " << entry.shotPath << std::endl;
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[MetadataManager] Failed to append change log: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+std::map<std::wstring, Shot> MetadataManager::ReadAllChangeLogs(const std::wstring& jobPath,
+                                                                 const std::wstring& expectedDeviceId,
+                                                                 uint64_t minTimestamp)
+{
+    std::map<std::wstring, Shot> shots;
+    bool hasExpectedChange = !expectedDeviceId.empty() && minTimestamp > 0;
+
+    if (hasExpectedChange)
+    {
+        std::wcout << L"[MetadataManager] Content verification enabled: expecting change from device "
+                   << expectedDeviceId << L" with timestamp >= " << minTimestamp << std::endl;
+    }
+
+    try
+    {
+        std::filesystem::path changesDir = GetChangesDirectory(jobPath);
+
+        if (!std::filesystem::exists(changesDir))
+        {
+            // No changes directory yet - return empty
+            return shots;
+        }
+
+        // Collect all change log entries from all devices
+        std::vector<ChangeLogEntry> allEntries;
+
+        for (const auto& entry : std::filesystem::directory_iterator(changesDir))
+        {
+            if (entry.is_regular_file() && entry.path().extension() == L".json")
+            {
+                std::wcout << L"[MetadataManager] Reading change log: " << entry.path().filename() << std::endl;
+
+                // Retry logic for file sync services (Dropbox, OneDrive, etc.)
+                // File might be locked, partially written, or not yet synced from remote
+                // Exponential backoff with cap: 200ms, 400ms, 800ms, 1600ms, 3200ms, 6400ms, 6400ms...
+                // Total max wait: ~32 seconds (sufficient for typical cloud sync delays)
+                bool success = false;
+                int maxRetries = 10;
+
+                for (int attempt = 0; attempt < maxRetries && !success; ++attempt)
+                {
+                    if (attempt > 0)
+                    {
+                        // Exponential backoff with 6400ms cap (2^attempt * 100, capped at 6400)
+                        int delayMs = std::min(100 * (1 << attempt), 6400);
+                        std::wcout << L"[MetadataManager] Retrying after " << delayMs << L"ms (attempt " << (attempt + 1) << L"/" << maxRetries << L")" << std::endl;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                    }
+
+                    try
+                    {
+                        std::ifstream file(entry.path(), std::ios::binary);
+                        if (!file.is_open())
+                        {
+                            if (attempt < maxRetries - 1)
+                            {
+                                std::wcerr << L"[MetadataManager] File locked, will retry: " << entry.path().filename() << std::endl;
+                                continue;
+                            }
+                            else
+                            {
+                                std::wcerr << L"[MetadataManager] Failed to open change log after " << maxRetries << L" attempts: " << entry.path().filename() << std::endl;
+                                break;
+                            }
+                        }
+
+                        // Read entire file
+                        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+                        file.close();
+
+                        // Check if empty (file sync in progress)
+                        if (content.empty())
+                        {
+                            if (attempt < maxRetries - 1)
+                            {
+                                std::wcout << L"[MetadataManager] File empty (sync in progress), will retry: " << entry.path().filename() << std::endl;
+                                continue;
+                            }
+                            else
+                            {
+                                std::wcerr << L"[MetadataManager] File still empty after " << maxRetries << L" attempts: " << entry.path().filename() << std::endl;
+                                break;
+                            }
+                        }
+
+                        // Parse JSON
+                        nlohmann::json doc = nlohmann::json::parse(content);
+                        std::vector<ChangeLogEntry> parsedEntries;
+                        if (doc.is_array())
+                        {
+                            for (const auto& jsonEntry : doc)
+                            {
+                                parsedEntries.push_back(JsonToChangeLogEntry(jsonEntry));
+                            }
+                        }
+
+                        // Content verification: if we're expecting a specific change, verify it's present
+                        if (hasExpectedChange)
+                        {
+                            // Extract device ID from filename (device-{id}.json)
+                            std::wstring filename = entry.path().stem().wstring();
+                            std::wstring prefix = L"device-";
+                            std::wstring fileDeviceId;
+
+                            if (filename.find(prefix) == 0)
+                            {
+                                fileDeviceId = filename.substr(prefix.length());
+                                // Convert underscores back to hyphens (device-0C81F55D_4DB3... -> 0C81F55D-4DB3...)
+                                std::replace(fileDeviceId.begin(), fileDeviceId.end(), L'_', L'-');
+                            }
+
+                            // Check if this is the file from the expected device
+                            if (fileDeviceId == expectedDeviceId)
+                            {
+                                std::wcout << L"[MetadataManager] Checking expected device file: " << entry.path().filename()
+                                           << L" (extracted ID: " << fileDeviceId << L")" << std::endl;
+                                std::wcout << L"[MetadataManager] Looking for timestamp >= " << minTimestamp
+                                           << L", found " << parsedEntries.size() << L" entries" << std::endl;
+
+                                // Verify the parsed entries contain the expected change
+                                bool foundExpectedChange = false;
+                                for (const auto& parsedEntry : parsedEntries)
+                                {
+                                    std::wstring deviceIdWide(parsedEntry.deviceId.begin(), parsedEntry.deviceId.end());
+                                    std::wcout << L"[MetadataManager]   Entry: deviceId=" << deviceIdWide
+                                               << L" timestamp=" << parsedEntry.timestamp
+                                               << L" (" << (parsedEntry.timestamp >= minTimestamp ? L"MATCH" : L"too old") << L")"
+                                               << std::endl;
+
+                                    if (parsedEntry.timestamp >= minTimestamp)
+                                    {
+                                        foundExpectedChange = true;
+                                        std::wcout << L"[MetadataManager] ✓ Verified: Found expected change with timestamp "
+                                                   << parsedEntry.timestamp << L" (>= " << minTimestamp << L")" << std::endl;
+                                        break;
+                                    }
+                                }
+
+                                if (!foundExpectedChange && attempt < maxRetries - 1)
+                                {
+                                    std::wcout << L"[MetadataManager] Content verification failed: expected change not found (stale read), will retry"
+                                               << std::endl;
+                                    continue;  // Retry - file exists but content is stale
+                                }
+                                else if (!foundExpectedChange)
+                                {
+                                    std::wcerr << L"[MetadataManager] WARNING: Expected change still not found after "
+                                               << maxRetries << L" attempts (cloud sync may be slower than expected)" << std::endl;
+                                    // Don't fail - proceed with what we have
+                                }
+                            }
+                        }
+
+                        // Add parsed entries to the collection
+                        allEntries.insert(allEntries.end(), parsedEntries.begin(), parsedEntries.end());
+
+                        success = true;
+                        if (attempt > 0)
+                        {
+                            std::wcout << L"[MetadataManager] Successfully read change log after " << (attempt + 1) << L" attempts" << std::endl;
+                        }
+                    }
+                    catch (const nlohmann::json::parse_error& e)
+                    {
+                        if (attempt < maxRetries - 1)
+                        {
+                            std::wcerr << L"[MetadataManager] JSON parse error (partial sync?), will retry: " << entry.path().filename() << L" - " << e.what() << std::endl;
+                            continue;
+                        }
+                        else
+                        {
+                            std::wcerr << L"[MetadataManager] Failed to parse change log after " << maxRetries << L" attempts: " << entry.path().filename() << L" - " << e.what() << std::endl;
+                            break;
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::wcerr << L"[MetadataManager] Unexpected error reading change log: " << entry.path().filename() << L" - " << e.what() << std::endl;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Sort all entries by timestamp (chronological order)
+        std::sort(allEntries.begin(), allEntries.end(),
+            [](const ChangeLogEntry& a, const ChangeLogEntry& b) {
+                if (a.timestamp != b.timestamp)
+                    return a.timestamp < b.timestamp;
+                // Tie-breaker: device ID lexicographic order
+                return a.deviceId < b.deviceId;
+            });
+
+        // Apply changes in chronological order (last write wins)
+        for (const auto& entry : allEntries)
+        {
+            if (entry.operation == "update")
+            {
+                shots[entry.shotPath] = entry.data;
+            }
+            else if (entry.operation == "delete")
+            {
+                shots.erase(entry.shotPath);
+            }
+        }
+
+        std::wcout << L"[MetadataManager] Merged " << allEntries.size()
+                   << L" change log entries into " << shots.size() << L" shots" << std::endl;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[MetadataManager] Failed to read change logs: " << e.what() << std::endl;
+    }
+
+    return shots;
+}
+
+//=============================================================================
+// Observer Pattern Implementation
+//=============================================================================
+
+void MetadataManager::RegisterObserver(MetadataObserver observer)
+{
+    std::lock_guard<std::mutex> lock(m_observersMutex);
+    m_observers.push_back(observer);
+}
+
+void MetadataManager::UnregisterAllObservers()
+{
+    std::lock_guard<std::mutex> lock(m_observersMutex);
+    m_observers.clear();
+}
+
+void MetadataManager::NotifyObservers(const std::wstring& jobPath)
+{
+    std::lock_guard<std::mutex> lock(m_observersMutex);
+
+    std::wcout << L"[MetadataManager] NotifyObservers: Notifying " << m_observers.size() << L" observers for: " << jobPath << std::endl;
+
+    int observerIndex = 0;
+    for (const auto& observer : m_observers)
+    {
+        try
+        {
+            std::wcout << L"[MetadataManager] Calling observer #" << observerIndex << std::endl;
+            observer(jobPath);
+            std::wcout << L"[MetadataManager] Observer #" << observerIndex << L" completed" << std::endl;
+            observerIndex++;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[MetadataManager] Observer exception: " << e.what() << std::endl;
+        }
+    }
+
+    std::wcout << L"[MetadataManager] All observers notified successfully" << std::endl;
 }
 
 } // namespace UFB

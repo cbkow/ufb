@@ -74,6 +74,30 @@ bool BackupManager::CreateBackup(const std::wstring& jobPath)
     // Copy file (TODO: compress in future)
     std::filesystem::copy_file(shotsJsonPath, backupPath, std::filesystem::copy_options::overwrite_existing);
 
+    // NEW: Backup change logs, archives, and snapshot
+    std::filesystem::path changesDir = std::filesystem::path(jobPath) / L".ufb" / L"changes";
+    if (std::filesystem::exists(changesDir))
+    {
+        // Create changes backup subdirectory
+        std::wstring changesBackupDirName = L"changes_" + timestamp;
+        std::filesystem::path changesBackupDir = backupDir / changesBackupDirName;
+
+        try
+        {
+            // Copy entire changes directory (includes active logs, archives, and snapshot)
+            std::filesystem::copy(changesDir, changesBackupDir,
+                                  std::filesystem::copy_options::recursive |
+                                  std::filesystem::copy_options::overwrite_existing);
+
+            std::cout << "Backed up change logs and archives to: " << WideToUtf8(changesBackupDirName) << std::endl;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Warning: Failed to backup change logs: " << e.what() << std::endl;
+            // Continue with backup even if this fails
+        }
+    }
+
     // Update backup metadata
     nlohmann::json metadata = ReadBackupMetadata(jobPath);
 

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(ufb)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Add external libraries
@@ -60,18 +60,49 @@ add_executable(ufb
     src/thumbnail_manager.h
     src/subscription_manager.cpp
     src/subscription_manager.h
+    src/everything_index_manager.cpp
+    src/everything_index_manager.h
     src/metadata_manager.cpp
     src/metadata_manager.h
     src/backup_manager.cpp
     src/backup_manager.h
+    src/archival_manager.cpp
+    src/archival_manager.h
     src/sync_manager.cpp
     src/sync_manager.h
+    src/file_watcher.cpp
+    src/file_watcher.h
+    src/p2p_manager.cpp
+    src/p2p_manager.h
     src/bookmark_manager.cpp
     src/bookmark_manager.h
     src/subscription_panel.cpp
     src/subscription_panel.h
     src/ole_drag_drop.cpp
     src/ole_drag_drop.h
+    src/transcode_queue_panel.cpp
+    src/transcode_queue_panel.h
+    src/deadline_queue_panel.cpp
+    src/deadline_queue_panel.h
+    src/deadline_submit_dialog.cpp
+    src/deadline_submit_dialog.h
+    src/settings_dialog.cpp
+    src/settings_dialog.h
+    src/project_config.cpp
+    src/project_config.h
+    src/shot_view.cpp
+    src/shot_view.h
+    src/assets_view.cpp
+    src/assets_view.h
+    src/postings_view.cpp
+    src/postings_view.h
+    src/project_tracker_view.cpp
+    src/project_tracker_view.h
+    src/aggregated_tracker_view.cpp
+    src/aggregated_tracker_view.h
+    src/ImGuiDatePicker.cpp
+    src/ImGuiDatePicker.hpp
+    build/ufb.rc
 )
 
 target_include_directories(ufb PRIVATE
@@ -101,6 +132,7 @@ target_link_libraries(ufb PRIVATE
     ole32
     shlwapi
     comctl32
+    winhttp
     # FFmpeg libraries
     avformat
     avcodec
@@ -119,21 +151,31 @@ target_link_libraries(ufb PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/external/openexr/lib/OpenEXR-3_3.lib
 )
 
-# Set Windows subsystem - no console window
+# Console window control
+# Default: show console in Debug, hide in Release
+# Override with: cmake -DUFB_SHOW_CONSOLE=ON or OFF
+if(NOT DEFINED UFB_SHOW_CONSOLE)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(UFB_SHOW_CONSOLE ON)
+    else()
+        set(UFB_SHOW_CONSOLE OFF)
+    endif()
+endif()
+option(UFB_SHOW_CONSOLE "Show console window for debugging" ${UFB_SHOW_CONSOLE})
+
 if(WIN32)
-    # Temporarily disable for debugging
-    #set_target_properties(ufb PROPERTIES
-    #    WIN32_EXECUTABLE TRUE
-    #)
-    # Link additional Windows libraries for accent color
-    target_link_libraries(ufb PRIVATE dwmapi)
+    # Hide console window unless UFB_SHOW_CONSOLE is enabled
+    if(NOT UFB_SHOW_CONSOLE)
+        set_target_properties(ufb PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
 
     # Allow using main() instead of WinMain() for WIN32 subsystem
     if(MSVC)
-        set_target_properties(ufb PROPERTIES
-            LINK_FLAGS "/ENTRY:mainCRTStartup"
-        )
+        set_target_properties(ufb PROPERTIES LINK_FLAGS "/ENTRY:mainCRTStartup")
     endif()
+
+    # Link additional Windows libraries for accent color
+    target_link_libraries(ufb PRIVATE dwmapi)
 endif()
 
 # Copy assets folder to build directory
@@ -174,4 +216,12 @@ add_custom_command(TARGET ufb POST_BUILD
     ${CMAKE_CURRENT_SOURCE_DIR}/external/openexr/bin
     $<TARGET_FILE_DIR:ufb>
     COMMENT "Copying OpenEXR DLLs to build directory..."
+)
+
+# Copy Everything Search (es.exe) to build directory
+add_custom_command(TARGET ufb POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/everything/es.exe
+    $<TARGET_FILE_DIR:ufb>
+    COMMENT "Copying Everything Search (es.exe) to build directory..."
 )

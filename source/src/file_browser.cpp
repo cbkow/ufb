@@ -196,6 +196,11 @@ void FileBrowser::SetCurrentDirectory(const std::wstring& path)
         if (std::filesystem::exists(path) && std::filesystem::is_directory(path))
         {
             m_currentDirectory = std::filesystem::canonical(path).wstring();
+
+            // Clear pending thumbnail work before changing directory
+            m_thumbnailManager.ClearPendingRequests();
+            m_thumbnailManager.ClearCache();
+
             RefreshFileList();
             m_selectedIndices.clear();  // Clear selection when changing directories
         }
@@ -206,8 +211,51 @@ void FileBrowser::SetCurrentDirectory(const std::wstring& path)
     }
 }
 
+void FileBrowser::SetCurrentDirectoryAndSelectFile(const std::wstring& directoryPath, const std::wstring& filePathToSelect)
+{
+    try
+    {
+        if (std::filesystem::exists(directoryPath) && std::filesystem::is_directory(directoryPath))
+        {
+            m_currentDirectory = std::filesystem::canonical(directoryPath).wstring();
+
+            // Clear pending thumbnail work before changing directory
+            m_thumbnailManager.ClearPendingRequests();
+            m_thumbnailManager.ClearCache();
+
+            RefreshFileList();
+            m_selectedIndices.clear();
+
+            // Find and select the specified file
+            std::wstring canonicalFilePathToSelect;
+            try {
+                canonicalFilePathToSelect = std::filesystem::canonical(filePathToSelect).wstring();
+            } catch (...) {
+                // If canonical fails (file doesn't exist), just use the path as-is
+                canonicalFilePathToSelect = filePathToSelect;
+            }
+
+            for (size_t i = 0; i < m_files.size(); i++)
+            {
+                if (m_files[i].fullPath == canonicalFilePathToSelect)
+                {
+                    m_selectedIndices.insert(static_cast<int>(i));
+                    std::wcout << L"[FileBrowser] Selected file: " << m_files[i].name << std::endl;
+                    break;
+                }
+            }
+        }
+    }
+    catch (const std::exception&)
+    {
+        // Failed to set directory and select file
+    }
+}
+
 void FileBrowser::RefreshFileList()
 {
+    std::lock_guard<std::mutex> lock(m_filesMutex);
+
     m_files.clear();
 
     try
@@ -869,7 +917,7 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
             if (onOpenInBrowser1)
             {
-                if (ImGui::MenuItem("Open in Browser 1"))
+                if (ImGui::MenuItem("Open in the Left Browser"))
                 {
                     std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
                     onOpenInBrowser1(pathToOpen);
@@ -879,7 +927,7 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
             if (onOpenInBrowser2)
             {
-                if (ImGui::MenuItem("Open in Browser 2"))
+                if (ImGui::MenuItem("Open in the Right Browser"))
                 {
                     std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
                     onOpenInBrowser2(pathToOpen);
@@ -1008,7 +1056,7 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
             if (isVideo && onTranscodeToMP4)
             {
-                std::wcout << L"[FileBrowser] Showing Transcode menu for video file, " << m_selectedIndices.size() << L" files selected" << std::endl;
+                //std::wcout << L"[FileBrowser] Showing Transcode menu for video file, " << m_selectedIndices.size() << L" files selected" << std::endl;
 
                 // Use bright variant of accent color
                 ImVec4 accentColor = GetAccentColor();
@@ -1185,12 +1233,67 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
         ImGui::Separator();
 
+        // Copy ufb:/// link
+        {
+            ImVec4 accentColor = GetAccentColor();
+            ImVec4 brightAccent = ImVec4(
+                accentColor.x * 1.3f,
+                accentColor.y * 1.3f,
+                accentColor.z * 1.3f,
+                1.0f
+            );
+            ImGui::PushStyleColor(ImGuiCol_Text, brightAccent);
+
+            if (ImGui::MenuItem("Copy ufb:/// link"))
+            {
+                // Generate URI for this path
+                std::string uri = UFB::BuildPathURI(entry.fullPath);
+
+                // Copy to clipboard
+                ImGui::SetClipboardText(uri.c_str());
+
+                std::wcout << L"[FileBrowser] Copied ufb:/// link to clipboard: "
+                           << UFB::Utf8ToWide(uri) << std::endl;
+
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Separator();
+
         // More Options - opens Windows context menu
         if (ImGui::MenuItem("More Options..."))
         {
             ImVec2 mousePos = ImGui::GetMousePos();
             ShowContextMenu(hwnd, entry.fullPath, mousePos);
             ImGui::CloseCurrentPopup();
+        }
+
+        // Custom context menu items (callback)
+        if (onCustomContextMenu)
+        {
+            ImGui::Separator();
+
+            // Collect selected file paths
+            std::vector<std::wstring> selectedPaths;
+            if (m_selectedIndices.empty())
+            {
+                selectedPaths.push_back(entry.fullPath);
+            }
+            else
+            {
+                for (int idx : m_selectedIndices)
+                {
+                    if (idx >= 0 && idx < m_files.size())
+                    {
+                        selectedPaths.push_back(m_files[idx].fullPath);
+                    }
+                }
+            }
+
+            onCustomContextMenu(selectedPaths);
         }
 
         ImGui::EndPopup();
@@ -1329,6 +1432,87 @@ void FileBrowser::DrawNavigationBar()
         if (ImGui::Button("Refresh"))
         {
             RefreshFileList();
+        }
+    }
+
+    ImGui::SameLine();
+
+    // New Job button (only show if in project folder)
+    if (m_bookmarkManager)
+    {
+        bool isProjectFolder = false;
+
+        // Check if current directory is a project folder
+        auto bookmark = m_bookmarkManager->GetBookmarkByPath(m_currentDirectory);
+        if (bookmark.has_value() && bookmark->isProjectFolder)
+        {
+            isProjectFolder = true;
+        }
+        else
+        {
+            // Try canonicalizing current directory and checking all bookmarks
+            try
+            {
+                std::filesystem::path canonicalCurrent = std::filesystem::canonical(m_currentDirectory);
+                auto allBookmarks = m_bookmarkManager->GetAllBookmarks();
+
+                for (const auto& bm : allBookmarks)
+                {
+                    if (bm.isProjectFolder)
+                    {
+                        try
+                        {
+                            std::filesystem::path canonicalBookmark = std::filesystem::canonical(bm.path);
+                            if (canonicalCurrent == canonicalBookmark)
+                            {
+                                isProjectFolder = true;
+                                break;
+                            }
+                        }
+                        catch (const std::exception&)
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+            catch (const std::exception&)
+            {
+                // Current directory might not be canonical, use original path
+            }
+        }
+
+        if (isProjectFolder)
+        {
+            ImGui::SameLine();
+
+            if (font_icons)
+            {
+                ImGui::PushFont(font_icons);
+                if (ImGui::Button(U8("\uE145")))  // Material Icons add symbol
+                {
+                    m_showNewJobDialog = true;
+                    // Clear buffers
+                    memset(m_newJobNumberBuffer, 0, sizeof(m_newJobNumberBuffer));
+                    memset(m_newJobNameBuffer, 0, sizeof(m_newJobNameBuffer));
+                }
+                ImGui::PopFont();
+            }
+            else
+            {
+                if (ImGui::Button("+"))
+                {
+                    m_showNewJobDialog = true;
+                    // Clear buffers
+                    memset(m_newJobNumberBuffer, 0, sizeof(m_newJobNumberBuffer));
+                    memset(m_newJobNameBuffer, 0, sizeof(m_newJobNameBuffer));
+                }
+            }
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Create New Job");
+            }
         }
     }
 
@@ -1519,12 +1703,12 @@ void FileBrowser::DrawFileList(HWND hwnd)
             // Check if network path
             if (m_preSearchDirectory.size() >= 2 && m_preSearchDirectory[0] == L'\\' && m_preSearchDirectory[1] == L'\\')
             {
-                ImGui::TextDisabled("Note: Everything may not index network drives. Add this path in Everything settings to enable search.");
+                ImGui::TextDisabled("Note: Everything may not be indexing this drive or folder");
             }
             else
             {
-                ImGui::TextDisabled("Possible causes: 1) Everything hasn't indexed this folder, 2) Folder is excluded in Everything settings,");
-                ImGui::TextDisabled("3) Cloud sync/junction point - check Everything > Options > Indexes > NTFS > 'Index folder junctions'");
+              /*  ImGui::TextDisabled("Possible causes: 1) Everything hasn't indexed this folder, 2) Folder is excluded in Everything settings,");
+                ImGui::TextDisabled("3) Cloud sync/junction point - check Everything > Options > Indexes > NTFS > 'Index folder junctions'");*/
             }
         }
         else
@@ -1611,6 +1795,23 @@ void FileBrowser::DrawFileList(HWND hwnd)
                 if (!selectedPaths.empty())
                 {
                     DeleteFilesToRecycleBin(selectedPaths);
+                }
+            }
+        }
+
+        // F2 - Rename (single file only)
+        if (ImGui::IsKeyPressed(ImGuiKey_F2))
+        {
+            // Only allow rename if exactly one file is selected
+            if (m_selectedIndices.size() == 1)
+            {
+                int idx = *m_selectedIndices.begin();
+                if (idx >= 0 && idx < m_files.size())
+                {
+                    m_renameOriginalPath = m_files[idx].fullPath;
+                    std::wstring filename = m_files[idx].name;
+                    WideCharToMultiByte(CP_UTF8, 0, filename.c_str(), -1, m_renameBuffer, sizeof(m_renameBuffer), nullptr, nullptr);
+                    m_showRenameDialog = true;
                 }
             }
         }
@@ -1741,6 +1942,85 @@ void FileBrowser::DrawFileList(HWND hwnd)
         ImGui::EndPopup();
     }
 
+    // New Job dialog modal
+    if (m_showNewJobDialog)
+    {
+        ImGui::OpenPopup("Create New Job");
+        m_showNewJobDialog = false;  // Only open once
+    }
+
+    if (ImGui::BeginPopupModal("Create New Job", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Create a new job from template");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Job Number input
+        ImGui::Text("Job Number:");
+        ImGui::SetNextItemWidth(300.0f);
+        if (ImGui::IsWindowAppearing())
+        {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::InputText("##jobnumber", m_newJobNumberBuffer, sizeof(m_newJobNumberBuffer));
+
+        ImGui::Spacing();
+
+        // Job Name input
+        ImGui::Text("Job Name:");
+        ImGui::SetNextItemWidth(300.0f);
+        bool enterPressed = ImGui::InputText("##jobname", m_newJobNameBuffer, sizeof(m_newJobNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+
+        // Preview folder name
+        if (strlen(m_newJobNumberBuffer) > 0 || strlen(m_newJobNameBuffer) > 0)
+        {
+            std::string previewName = std::string(m_newJobNumberBuffer) + "_" + std::string(m_newJobNameBuffer);
+            // Convert to lowercase
+            std::transform(previewName.begin(), previewName.end(), previewName.begin(),
+                [](unsigned char c) { return std::tolower(c); });
+            // Replace spaces with underscores
+            std::replace(previewName.begin(), previewName.end(), ' ', '_');
+
+            ImGui::TextDisabled("Folder name: %s", previewName.c_str());
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool doCreate = false;
+        if (ImGui::Button("Create", ImVec2(120, 0)) || enterPressed)
+        {
+            doCreate = true;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+
+        // Handle job creation
+        if (doCreate)
+        {
+            if (strlen(m_newJobNumberBuffer) > 0 && strlen(m_newJobNameBuffer) > 0)
+            {
+                CreateJobFromTemplate(m_newJobNumberBuffer, m_newJobNameBuffer);
+                RefreshFileList();  // Explicit refresh to update UI
+                ImGui::CloseCurrentPopup();
+            }
+            else
+            {
+                // Show error - both fields required
+                std::cerr << "[FileBrowser] Job number and name are required" << std::endl;
+            }
+        }
+
+        ImGui::EndPopup();
+    }
+
     // Drop target for entire browser window (for drag and drop between browsers)
     if (ImGui::BeginDragDropTarget())
     {
@@ -1786,9 +2066,16 @@ void FileBrowser::DrawFileList(HWND hwnd)
 
 void FileBrowser::DrawListView(HWND hwnd)
 {
+    // Create a snapshot of files to avoid holding lock during rendering
+    std::vector<FileEntry> filesSnapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_filesMutex);
+        filesSnapshot = m_files;
+    }
+
     // Clear and resize item bounds vector for box selection
     m_itemBounds.clear();
-    m_itemBounds.resize(m_files.size());
+    m_itemBounds.resize(filesSnapshot.size());
 
     // Check if current directory is a project folder
     // Try both exact match and canonicalized path (for symlinks/junctions)
@@ -1863,6 +2150,8 @@ void FileBrowser::DrawListView(HWND hwnd)
                     const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
                     m_sortColumn = static_cast<SortColumn>(spec.ColumnIndex);
                     m_sortAscending = (spec.SortDirection == ImGuiSortDirection_Ascending);
+
+                    std::lock_guard<std::mutex> lock(m_filesMutex);
                     SortFileList();
                 }
                 sortSpecs->SpecsDirty = false;
@@ -1870,13 +2159,13 @@ void FileBrowser::DrawListView(HWND hwnd)
         }
 
         ImGuiListClipper clipper;
-        clipper.Begin((int)m_files.size());
+        clipper.Begin((int)filesSnapshot.size());
 
         while (clipper.Step())
         {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++)
             {
-                const FileEntry& entry = m_files[i];
+                const FileEntry& entry = filesSnapshot[i];
 
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -2067,6 +2356,9 @@ void FileBrowser::DrawListView(HWND hwnd)
 
                             // Start Windows native drag and drop (this will block until drag completes)
                             StartWindowsDragDrop(filePaths);
+
+                            // Reset flag immediately after OLE drag completes
+                            transitionedToOLEDrag = false;
 
                             // Don't continue with ImGui drag
                         }
@@ -2392,6 +2684,13 @@ void FileBrowser::DrawListView(HWND hwnd)
 
 void FileBrowser::DrawGridView(HWND hwnd)
 {
+    // Create a snapshot of files to avoid holding lock during rendering
+    std::vector<FileEntry> filesSnapshot;
+    {
+        std::lock_guard<std::mutex> lock(m_filesMutex);
+        filesSnapshot = m_files;
+    }
+
     // Calculate grid layout
     ImVec2 availableSize = ImGui::GetContentRegionAvail();
     float itemWidth = m_thumbnailSize + 20.0f;  // Thumbnail + padding
@@ -2403,10 +2702,44 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
     // Clear and resize item bounds vector for box selection
     m_itemBounds.clear();
-    m_itemBounds.resize(m_files.size());
+    m_itemBounds.resize(filesSnapshot.size());
 
     // Child window for scrolling
     ImGui::BeginChild("GridView", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
+
+    // Add sortable table header (looks identical to List mode headers)
+    if (ImGui::BeginTable("GridViewHeader", 3,
+        ImGuiTableFlags_Sortable | ImGuiTableFlags_Borders | ImGuiTableFlags_NoHostExtendX))
+    {
+        // Set up columns (same as List mode)
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableHeadersRow();
+
+        // Handle sorting (reuse exact same code from List mode)
+        if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs())
+        {
+            if (sortSpecs->SpecsDirty)
+            {
+                if (sortSpecs->SpecsCount > 0)
+                {
+                    const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+                    m_sortColumn = static_cast<SortColumn>(spec.ColumnIndex);
+                    m_sortAscending = (spec.SortDirection == ImGuiSortDirection_Ascending);
+
+                    std::lock_guard<std::mutex> lock(m_filesMutex);
+                    SortFileList();
+                }
+                sortSpecs->SpecsDirty = false;
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    // Small spacing between header and grid
+    ImGui::Spacing();
 
     // Calculate visible range for lazy loading (with generous buffer)
     float scrollY = ImGui::GetScrollY();
@@ -2418,12 +2751,12 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
     // Convert to item indices
     int firstVisibleItem = firstVisibleRow * columnsPerRow;
-    int lastVisibleItem = (std::min)((lastVisibleRow + 1) * columnsPerRow, (int)m_files.size());
+    int lastVisibleItem = (std::min)((lastVisibleRow + 1) * columnsPerRow, (int)filesSnapshot.size());
 
     // Render files in grid
-    for (int i = 0; i < m_files.size(); ++i)
+    for (int i = 0; i < filesSnapshot.size(); ++i)
     {
-        const FileEntry& entry = m_files[i];
+        const FileEntry& entry = filesSnapshot[i];
 
         ImGui::PushID(i);
 
@@ -2497,7 +2830,32 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
         if (texture)
         {
-            ImGui::Image(texture, displaySize);
+            // Validate texture is still in cache before rendering to prevent crashes
+            bool isValidTexture = false;
+
+            if (!entry.isDirectory && isInVisibleRange)
+            {
+                // This was a thumbnail - validate it's still in thumbnail cache
+                ImTextureID currentTexture = m_thumbnailManager.GetThumbnail(entry.fullPath);
+                isValidTexture = (currentTexture == texture);
+            }
+            else
+            {
+                // This was an icon - validate it's still in icon cache
+                int iconSize = (int)m_thumbnailSize;
+                ImTextureID currentIcon = m_iconManager.GetFileIcon(entry.fullPath, entry.isDirectory, iconSize);
+                isValidTexture = (currentIcon == texture);
+            }
+
+            if (isValidTexture)
+            {
+                ImGui::Image(texture, displaySize);
+            }
+            else
+            {
+                // Texture was invalidated - show placeholder
+                ImGui::Dummy(displaySize);
+            }
         }
         else
         {
@@ -2613,6 +2971,9 @@ void FileBrowser::DrawGridView(HWND hwnd)
                     // Start Windows native drag and drop (this will block until drag completes)
                     StartWindowsDragDrop(filePaths);
 
+                    // Reset flag immediately after OLE drag completes
+                    transitionedToOLEDrag_grid = false;
+
                     // Don't continue with ImGui drag
                 }
                 else
@@ -2700,6 +3061,14 @@ void FileBrowser::DrawGridView(HWND hwnd)
         ImVec2 groupMax = ImGui::GetItemRectMax();
         ImGui::SetCursorScreenPos(groupMin);
         ImGui::InvisibleButton(("##grid_item_" + std::to_string(i)).c_str(), ImVec2(groupMax.x - groupMin.x, groupMax.y - groupMin.y));
+
+        // Show tooltip with full filename on hover
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(nameUtf8);
+            ImGui::EndTooltip();
+        }
 
         // Store item bounds for box selection
         m_itemBounds[i] = std::make_pair(groupMin, groupMax);
@@ -3064,6 +3433,7 @@ std::string FileBrowser::FormatFileTime(const std::filesystem::file_time_type& f
 
 void FileBrowser::SortFileList()
 {
+    // NOTE: Caller must hold m_filesMutex lock before calling this method
     std::sort(m_files.begin(), m_files.end(), [this](const FileEntry& a, const FileEntry& b) -> bool {
         // Always keep directories separate from files
         if (a.isDirectory != b.isDirectory)
@@ -3298,6 +3668,97 @@ bool FileBrowser::CreateTimeFolder()
     }
 }
 
+void FileBrowser::CreateJobFromTemplate(const std::string& jobNumber, const std::string& jobName)
+{
+    try
+    {
+        // Build folder name: {number}_{name} (lowercase, underscores for spaces)
+        std::string folderName = jobNumber + "_" + jobName;
+
+        // Convert to lowercase
+        std::transform(folderName.begin(), folderName.end(), folderName.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+        // Replace spaces with underscores
+        std::replace(folderName.begin(), folderName.end(), ' ', '_');
+
+        // Build destination path
+        std::wstring wideFolderName = UFB::Utf8ToWide(folderName);
+        std::filesystem::path destPath = std::filesystem::path(m_currentDirectory) / wideFolderName;
+
+        // Check if folder already exists
+        if (std::filesystem::exists(destPath))
+        {
+            std::cerr << "[FileBrowser] Job folder already exists: " << folderName << std::endl;
+            return;
+        }
+
+        // Get executable directory to find template
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        std::filesystem::path exeDir = std::filesystem::path(exePath).parent_path();
+        std::filesystem::path templatePath = exeDir / "assets" / "projectTemplate";
+
+        // Check if template exists
+        if (!std::filesystem::exists(templatePath))
+        {
+            std::cerr << "[FileBrowser] Template not found: " << templatePath << std::endl;
+            return;
+        }
+
+        std::cout << "[FileBrowser] Creating job from template: " << templatePath << std::endl;
+
+        // Create the job folder
+        std::filesystem::create_directory(destPath);
+
+        // Copy template contents recursively
+        for (const auto& entry : std::filesystem::directory_iterator(templatePath))
+        {
+            std::filesystem::path sourcePath = entry.path();
+            std::filesystem::path targetPath = destPath / sourcePath.filename();
+
+            // Copy recursively
+            std::filesystem::copy(sourcePath, targetPath,
+                std::filesystem::copy_options::recursive |
+                std::filesystem::copy_options::overwrite_existing);
+
+            std::cout << "[FileBrowser] Copied: " << sourcePath.filename() << std::endl;
+        }
+
+        // Rename any folders/files containing _t_project_name to the actual job name
+        std::wstring templateMarker = L"_t_project_name";
+        std::wstring replacement = UFB::Utf8ToWide(folderName);
+
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(destPath))
+        {
+            std::filesystem::path oldPath = entry.path();
+            std::wstring oldName = oldPath.filename().wstring();
+
+            // Check if filename contains the template marker
+            size_t pos = oldName.find(templateMarker);
+            if (pos != std::wstring::npos)
+            {
+                // Replace template marker with actual job name
+                std::wstring newName = oldName;
+                newName.replace(pos, templateMarker.length(), replacement);
+
+                // Build new path
+                std::filesystem::path newPath = oldPath.parent_path() / newName;
+
+                // Rename
+                std::filesystem::rename(oldPath, newPath);
+                std::cout << "[FileBrowser] Renamed: " << UFB::WideToUtf8(oldName) << " -> " << UFB::WideToUtf8(newName) << std::endl;
+            }
+        }
+
+        std::cout << "[FileBrowser] Created job folder: " << folderName << std::endl;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[FileBrowser] Error creating job from template: " << e.what() << std::endl;
+    }
+}
+
 void FileBrowser::ExecuteSearch(const std::string& query)
 {
     if (query.empty())
@@ -3373,6 +3834,7 @@ void FileBrowser::ExecuteSearch(const std::string& query)
 
     // Parse CSV output (format: Filename)
     // First line is header, skip it
+    std::lock_guard<std::mutex> lock(m_filesMutex);
     m_files.clear();
     std::istringstream stream(output);
     std::string line;

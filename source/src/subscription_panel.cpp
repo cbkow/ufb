@@ -3,8 +3,15 @@
 #include "utils.h"
 #include <iostream>
 
+// C++20 changed u8"" literals to char8_t, need to cast for ImGui
+#define U8(x) reinterpret_cast<const char*>(u8##x)
+
 // External function from main.cpp
 extern ImVec4 GetWindowsAccentColor();
+
+// External font pointers (from main.cpp)
+extern ImFont* font_regular;
+extern ImFont* font_icons;
 
 namespace UFB {
 
@@ -188,11 +195,22 @@ void SubscriptionPanel::DrawJobsSection()
                 // Job item with sync status icon
                 const char* statusIcon = GetSyncStatusIcon(sub.syncStatus);
                 std::string displayName = WideToUtf8(sub.jobName);
-                std::string label = std::string(statusIcon) + " " + displayName;
 
                 bool isSelected = false;
 
-                if (ImGui::Selectable(label.c_str(), isSelected))
+                // Render icon with icon font
+                if (font_icons)
+                    ImGui::PushFont(font_icons);
+
+                ImGui::Text("%s", statusIcon);
+
+                if (font_icons)
+                    ImGui::PopFont();
+
+                ImGui::SameLine();
+
+                // Render selectable item for the job name
+                if (ImGui::Selectable(displayName.c_str(), isSelected))
                 {
                     // Navigate to job path
                     if (onNavigateToPath)
@@ -400,11 +418,11 @@ const char* SubscriptionPanel::GetSyncStatusIcon(SyncStatus status)
 {
     switch (status)
     {
-    case SyncStatus::Pending:  return "○"; // Circle outline
-    case SyncStatus::Syncing:  return "◐"; // Half circle
-    case SyncStatus::Synced:   return "●"; // Filled circle
-    case SyncStatus::Stale:    return "◌"; // Dotted circle
-    case SyncStatus::Error:    return "✕"; // X mark
+    case SyncStatus::Pending:  return U8("\uE836"); // radio_button_unchecked
+    case SyncStatus::Syncing:  return U8("\uE863"); // autorenew
+    case SyncStatus::Synced:   return U8("\uE86C"); // check_circle
+    case SyncStatus::Stale:    return U8("\uE002"); // access_time
+    case SyncStatus::Error:    return U8("\uE000"); // error
     default:                   return "?";
     }
 }

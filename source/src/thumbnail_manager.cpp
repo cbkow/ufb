@@ -95,6 +95,7 @@ void ThumbnailManager::RegisterExtractor(std::unique_ptr<ThumbnailExtractorInter
 bool ThumbnailManager::RequestThumbnail(const std::wstring& path, int size, bool highPriority)
 {
     // Check if already in cache (completed thumbnail)
+    unsigned int textureToDelete = 0;  // Texture to delete outside lock
     {
         std::lock_guard<std::mutex> lock(m_cacheMutex);
         auto it = m_cache.find(path);
@@ -109,10 +110,9 @@ bool ThumbnailManager::RequestThumbnail(const std::wstring& path, int size, bool
                 if (sizeDiff > 0.25f)
                 {
                     // Size changed significantly - evict old thumbnail and re-extract
-                    if (it->second.glTexture)
-                    {
-                        TextureUtils::DeleteTexture(it->second.glTexture);
-                    }
+                    // Save texture ID, erase from cache, then delete OUTSIDE lock
+                    // This prevents race where another thread has texture ID but we delete it
+                    textureToDelete = it->second.glTexture;
                     m_cache.erase(it);
                     // Fall through to request new thumbnail
                 }
@@ -130,6 +130,12 @@ bool ThumbnailManager::RequestThumbnail(const std::wstring& path, int size, bool
                 return false;  // Not queued (already have it)
             }
         }
+    }
+
+    // Delete texture AFTER releasing lock (if we evicted one)
+    if (textureToDelete)
+    {
+        TextureUtils::DeleteTexture(textureToDelete);
     }
 
     // Check if already being extracted (in-flight)
@@ -284,6 +290,38 @@ void ThumbnailManager::ClearCache()
 
     m_cache.clear();
     std::cout << "ThumbnailManager: Cache cleared" << std::endl;
+}
+
+void ThumbnailManager::ClearPendingRequests()
+{
+    // Clear pending requests from the request queue
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        std::queue<ThumbnailRequest> emptyQueue;
+        std::swap(m_requestQueue, emptyQueue);
+    }
+
+    // Clear in-flight tracking
+    {
+        std::lock_guard<std::mutex> lock(m_inFlightMutex);
+        m_inFlightPaths.clear();
+    }
+
+    // Clear completed queue
+    {
+        std::lock_guard<std::mutex> lock(m_completedMutex);
+        while (!m_completedQueue.empty())
+        {
+            ThumbnailResult result = m_completedQueue.front();
+            m_completedQueue.pop();
+            if (result.success && result.hBitmap)
+            {
+                DeleteObject(result.hBitmap);
+            }
+        }
+    }
+
+    std::cout << "ThumbnailManager: Pending requests cleared" << std::endl;
 }
 
 int ThumbnailManager::GetPendingRequests() const

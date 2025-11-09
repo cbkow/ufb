@@ -338,50 +338,70 @@ void TranscodeQueuePanel::RenderJobDetailsPanel() {
     ImGui::Text("Job ID: %s", selectedJob->id.c_str());
     ImGui::Separator();
 
-    // Input path with "Open Location" button
+    // Input path with "Open Location" buttons
     ImGui::Text("Input:  %s", WideToUtf8(selectedJob->inputPath).c_str());
     ImGui::SameLine();
-    if (ImGui::SmallButton("Browser 1##InputB1")) {
-        if (onOpenInBrowser1) {
+    if (ImGui::SmallButton("Left Browser##InputLB")) {
+        if (onOpenInLeftBrowser) {
             std::filesystem::path inputPath(selectedJob->inputPath);
-            onOpenInBrowser1(inputPath.parent_path().wstring());
+            onOpenInLeftBrowser(inputPath.parent_path().wstring());
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Open input file location in Browser 1");
+        ImGui::SetTooltip("Open input file location in the Left Browser");
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Browser 2##InputB2")) {
-        if (onOpenInBrowser2) {
+    if (ImGui::SmallButton("Right Browser##InputRB")) {
+        if (onOpenInRightBrowser) {
             std::filesystem::path inputPath(selectedJob->inputPath);
-            onOpenInBrowser2(inputPath.parent_path().wstring());
+            onOpenInRightBrowser(inputPath.parent_path().wstring());
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Open input file location in Browser 2");
+        ImGui::SetTooltip("Open input file location in the Right Browser");
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("New Window##InputNW")) {
+        if (onOpenInNewWindow) {
+            std::filesystem::path inputPath(selectedJob->inputPath);
+            onOpenInNewWindow(inputPath.parent_path().wstring());
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open input file location in a new window");
     }
 
     // Output path with "Open in Browser" buttons
     ImGui::Text("Output: %s", WideToUtf8(selectedJob->outputPath).c_str());
     ImGui::SameLine();
-    if (ImGui::SmallButton("Browser 1##OutputB1")) {
-        if (onOpenInBrowser1) {
+    if (ImGui::SmallButton("Left Browser##OutputLB")) {
+        if (onOpenInLeftBrowser) {
             std::filesystem::path outputPath(selectedJob->outputPath);
-            onOpenInBrowser1(outputPath.parent_path().wstring());
+            onOpenInLeftBrowser(outputPath.parent_path().wstring());
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Open output file location (MP4 folder) in Browser 1");
+        ImGui::SetTooltip("Open output file location (MP4 folder) in the Left Browser");
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Browser 2##OutputB2")) {
-        if (onOpenInBrowser2) {
+    if (ImGui::SmallButton("Right Browser##OutputRB")) {
+        if (onOpenInRightBrowser) {
             std::filesystem::path outputPath(selectedJob->outputPath);
-            onOpenInBrowser2(outputPath.parent_path().wstring());
+            onOpenInRightBrowser(outputPath.parent_path().wstring());
         }
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Open output file location (MP4 folder) in Browser 2");
+        ImGui::SetTooltip("Open output file location (MP4 folder) in the Right Browser");
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("New Window##OutputNW")) {
+        if (onOpenInNewWindow) {
+            std::filesystem::path outputPath(selectedJob->outputPath);
+            onOpenInNewWindow(outputPath.parent_path().wstring());
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Open output file location (MP4 folder) in a new window");
     }
 
     ImGui::Separator();

@@ -16,6 +16,7 @@
 namespace UFB {
     class BookmarkManager;
     class SubscriptionManager;
+    class MetadataManager;
     class ProjectConfig;
     struct ShotMetadata;
 }
@@ -31,7 +32,8 @@ public:
     // Initialize with assets folder path (e.g., "D:\Projects\MyJob\assets")
     void Initialize(const std::wstring& assetsFolderPath, const std::wstring& jobName,
                     UFB::BookmarkManager* bookmarkManager = nullptr,
-                    UFB::SubscriptionManager* subscriptionManager = nullptr);
+                    UFB::SubscriptionManager* subscriptionManager = nullptr,
+                    UFB::MetadataManager* metadataManager = nullptr);
 
     // Shutdown and cleanup
     void Shutdown();
@@ -45,8 +47,14 @@ public:
     // Get the job name (for window title)
     const std::wstring& GetJobName() const { return m_jobName; }
 
+    // Check if window is open
+    bool IsOpen() const { return m_isOpen; }
+
     // Set the selected asset by path
     void SetSelectedAsset(const std::wstring& assetPath);
+
+    // Set the selected asset and optionally select a file in the browser panel
+    void SetSelectedAssetAndFile(const std::wstring& assetPath, const std::wstring& filePath);
 
     // Callback for closing this view
     std::function<void()> onClose;
@@ -54,6 +62,7 @@ public:
     // Callbacks for opening path in browsers
     std::function<void(const std::wstring& path)> onOpenInBrowser1;
     std::function<void(const std::wstring& path)> onOpenInBrowser2;
+    std::function<void(const std::wstring& path)> onOpenInNewWindow;
 
     // Callback for transcoding video files
     std::function<void(const std::vector<std::wstring>&)> onTranscodeToMP4;
@@ -75,6 +84,7 @@ private:
     // Manager dependencies
     UFB::BookmarkManager* m_bookmarkManager = nullptr;
     UFB::SubscriptionManager* m_subscriptionManager = nullptr;
+    UFB::MetadataManager* m_metadataManager = nullptr;
     UFB::ProjectConfig* m_projectConfig = nullptr;
 
     // Icon and thumbnail managers for left panel
@@ -103,6 +113,9 @@ private:
     // Show context menu for a file/folder
     void ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry);
 
+    // Show native Windows shell context menu
+    void ShowContextMenu(HWND hwnd, const std::wstring& path, const ImVec2& screenPos);
+
     // Helper functions
     void CopyToClipboard(const std::wstring& text);
     void CopyFilesToClipboard(const std::vector<std::wstring>& paths);
@@ -121,6 +134,7 @@ private:
 
     // Metadata helpers
     void LoadMetadata();
+    void ReloadMetadata();  // Reload metadata (called by observer)
     void LoadColumnVisibility();
     void SaveColumnVisibility();
     ImVec4 GetStatusColor(const std::string& status);
@@ -169,4 +183,15 @@ private:
     // Date picker state
     bool m_showDatePicker = false;
     int m_datePickerAssetIndex = -1;
+
+    // Filter state
+    std::set<std::string> m_filterCategories;      // Selected categories (empty = all)
+    int m_filterDateModified = 0;                  // 0=All, 1=Today, 2=Yesterday, 3=Last 7 days, 4=Last 30 days, 5=This year
+
+    // Available filter values (populated from metadata)
+    std::set<std::string> m_availableCategories;
+
+    // Filter helpers
+    void CollectAvailableFilterValues();           // Collect unique values from metadata
+    bool PassesFilters(const FileEntry& entry);    // Check if entry passes all active filters
 };

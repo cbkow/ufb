@@ -1,8 +1,10 @@
 #include "project_tracker_view.h"
 #include "subscription_manager.h"
+#include "metadata_manager.h"
 #include "project_config.h"
 #include "utils.h"
 #include "ImGuiDatePicker.hpp"
+#include <iostream>
 #include <algorithm>
 #include <chrono>
 #include <sstream>
@@ -61,11 +63,14 @@ ProjectTrackerView::~ProjectTrackerView()
 }
 
 void ProjectTrackerView::Initialize(const std::wstring& jobPath, const std::wstring& jobName,
-                                    UFB::SubscriptionManager* subscriptionManager, UFB::ProjectConfig* projectConfig)
+                                    UFB::SubscriptionManager* subscriptionManager,
+                                    UFB::MetadataManager* metadataManager,
+                                    UFB::ProjectConfig* projectConfig)
 {
     m_jobPath = jobPath;
     m_jobName = jobName;
     m_subscriptionManager = subscriptionManager;
+    m_metadataManager = metadataManager;
 
     // Load or create ProjectConfig for this job
     m_projectConfig = new UFB::ProjectConfig();
@@ -77,16 +82,50 @@ void ProjectTrackerView::Initialize(const std::wstring& jobPath, const std::wstr
         m_projectConfig->LoadGlobalTemplate();
     }
 
+    // Register observer for real-time metadata updates
+    if (m_metadataManager)
+    {
+        m_metadataManager->RegisterObserver([this, jobPath](const std::wstring& changedJobPath) {
+            // Only reload if the change is for our job
+            if (changedJobPath == jobPath)
+            {
+                std::wcout << L"[ProjectTrackerView] Metadata changed for job, reloading..." << std::endl;
+                ReloadTrackedItems();
+            }
+        });
+    }
+
+    // Collect available filter values from ProjectConfig
+    CollectAvailableFilterValues();
+
     // Load tracked items
     RefreshTrackedItems();
 }
 
 void ProjectTrackerView::Shutdown()
 {
+    // Prevent double-shutdown
+    if (m_isShutdown)
+        return;
+
+    // Set shutdown flag FIRST - this prevents observer callbacks from doing any work
+    m_isShutdown = true;
+
+    // Clear tracked items
     m_trackedShots.clear();
     m_trackedAssets.clear();
     m_trackedPostings.clear();
     m_manualTasks.clear();
+    m_allItems.clear();
+
+    // Clear filter state
+    m_filterTypes.clear();
+    m_filterArtists.clear();
+    m_filterPriorities.clear();
+
+    // Clear available filter values
+    m_availableArtists.clear();
+    m_availablePriorities.clear();
 
     if (m_projectConfig)
     {
@@ -97,6 +136,10 @@ void ProjectTrackerView::Shutdown()
 
 void ProjectTrackerView::RefreshTrackedItems()
 {
+    // Don't refresh if we're shutting down
+    if (m_isShutdown)
+        return;
+
     if (!m_subscriptionManager)
         return;
 
@@ -105,20 +148,32 @@ void ProjectTrackerView::RefreshTrackedItems()
     m_trackedAssets = m_subscriptionManager->GetTrackedItems(m_jobPath, "asset");
     m_trackedPostings = m_subscriptionManager->GetTrackedItems(m_jobPath, "posting");
     m_manualTasks = m_subscriptionManager->GetTrackedItems(m_jobPath, "manual_task");
+
+    // Update unified items list with filters applied
+    UpdateUnifiedItemsList();
+}
+
+void ProjectTrackerView::ReloadTrackedItems()
+{
+    // CRITICAL: Check shutdown flag FIRST before accessing any members
+    if (m_isShutdown)
+        return;
+
+    // Reload tracked items from database (called by observer when remote changes arrive)
+    RefreshTrackedItems();
+
+    // The UI will pick up the new tracked items on next frame
+    std::wcout << L"[ProjectTrackerView] Tracked items reloaded successfully" << std::endl;
 }
 
 void ProjectTrackerView::Draw(const char* title, HWND hwnd)
 {
+    // CRITICAL: Don't draw if we're shutting down
+    if (m_isShutdown)
+        return;
+
     // Use close button and check if window was closed
     bool windowOpen = ImGui::Begin(title, &m_isOpen, ImGuiWindowFlags_None);
-
-    // If window was closed, trigger onClose callback
-    if (!m_isOpen && onClose)
-    {
-        onClose();
-        ImGui::End();
-        return;
-    }
 
     if (!windowOpen)
     {
@@ -126,13 +181,237 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
         return;
     }
 
-    // Header with job name and refresh button (flush right)
+    // Header with job name
     ImGui::Text("Project: %ls", m_jobName.c_str());
+    ImGui::Separator();
 
-    // Refresh button flush right
-    float buttonWidth = 30.0f;  // Icon button width
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x - buttonWidth + ImGui::GetCursorPosX());
+    // Filter toolbar
+    if (font_icons)
+        ImGui::PushFont(font_icons);
 
+    if (ImGui::Button(U8("\uE145")))  // Material Icons add symbol
+    {
+        m_showAddTaskDialog = true;
+    }
+
+    if (font_icons)
+        ImGui::PopFont();
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Add Task");
+
+    ImGui::SameLine();
+
+    // Type filter button
+    {
+        int activeFilters = static_cast<int>(m_filterTypes.size());
+        std::string typeLabel = "Type" + (activeFilters > 0 ? " (" + std::to_string(activeFilters) + ")" : "");
+
+        if (ImGui::Button(typeLabel.c_str()))
+        {
+            ImGui::OpenPopup("TypeFilter");
+        }
+
+        if (ImGui::BeginPopup("TypeFilter"))
+        {
+            ImGui::Text("Filter by Type:");
+            ImGui::Separator();
+
+            bool hasShot = m_filterTypes.find("shot") != m_filterTypes.end();
+            if (ImGui::Checkbox("Shots", &hasShot))
+            {
+                if (hasShot) m_filterTypes.insert("shot");
+                else m_filterTypes.erase("shot");
+                UpdateUnifiedItemsList();
+            }
+
+            bool hasAsset = m_filterTypes.find("asset") != m_filterTypes.end();
+            if (ImGui::Checkbox("Assets", &hasAsset))
+            {
+                if (hasAsset) m_filterTypes.insert("asset");
+                else m_filterTypes.erase("asset");
+                UpdateUnifiedItemsList();
+            }
+
+            bool hasPosting = m_filterTypes.find("posting") != m_filterTypes.end();
+            if (ImGui::Checkbox("Postings", &hasPosting))
+            {
+                if (hasPosting) m_filterTypes.insert("posting");
+                else m_filterTypes.erase("posting");
+                UpdateUnifiedItemsList();
+            }
+
+            bool hasTask = m_filterTypes.find("manual_task") != m_filterTypes.end();
+            if (ImGui::Checkbox("Custom Tasks", &hasTask))
+            {
+                if (hasTask) m_filterTypes.insert("manual_task");
+                else m_filterTypes.erase("manual_task");
+                UpdateUnifiedItemsList();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Clear All"))
+            {
+                m_filterTypes.clear();
+                UpdateUnifiedItemsList();
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::SameLine();
+
+    // Artist filter button
+    {
+        int activeFilters = static_cast<int>(m_filterArtists.size());
+        std::string artistLabel = "Artist" + (activeFilters > 0 ? " (" + std::to_string(activeFilters) + ")" : "");
+
+        if (ImGui::Button(artistLabel.c_str()))
+        {
+            ImGui::OpenPopup("ArtistFilter");
+        }
+
+        if (ImGui::BeginPopup("ArtistFilter"))
+        {
+            ImGui::Text("Filter by Artist:");
+            ImGui::Separator();
+
+            for (const auto& artist : m_availableArtists)
+            {
+                bool isSelected = m_filterArtists.find(artist) != m_filterArtists.end();
+                if (ImGui::Checkbox(artist.c_str(), &isSelected))
+                {
+                    if (isSelected) m_filterArtists.insert(artist);
+                    else m_filterArtists.erase(artist);
+                    UpdateUnifiedItemsList();
+                }
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Clear All"))
+            {
+                m_filterArtists.clear();
+                UpdateUnifiedItemsList();
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::SameLine();
+
+    // Priority filter button
+    {
+        int activeFilters = static_cast<int>(m_filterPriorities.size());
+        std::string priorityLabel = "Priority" + (activeFilters > 0 ? " (" + std::to_string(activeFilters) + ")" : "");
+
+        if (ImGui::Button(priorityLabel.c_str()))
+        {
+            ImGui::OpenPopup("PriorityFilter");
+        }
+
+        if (ImGui::BeginPopup("PriorityFilter"))
+        {
+            ImGui::Text("Filter by Priority:");
+            ImGui::Separator();
+
+            bool hasHigh = m_filterPriorities.find(1) != m_filterPriorities.end();
+            if (ImGui::Checkbox("High", &hasHigh))
+            {
+                if (hasHigh) m_filterPriorities.insert(1);
+                else m_filterPriorities.erase(1);
+                UpdateUnifiedItemsList();
+            }
+
+            bool hasMedium = m_filterPriorities.find(2) != m_filterPriorities.end();
+            if (ImGui::Checkbox("Medium", &hasMedium))
+            {
+                if (hasMedium) m_filterPriorities.insert(2);
+                else m_filterPriorities.erase(2);
+                UpdateUnifiedItemsList();
+            }
+
+            bool hasLow = m_filterPriorities.find(3) != m_filterPriorities.end();
+            if (ImGui::Checkbox("Low", &hasLow))
+            {
+                if (hasLow) m_filterPriorities.insert(3);
+                else m_filterPriorities.erase(3);
+                UpdateUnifiedItemsList();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Clear All"))
+            {
+                m_filterPriorities.clear();
+                UpdateUnifiedItemsList();
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::SameLine();
+
+    // Due Date filter button
+    {
+        std::string dueDateLabel = "Due Date";
+        if (m_filterDueDate > 0)
+        {
+            const char* labels[] = {"All", "Overdue", "Today", "This Week", "This Month"};
+            dueDateLabel = std::string(labels[m_filterDueDate]);
+        }
+
+        if (ImGui::Button(dueDateLabel.c_str()))
+        {
+            ImGui::OpenPopup("DueDateFilter");
+        }
+
+        if (ImGui::BeginPopup("DueDateFilter"))
+        {
+            ImGui::Text("Filter by Due Date:");
+            ImGui::Separator();
+
+            if (ImGui::RadioButton("All", m_filterDueDate == 0))
+            {
+                m_filterDueDate = 0;
+                UpdateUnifiedItemsList();
+            }
+
+            if (ImGui::RadioButton("Overdue", m_filterDueDate == 1))
+            {
+                m_filterDueDate = 1;
+                UpdateUnifiedItemsList();
+            }
+
+            if (ImGui::RadioButton("Today", m_filterDueDate == 2))
+            {
+                m_filterDueDate = 2;
+                UpdateUnifiedItemsList();
+            }
+
+            if (ImGui::RadioButton("This Week", m_filterDueDate == 3))
+            {
+                m_filterDueDate = 3;
+                UpdateUnifiedItemsList();
+            }
+
+            if (ImGui::RadioButton("This Month", m_filterDueDate == 4))
+            {
+                m_filterDueDate = 4;
+                UpdateUnifiedItemsList();
+            }
+
+            ImGui::EndPopup();
+        }
+    }
+
+    ImGui::SameLine();
+
+    // Refresh button
     if (font_icons)
         ImGui::PushFont(font_icons);
 
@@ -144,31 +423,13 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
     if (font_icons)
         ImGui::PopFont();
 
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Refresh");
+
     ImGui::Separator();
 
-    // Draw tables in collapsing headers (Manual Tasks first)
-    if (ImGui::CollapsingHeader("Manual Tasks", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        DrawManualTasksTable();
-    }
-
-    if (ImGui::CollapsingHeader("Shots", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        DrawItemsTable("ShotsTable", "shots", m_trackedShots, m_selectedShotIndex, m_shotsSortColumn, m_shotsSortAscending,
-                      m_showShotDatePicker, m_shotDatePickerIndex);
-    }
-
-    if (ImGui::CollapsingHeader("Assets", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        DrawItemsTable("AssetsTable", "assets", m_trackedAssets, m_selectedAssetIndex, m_assetsSortColumn, m_assetsSortAscending,
-                      m_showAssetDatePicker, m_assetDatePickerIndex);
-    }
-
-    if (ImGui::CollapsingHeader("Postings", ImGuiTreeNodeFlags_DefaultOpen))
-    {
-        DrawItemsTable("PostingsTable", "postings", m_trackedPostings, m_selectedPostingIndex, m_postingsSortColumn, m_postingsSortAscending,
-                      m_showPostingDatePicker, m_postingDatePickerIndex);
-    }
+    // Draw unified table
+    DrawUnifiedTable();
 
     ImGui::End();
 
@@ -220,6 +481,62 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
         ImGui::EndPopup();
     }
 
+    // Date Picker Modal
+    if (m_showAllItemsDatePicker)
+    {
+        ImGui::OpenPopup("Select Due Date");
+        m_showAllItemsDatePicker = false;  // Only open once
+    }
+
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Select Due Date", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Reduce padding to make date picker more compact
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 2.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 6.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(4.0f, 4.0f));
+
+        if (m_allItemsDatePickerIndex >= 0 && m_allItemsDatePickerIndex < static_cast<int>(m_allItems.size()))
+        {
+            auto& item = m_allItems[m_allItemsDatePickerIndex];
+
+            tm currentDate = TimestampToTm(item.dueDate > 0 ? item.dueDate : static_cast<uint64_t>(std::time(nullptr)) * 1000);
+
+            if (ImGui::DatePicker("##datepicker", currentDate, false))
+            {
+                item.dueDate = TmToTimestamp(currentDate);
+                if (m_subscriptionManager)
+                {
+                    m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                }
+            }
+
+            if (ImGui::Button("Clear", ImVec2(120, 0)))
+            {
+                item.dueDate = 0;
+                if (m_subscriptionManager)
+                {
+                    m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                }
+                m_allItemsDatePickerIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("Close", ImVec2(120, 0)))
+            {
+                m_allItemsDatePickerIndex = -1;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        // Pop style variables (3: FramePadding, ItemSpacing, CellPadding)
+        ImGui::PopStyleVar(3);
+
+        ImGui::EndPopup();
+    }
+
     // Note Editor Modal
     if (m_showNoteEditor)
     {
@@ -228,6 +545,7 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
     }
 
     ImGui::SetNextWindowSize(ImVec2(600, 400), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("Edit Note", nullptr, ImGuiWindowFlags_NoScrollbar))
     {
         // Use regular font for the editor
@@ -269,499 +587,71 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
 
         ImGui::EndPopup();
     }
-}
 
-void ProjectTrackerView::DrawItemsTable(const char* tableName, const char* itemType, std::vector<UFB::ShotMetadata>& items,
-                                       int& selectedIndex, int& sortColumn, bool& sortAscending,
-                                       bool& showDatePicker, int& datePickerIndex)
-{
-    if (items.empty())
+    // Link Editor Modal
+    if (m_showLinkEditor)
     {
-        ImGui::TextDisabled("No tracked items");
-        return;
+        ImGui::OpenPopup("Edit Link");
+        m_showLinkEditor = false;  // Only open once
     }
 
-    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-                           ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp;
-
-    // Calculate table height: header + all rows (no scrolling)
-    float rowHeight = ImGui::GetTextLineHeightWithSpacing();
-    float tableHeight = rowHeight * (items.size() + 1); // +1 for header
-
-    if (ImGui::BeginTable(tableName, 7, flags, ImVec2(0, tableHeight)))
+    ImGui::SetNextWindowSize(ImVec2(500, 150), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Edit Link", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
     {
-        // Setup columns
-        ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 0.0f, 0);
-        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 120.0f, 1);
-        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 120.0f, 2);
-        ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 100.0f, 3);
-        ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 120.0f, 4);
-        ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 120.0f, 5);
-        ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthStretch, 0.0f, 6);
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
+        // Use regular font for the editor
+        if (font_regular)
+            ImGui::PushFont(font_regular);
 
-        // Handle sorting
-        if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs())
+        ImGui::TextWrapped("Enter URL:");
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(450);
+        ImGui::InputText("##linkeditor", m_linkEditorBuffer, sizeof(m_linkEditorBuffer));
+
+        ImGui::Spacing();
+
+        if (ImGui::Button("Save", ImVec2(120, 0)))
         {
-            if (sortSpecs->SpecsDirty)
+            if (m_linkEditorItemList && m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_linkEditorItemList->size())
             {
-                if (sortSpecs->SpecsCount > 0)
+                (*m_linkEditorItemList)[m_linkEditorItemIndex].links = m_linkEditorBuffer;
+                if (m_subscriptionManager)
                 {
-                    sortColumn = sortSpecs->Specs[0].ColumnUserID;
-                    sortAscending = sortSpecs->Specs[0].SortDirection == ImGuiSortDirection_Ascending;
-                    SortItems(items, sortColumn, sortAscending);
+                    m_subscriptionManager->CreateOrUpdateShotMetadata((*m_linkEditorItemList)[m_linkEditorItemIndex]);
                 }
-                sortSpecs->SpecsDirty = false;
             }
+            ImGui::CloseCurrentPopup();
         }
 
-        // Get users list (same for all items)
-        std::vector<UFB::User> users;
-        if (m_projectConfig && m_projectConfig->IsLoaded())
-        {
-            users = m_projectConfig->GetUsers();
-        }
-
-        // Match Shot View styling: larger cell padding for taller rows
-        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.0f, 8.0f));
-
-        // Draw rows
-        for (int i = 0; i < items.size(); i++)
-        {
-            auto& item = items[i];
-            bool metadataChanged = false;
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-
-            ImGui::PushID(i);
-
-            bool isSelected = (i == selectedIndex);
-
-            // Path column (selectable - only in this column, not spanning all columns)
-            // Use regular font for shot name
-            if (font_regular)
-                ImGui::PushFont(font_regular);
-
-            std::wstring displayPath = item.shotPath;
-
-            // For manual tasks, clean up the display
-            if (item.itemType == "manual_task")
-            {
-                // Extract task name from path (format: jobPath/__task_TaskName)
-                size_t taskPos = displayPath.find(L"/__task_");
-                if (taskPos != std::wstring::npos)
-                {
-                    displayPath = displayPath.substr(taskPos + 8);  // Skip "/__task_"
-                }
-            }
-            else
-            {
-                // For regular items, remove job path prefix
-                if (displayPath.find(m_jobPath) == 0)
-                {
-                    displayPath = displayPath.substr(m_jobPath.length());
-                    if (!displayPath.empty() && displayPath[0] == L'\\')
-                        displayPath = displayPath.substr(1);
-                }
-            }
-
-            char pathUtf8[512];
-            WideCharToMultiByte(CP_UTF8, 0, displayPath.c_str(), -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
-
-            // Use accent color for selected items (matching Shot View)
-            ImVec4 accentColor = GetWindowsAccentColor();
-            accentColor.w = 0.3f;  // Set transparency
-            if (isSelected)
-            {
-                ImGui::PushStyleColor(ImGuiCol_Header, accentColor);
-                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accentColor.x * 1.1f, accentColor.y * 1.1f, accentColor.z * 1.1f, accentColor.w));
-                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accentColor.x * 1.2f, accentColor.y * 1.2f, accentColor.z * 1.2f, accentColor.w));
-            }
-
-            // SpanAllColumns makes the highlight span the entire row, AllowOverlap allows clicking other columns
-            // Use explicit height to match Shot View row height (35.0f)
-            if (ImGui::Selectable(pathUtf8, isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 35.0f)))
-            {
-                selectedIndex = i;
-            }
-
-            // Right-click context menu on the name column
-            std::string contextMenuId = "row_context_" + std::to_string(i);
-            if (ImGui::BeginPopupContextItem(contextMenuId.c_str()))
-            {
-                if (item.itemType == "manual_task")
-                {
-                    // For manual tasks: Delete option
-                    if (ImGui::MenuItem("Delete Task"))
-                    {
-                        if (m_subscriptionManager && m_subscriptionManager->DeleteManualTask(item.id))
-                        {
-                            selectedIndex = -1;
-                            RefreshTrackedItems();
-                        }
-                    }
-                }
-                else
-                {
-                    // For shots/assets/postings: Open and Un-track options
-                    if (ImGui::MenuItem("Open in Window"))
-                    {
-                        // Call the appropriate callback based on item type
-                        if (item.itemType == "shot" && onOpenShot)
-                        {
-                            onOpenShot(item.shotPath);
-                        }
-                        else if (item.itemType == "asset" && onOpenAsset)
-                        {
-                            onOpenAsset(item.shotPath);
-                        }
-                        else if (item.itemType == "posting" && onOpenPosting)
-                        {
-                            onOpenPosting(item.shotPath);
-                        }
-                    }
-
-                    if (ImGui::MenuItem("Un-track"))
-                    {
-                        item.isTracked = false;
-                        if (m_subscriptionManager)
-                        {
-                            m_subscriptionManager->CreateOrUpdateShotMetadata(item);
-                            RefreshTrackedItems();
-                        }
-                    }
-                }
-                ImGui::EndPopup();
-            }
-
-            if (isSelected)
-            {
-                ImGui::PopStyleColor(3);  // Pop Header, HeaderHovered, HeaderActive
-            }
-
-            if (font_regular)
-                ImGui::PopFont();
-
-            // Push mono font for all other columns
-            if (font_mono)
-                ImGui::PushFont(font_mono);
-
-            // Status column (editable)
-            ImGui::TableNextColumn();
-            {
-                // Get status options for this specific item's folderType
-                std::vector<UFB::StatusOption> statusOptions;
-                if (m_projectConfig && m_projectConfig->IsLoaded() && !item.folderType.empty())
-                {
-                    statusOptions = m_projectConfig->GetStatusOptions(item.folderType);
-                }
-
-                std::string comboId = "##status_" + std::to_string(i);
-                const char* currentStatus = statusOptions.empty() ? "(No options)" :
-                                           (item.status.empty() ? statusOptions[0].name.c_str() : item.status.c_str());
-
-                ImVec4 statusColor = GetStatusColor(item.status, item.folderType);
-                ImGui::PushStyleColor(ImGuiCol_Text, statusColor);
-
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::BeginCombo(comboId.c_str(), currentStatus, ImGuiComboFlags_HeightLarge))
-                {
-                    for (const auto& statusOption : statusOptions)
-                    {
-                        ImVec4 optionColor = GetStatusColor(statusOption.name, item.folderType);
-                        ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
-
-                        bool isStatusSelected = (item.status == statusOption.name);
-                        if (ImGui::Selectable(statusOption.name.c_str(), isStatusSelected))
-                        {
-                            item.status = statusOption.name;
-                            metadataChanged = true;
-                        }
-                        if (isStatusSelected)
-                            ImGui::SetItemDefaultFocus();
-
-                        ImGui::PopStyleColor();
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::PopStyleColor();
-            }
-
-            // Category column (editable)
-            ImGui::TableNextColumn();
-            {
-                // Get category options for this specific item's folderType
-                std::vector<UFB::CategoryOption> categoryOptions;
-                if (m_projectConfig && m_projectConfig->IsLoaded() && !item.folderType.empty())
-                {
-                    categoryOptions = m_projectConfig->GetCategoryOptions(item.folderType);
-                }
-
-                std::string comboId = "##category_" + std::to_string(i);
-                const char* currentCategory = categoryOptions.empty() ? "(No options)" :
-                                             (item.category.empty() ? categoryOptions[0].name.c_str() : item.category.c_str());
-
-                ImVec4 categoryColor = GetCategoryColor(item.category, item.folderType);
-                ImGui::PushStyleColor(ImGuiCol_Text, categoryColor);
-
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::BeginCombo(comboId.c_str(), currentCategory, ImGuiComboFlags_HeightLarge))
-                {
-                    for (const auto& categoryOption : categoryOptions)
-                    {
-                        ImVec4 optionColor = GetCategoryColor(categoryOption.name, item.folderType);
-                        ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
-
-                        bool isCategorySelected = (item.category == categoryOption.name);
-                        if (ImGui::Selectable(categoryOption.name.c_str(), isCategorySelected))
-                        {
-                            item.category = categoryOption.name;
-                            metadataChanged = true;
-                        }
-                        if (isCategorySelected)
-                            ImGui::SetItemDefaultFocus();
-
-                        ImGui::PopStyleColor();
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::PopStyleColor();
-            }
-
-            // Priority column (editable)
-            ImGui::TableNextColumn();
-            {
-                const char* priorityLabels[] = { "High", "Medium", "Low" };  // Index 0=High(1), 1=Medium(2), 2=Low(3)
-                const int priorityValues[] = { 1, 2, 3 };  // Map index to priority value
-                const char* currentPriority = priorityLabels[item.priority - 1];  // priority 1=High, 2=Medium, 3=Low
-
-                std::string comboId = "##priority_" + std::to_string(i);
-
-                // Get color for current priority
-                ImVec4 priorityColor = GetPriorityColor(item.priority);
-                ImGui::PushStyleColor(ImGuiCol_Text, priorityColor);
-
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::BeginCombo(comboId.c_str(), currentPriority))
-                {
-                    for (int p = 0; p < 3; p++)
-                    {
-                        ImVec4 optionColor = GetPriorityColor(priorityValues[p]);
-                        ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
-
-                        bool isPrioritySelected = (item.priority == priorityValues[p]);
-                        if (ImGui::Selectable(priorityLabels[p], isPrioritySelected))
-                        {
-                            item.priority = priorityValues[p];
-                            metadataChanged = true;
-                        }
-                        if (isPrioritySelected)
-                            ImGui::SetItemDefaultFocus();
-
-                        ImGui::PopStyleColor();
-                    }
-                    ImGui::EndCombo();
-                }
-
-                ImGui::PopStyleColor();
-            }
-
-            // Artist column (editable)
-            ImGui::TableNextColumn();
-            {
-                std::string comboId = "##artist_" + std::to_string(i);
-                const char* currentArtist = users.empty() ? "(No options)" :
-                                           (item.artist.empty() ? users[0].displayName.c_str() : item.artist.c_str());
-
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::BeginCombo(comboId.c_str(), currentArtist, ImGuiComboFlags_HeightLarge))
-                {
-                    for (const auto& user : users)
-                    {
-                        bool isArtistSelected = (item.artist == user.displayName);
-                        if (ImGui::Selectable(user.displayName.c_str(), isArtistSelected))
-                        {
-                            item.artist = user.displayName;
-                            metadataChanged = true;
-                        }
-                        if (isArtistSelected)
-                            ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-
-            // Due Date column (editable with date picker)
-            ImGui::TableNextColumn();
-            {
-                std::string dateStr = FormatDate(item.dueDate);
-                std::string buttonLabel = dateStr.empty() ? "Set Date##" + std::to_string(i) : dateStr + "##" + std::to_string(i);
-
-                ImGui::SetNextItemWidth(-FLT_MIN);
-                if (ImGui::Button(buttonLabel.c_str()))
-                {
-                    showDatePicker = true;
-                    datePickerIndex = i;
-                }
-
-                // Date picker popup
-                if (showDatePicker && datePickerIndex == i)
-                {
-                    std::string popupId = "DatePicker##" + std::to_string(i);
-                    ImGui::OpenPopup(popupId.c_str());
-
-                    if (ImGui::BeginPopup(popupId.c_str()))
-                    {
-                        tm currentDate = TimestampToTm(item.dueDate > 0 ? item.dueDate : static_cast<uint64_t>(std::time(nullptr)) * 1000);
-
-                        if (ImGui::DatePicker("##datepicker", currentDate, false))
-                        {
-                            item.dueDate = TmToTimestamp(currentDate);
-                            metadataChanged = true;
-                        }
-
-                        if (ImGui::Button("Clear"))
-                        {
-                            item.dueDate = 0;
-                            metadataChanged = true;
-                            showDatePicker = false;
-                            ImGui::CloseCurrentPopup();
-                        }
-
-                        ImGui::SameLine();
-
-                        if (ImGui::Button("Close"))
-                        {
-                            showDatePicker = false;
-                            ImGui::CloseCurrentPopup();
-                        }
-
-                        ImGui::EndPopup();
-                    }
-                    else
-                    {
-                        showDatePicker = false;
-                    }
-                }
-            }
-
-            // Notes column (compact preview, click to edit)
-            ImGui::TableNextColumn();
-            {
-                // Pop mono font and push regular font for notes
-                if (font_mono)
-                    ImGui::PopFont();
-                if (font_regular)
-                    ImGui::PushFont(font_regular);
-
-                // Create a one-line preview
-                std::string preview = item.note.empty() ? "(click to add note)" : item.note;
-
-                // Truncate to first line only
-                size_t newlinePos = preview.find('\n');
-                if (newlinePos != std::string::npos)
-                {
-                    preview = preview.substr(0, newlinePos) + "...";
-                }
-
-                // Truncate if too long (max 50 chars for preview)
-                if (preview.length() > 50)
-                {
-                    preview = preview.substr(0, 47) + "...";
-                }
-
-                // Make it selectable to detect clicks
-                std::string selectableId = "##note_preview_" + std::to_string(i);
-                ImVec4 textColor = item.note.empty() ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
-                ImGui::PushStyleColor(ImGuiCol_Text, textColor);
-
-                if (ImGui::Selectable(preview.c_str(), false, ImGuiSelectableFlags_AllowOverlap))
-                {
-                    // Open note editor modal
-                    m_showNoteEditor = true;
-                    m_noteEditorItemIndex = i;
-                    m_noteEditorItemList = &items;
-                    strncpy_s(m_noteEditorBuffer, item.note.c_str(), sizeof(m_noteEditorBuffer) - 1);
-                    m_noteEditorBuffer[sizeof(m_noteEditorBuffer) - 1] = '\0';
-                }
-
-                ImGui::PopStyleColor();
-
-                // Show full note on hover
-                if (ImGui::IsItemHovered() && !item.note.empty())
-                {
-                    ImGui::BeginTooltip();
-                    ImGui::PushTextWrapPos(400.0f);
-                    ImGui::TextUnformatted(item.note.c_str());
-                    ImGui::PopTextWrapPos();
-                    ImGui::EndTooltip();
-                }
-
-                // Pop regular font and push mono font back for next row
-                if (font_regular)
-                    ImGui::PopFont();
-                if (font_mono)
-                    ImGui::PushFont(font_mono);
-            }
-
-            // Save metadata changes
-            if (metadataChanged && m_subscriptionManager)
-            {
-                m_subscriptionManager->CreateOrUpdateShotMetadata(item);
-            }
-
-            // Pop mono font
-            if (font_mono)
-                ImGui::PopFont();
-
-            ImGui::PopID();
-        }
-
-        // Pop frame padding style
-        ImGui::PopStyleVar();
-
-        ImGui::EndTable();
-    }
-}
-
-void ProjectTrackerView::DrawManualTasksTable()
-{
-    // Add Task button
-    ImVec4 accentColor = GetWindowsAccentColor();
-    ImVec4 brightAccent = ImVec4(accentColor.x * 1.1f, accentColor.y * 1.1f, accentColor.z * 1.1f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, brightAccent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(brightAccent.x * 1.0f, brightAccent.y * 1.0f, brightAccent.z * 1.0f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(brightAccent.x * 0.7f, brightAccent.y * 0.7f, brightAccent.z * 0.7f, 1.0f));
-
-    if (ImGui::Button("Add Task"))
-    {
-        m_showAddTaskDialog = true;
-    }
-
-    ImGui::PopStyleColor(3);
-
-    // Delete button (only if selection exists)
-    if (m_selectedTaskIndex >= 0 && m_selectedTaskIndex < m_manualTasks.size())
-    {
         ImGui::SameLine();
-        if (ImGui::Button("Delete Task"))
+
+        if (ImGui::Button("Clear", ImVec2(120, 0)))
         {
-            int taskId = m_manualTasks[m_selectedTaskIndex].id;
-            if (m_subscriptionManager && m_subscriptionManager->DeleteManualTask(taskId))
+            if (m_linkEditorItemList && m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_linkEditorItemList->size())
             {
-                m_selectedTaskIndex = -1;
-                RefreshTrackedItems();
+                (*m_linkEditorItemList)[m_linkEditorItemIndex].links = "";
+                if (m_subscriptionManager)
+                {
+                    m_subscriptionManager->CreateOrUpdateShotMetadata((*m_linkEditorItemList)[m_linkEditorItemIndex]);
+                }
             }
+            ImGui::CloseCurrentPopup();
         }
+
+        ImGui::SameLine();
+
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+
+        if (font_regular)
+            ImGui::PopFont();
+
+        ImGui::EndPopup();
     }
 
-    // Draw table
-    DrawItemsTable("ManualTasksTable", "manual_task", m_manualTasks, m_selectedTaskIndex, m_tasksSortColumn, m_tasksSortAscending,
-                  m_showTaskDatePicker, m_taskDatePickerIndex);
 }
 
 void ProjectTrackerView::SortItems(std::vector<UFB::ShotMetadata>& items, int column, bool ascending)
@@ -770,13 +660,16 @@ void ProjectTrackerView::SortItems(std::vector<UFB::ShotMetadata>& items, int co
         bool result = false;
         switch (column)
         {
-            case 0: result = a.shotPath < b.shotPath; break;
-            case 1: result = a.status < b.status; break;
-            case 2: result = a.category < b.category; break;
-            case 3: result = a.priority < b.priority; break;
-            case 4: result = a.artist < b.artist; break;
-            case 5: result = a.dueDate < b.dueDate; break;
-            case 6: result = a.note < b.note; break;
+            case 0: result = a.itemType < b.itemType; break;      // Type
+            case 1: result = a.shotPath < b.shotPath; break;      // Path
+            case 2: result = a.status < b.status; break;          // Status
+            case 3: result = a.category < b.category; break;      // Category
+            case 4: result = a.priority < b.priority; break;      // Priority
+            case 5: result = a.artist < b.artist; break;          // Artist
+            case 6: result = a.dueDate < b.dueDate; break;        // Due Date
+            case 7: result = a.modifiedTime < b.modifiedTime; break; // Modified Date
+            case 8: result = a.links < b.links; break;            // Links
+            case 9: result = a.note < b.note; break;              // Notes
             default: result = false; break;
         }
         return ascending ? result : !result;
@@ -865,4 +758,743 @@ std::string ProjectTrackerView::FormatDate(uint64_t timestamp)
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d");
     return oss.str();
+}
+
+ImVec4 ProjectTrackerView::GetTypeColor(const std::string& itemType)
+{
+    if (itemType == "shot")
+        return ImVec4(0.2f, 0.6f, 1.0f, 1.0f);  // Blue
+    else if (itemType == "asset")
+        return ImVec4(0.7f, 0.4f, 1.0f, 1.0f);  // Purple
+    else if (itemType == "posting")
+        return ImVec4(0.3f, 0.8f, 0.3f, 1.0f);  // Green
+    else if (itemType == "manual_task")
+        return ImVec4(1.0f, 0.6f, 0.2f, 1.0f);  // Orange
+
+    return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);  // Gray (fallback)
+}
+
+void ProjectTrackerView::CollectAvailableFilterValues()
+{
+    m_availableArtists.clear();
+    m_availablePriorities.clear();
+
+    if (!m_projectConfig || !m_projectConfig->IsLoaded())
+        return;
+
+    // Load artists from project config users
+    std::vector<UFB::User> users = m_projectConfig->GetUsers();
+    for (const auto& user : users)
+    {
+        if (!user.displayName.empty())
+            m_availableArtists.insert(user.displayName);
+    }
+
+    // Load priorities from project config
+    std::vector<int> priorities = m_projectConfig->GetPriorityOptions();
+    for (int priority : priorities)
+    {
+        m_availablePriorities.insert(priority);
+    }
+}
+
+bool ProjectTrackerView::PassesFilters(const UFB::ShotMetadata& item)
+{
+    // Only show tracked items
+    if (!item.isTracked)
+        return false;
+
+    // Ensure item has a valid path
+    if (item.shotPath.empty())
+        return false;
+
+    // Filter out items whose path is exactly the job path (ghost entries)
+    if (item.shotPath == m_jobPath)
+        return false;
+
+    // For manual tasks, ensure the path contains the task marker
+    if (item.itemType == "manual_task")
+    {
+        if (item.shotPath.find(L"/__task_") == std::wstring::npos)
+            return false;
+    }
+    else
+    {
+        // For regular items (shot/asset/posting), ensure path is longer than job path
+        if (item.shotPath.length() <= m_jobPath.length() + 1)
+            return false;
+    }
+
+    // Ensure item has a valid type
+    if (item.itemType.empty())
+        return false;
+
+    // Ensure item type is valid
+    if (item.itemType != "shot" && item.itemType != "asset" &&
+        item.itemType != "posting" && item.itemType != "manual_task")
+        return false;
+
+    // Filter by item type
+    if (!m_filterTypes.empty())
+    {
+        if (m_filterTypes.find(item.itemType) == m_filterTypes.end())
+            return false;
+    }
+
+    // Filter by artist
+    if (!m_filterArtists.empty())
+    {
+        if (m_filterArtists.find(item.artist) == m_filterArtists.end())
+            return false;
+    }
+
+    // Filter by priority
+    if (!m_filterPriorities.empty())
+    {
+        if (m_filterPriorities.find(item.priority) == m_filterPriorities.end())
+            return false;
+    }
+
+    // Filter by due date
+    if (m_filterDueDate > 0 && item.dueDate > 0)
+    {
+        auto now = std::chrono::system_clock::now();
+        auto nowTime = std::chrono::system_clock::to_time_t(now);
+
+        // Convert due date timestamp (milliseconds) to time_t
+        std::time_t dueDateTime = static_cast<std::time_t>(item.dueDate / 1000);
+
+        // Calculate difference in days
+        double diffDays = std::difftime(dueDateTime, nowTime) / 86400.0;
+
+        bool passes = false;
+        switch (m_filterDueDate)
+        {
+            case 1: // Overdue
+                passes = (diffDays < 0);
+                break;
+            case 2: // Today
+                passes = (diffDays >= 0 && diffDays <= 1);
+                break;
+            case 3: // This Week
+                passes = (diffDays >= 0 && diffDays <= 7);
+                break;
+            case 4: // This Month
+                passes = (diffDays >= 0 && diffDays <= 30);
+                break;
+            default:
+                passes = true;
+                break;
+        }
+
+        if (!passes)
+            return false;
+    }
+
+    return true;
+}
+
+void ProjectTrackerView::UpdateUnifiedItemsList()
+{
+    // CRITICAL: Don't modify m_allItems while it's being iterated in DrawUnifiedTable()
+    if (m_isRendering)
+        return;
+
+    // Combine all items from all 4 lists with deduplication
+    m_allItems.clear();
+    std::set<int> addedIds;  // Track IDs to prevent duplicates
+
+    // Add all tracked shots
+    for (const auto& item : m_trackedShots)
+    {
+        if (PassesFilters(item))
+        {
+            // Only add if we haven't seen this ID before
+            if (addedIds.find(item.id) == addedIds.end())
+            {
+                m_allItems.push_back(item);
+                addedIds.insert(item.id);
+            }
+        }
+    }
+
+    // Add all tracked assets
+    for (const auto& item : m_trackedAssets)
+    {
+        if (PassesFilters(item))
+        {
+            if (addedIds.find(item.id) == addedIds.end())
+            {
+                m_allItems.push_back(item);
+                addedIds.insert(item.id);
+            }
+        }
+    }
+
+    // Add all tracked postings
+    for (const auto& item : m_trackedPostings)
+    {
+        if (PassesFilters(item))
+        {
+            if (addedIds.find(item.id) == addedIds.end())
+            {
+                m_allItems.push_back(item);
+                addedIds.insert(item.id);
+            }
+        }
+    }
+
+    // Add all manual tasks
+    for (const auto& item : m_manualTasks)
+    {
+        if (PassesFilters(item))
+        {
+            if (addedIds.find(item.id) == addedIds.end())
+            {
+                m_allItems.push_back(item);
+                addedIds.insert(item.id);
+            }
+        }
+    }
+
+    // Reset selection if out of bounds
+    if (m_selectedItemIndex >= static_cast<int>(m_allItems.size()))
+    {
+        m_selectedItemIndex = -1;
+    }
+}
+
+void ProjectTrackerView::DrawUnifiedTable()
+{
+    // CRITICAL: Set rendering flag to prevent m_allItems modification during iteration
+    m_isRendering = true;
+
+    // Empty state
+    if (m_allItems.empty())
+    {
+        m_isRendering = false;
+        ImGui::TextDisabled("No tracked items found (or all filtered out)");
+        return;
+    }
+
+    // Create table with 10 columns
+    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+                           ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+
+    // Push larger cell padding for taller rows (matching shot_view)
+    ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(8.0f, 8.0f));
+
+    if (ImGui::BeginTable("##UnifiedTrackerTable", 10, flags))
+    {
+        // Setup columns (widths matching shot_view)
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 100.0f, 0);
+        ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_DefaultSort, 0.0f, 1);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 140.0f, 2);
+        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 150.0f, 3);
+        ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 110.0f, 4);
+        ImGui::TableSetupColumn("Artist", ImGuiTableColumnFlags_WidthFixed, 150.0f, 5);
+        ImGui::TableSetupColumn("Due Date", ImGuiTableColumnFlags_WidthFixed, 110.0f, 6);
+        ImGui::TableSetupColumn("Modified", ImGuiTableColumnFlags_WidthFixed, 80.0f, 7);
+        ImGui::TableSetupColumn("Links", ImGuiTableColumnFlags_WidthFixed, 120.0f, 8);
+        ImGui::TableSetupColumn("Notes", ImGuiTableColumnFlags_WidthFixed, 250.0f, 9);
+        ImGui::TableSetupScrollFreeze(0, 1);
+
+        // Handle sorting
+        if (ImGuiTableSortSpecs* sortsSpecs = ImGui::TableGetSortSpecs())
+        {
+            if (sortsSpecs->SpecsDirty && sortsSpecs->SpecsCount > 0)
+            {
+                m_allItemsSortColumn = sortsSpecs->Specs[0].ColumnIndex;
+                m_allItemsSortAscending = (sortsSpecs->Specs[0].SortDirection == ImGuiSortDirection_Ascending);
+                SortItems(m_allItems, m_allItemsSortColumn, m_allItemsSortAscending);
+                sortsSpecs->SpecsDirty = false;
+            }
+        }
+
+        ImGui::TableHeadersRow();
+
+        // Get users list for artist dropdown
+        std::vector<UFB::User> users;
+        if (m_projectConfig && m_projectConfig->IsLoaded())
+        {
+            users = m_projectConfig->GetUsers();
+        }
+
+        // Draw rows
+        for (int i = 0; i < static_cast<int>(m_allItems.size()); ++i)
+        {
+            auto& item = m_allItems[i];
+
+            // Set minimum row height (matching shot_view)
+            ImGui::TableNextRow(ImGuiTableRowFlags_None, 35.0f);
+
+            ImGui::PushID(i);
+
+            // Column 0: Type (with color badge)
+            ImGui::TableSetColumnIndex(0);
+            ImVec4 typeColor = GetTypeColor(item.itemType);
+            ImGui::PushStyleColor(ImGuiCol_Text, typeColor);
+
+            std::string typeLabel = "Unknown";
+            if (item.itemType == "shot") typeLabel = "Shot";
+            else if (item.itemType == "asset") typeLabel = "Asset";
+            else if (item.itemType == "posting") typeLabel = "Posting";
+            else if (item.itemType == "manual_task") typeLabel = "Task";
+
+            ImGui::TextUnformatted(typeLabel.c_str());
+            ImGui::PopStyleColor();
+
+            // Column 1: Path
+            ImGui::TableSetColumnIndex(1);
+
+            std::wstring displayPath = item.shotPath;
+            if (item.itemType == "manual_task")
+            {
+                // Extract task name from path: jobPath/__task_TaskName
+                size_t taskMarkerPos = item.shotPath.find(L"/__task_");
+                if (taskMarkerPos != std::wstring::npos)
+                {
+                    displayPath = item.shotPath.substr(taskMarkerPos + 8);  // Skip "/__task_"
+                }
+            }
+            else
+            {
+                // Remove job path prefix
+                if (displayPath.find(m_jobPath) == 0)
+                {
+                    displayPath = displayPath.substr(m_jobPath.length());
+                    if (!displayPath.empty() && displayPath[0] == L'\\' || displayPath[0] == L'/')
+                        displayPath = displayPath.substr(1);
+                }
+            }
+
+            char pathUtf8[4096];
+            WideCharToMultiByte(CP_UTF8, 0, displayPath.c_str(), -1, pathUtf8, sizeof(pathUtf8), nullptr, nullptr);
+
+            bool isSelected = (i == m_selectedItemIndex);
+
+            // Use accent color for selected items (matching shot_view)
+            ImVec4 accentColor = GetWindowsAccentColor();
+            accentColor.w = 0.3f;  // Set transparency
+            if (isSelected)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Header, accentColor);
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accentColor.x * 1.1f, accentColor.y * 1.1f, accentColor.z * 1.1f, accentColor.w));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accentColor.x * 1.2f, accentColor.y * 1.2f, accentColor.z * 1.2f, accentColor.w));
+            }
+
+            // Use explicit height to match row height (35.0f)
+            if (ImGui::Selectable(pathUtf8, isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 35.0f)))
+            {
+                m_selectedItemIndex = i;
+
+                // Double-click to open
+                if (ImGui::IsMouseDoubleClicked(0))
+                {
+                    if (item.itemType == "shot" && onOpenShot)
+                        onOpenShot(item.shotPath);
+                    else if (item.itemType == "asset" && onOpenAsset)
+                        onOpenAsset(item.shotPath);
+                    else if (item.itemType == "posting" && onOpenPosting)
+                        onOpenPosting(item.shotPath);
+                }
+            }
+
+            if (isSelected)
+            {
+                ImGui::PopStyleColor(3);  // Pop Header, HeaderHovered, HeaderActive
+            }
+
+            // Context menu
+            if (ImGui::BeginPopupContextItem())
+            {
+                if (item.itemType != "manual_task")
+                {
+                    if (ImGui::MenuItem("Open in Project View"))
+                    {
+                        if (item.itemType == "shot" && onOpenShot)
+                            onOpenShot(item.shotPath);
+                        else if (item.itemType == "asset" && onOpenAsset)
+                            onOpenAsset(item.shotPath);
+                        else if (item.itemType == "posting" && onOpenPosting)
+                            onOpenPosting(item.shotPath);
+                    }
+
+                    ImGui::Separator();
+
+                    // Reveal in Explorer
+                    if (ImGui::MenuItem("Reveal in Explorer"))
+                    {
+                        std::wstring command = L"/select,\"" + item.shotPath + L"\"";
+                        ShellExecuteW(nullptr, L"open", L"explorer.exe", command.c_str(), nullptr, SW_SHOW);
+                    }
+
+                    // Open in New Window
+                    if (onOpenInNewWindow)
+                    {
+                        if (ImGui::MenuItem("Open in New Window"))
+                        {
+                            onOpenInNewWindow(item.shotPath);
+                        }
+                    }
+
+                    // Open in Browser 1 and Browser 2
+                    if (onOpenInBrowser1)
+                    {
+                        if (ImGui::MenuItem("Open in the Left Browser"))
+                        {
+                            onOpenInBrowser1(item.shotPath);
+                        }
+                    }
+
+                    if (onOpenInBrowser2)
+                    {
+                        if (ImGui::MenuItem("Open in the Right Browser"))
+                        {
+                            onOpenInBrowser2(item.shotPath);
+                        }
+                    }
+
+                    ImGui::Separator();
+                }
+
+                if (ImGui::MenuItem("Un-track"))
+                {
+                    item.isTracked = false;
+                    if (m_subscriptionManager)
+                    {
+                        m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                    }
+                    RefreshTrackedItems();
+                }
+
+                if (item.itemType == "manual_task")
+                {
+                    if (ImGui::MenuItem("Delete Task"))
+                    {
+                        if (m_subscriptionManager)
+                        {
+                            m_subscriptionManager->DeleteShotMetadata(item.shotPath);
+                        }
+                        RefreshTrackedItems();
+                    }
+                }
+
+                ImGui::EndPopup();
+            }
+
+            // Push mono font for all metadata columns
+            if (font_mono)
+                ImGui::PushFont(font_mono);
+
+            // Column 2: Status
+            ImGui::TableSetColumnIndex(2);
+
+            std::vector<UFB::StatusOption> statusOptions;
+            if (m_projectConfig && m_projectConfig->IsLoaded() && !item.folderType.empty())
+            {
+                statusOptions = m_projectConfig->GetStatusOptions(item.folderType);
+            }
+
+            std::string displayStatus = item.status.empty() ? "Not Set" : item.status;
+            ImVec4 statusColor = item.status.empty() ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : GetStatusColor(item.status, item.folderType);
+            ImGui::PushStyleColor(ImGuiCol_Text, statusColor);
+
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::BeginCombo(("##status" + std::to_string(i)).c_str(), displayStatus.c_str()))
+            {
+                if (statusOptions.empty())
+                {
+                    ImGui::TextDisabled("(No options configured)");
+                }
+                else
+                {
+                    for (const auto& statusOpt : statusOptions)
+                    {
+                        bool isSelected = (item.status == statusOpt.name);
+                        ImVec4 optionColor = GetStatusColor(statusOpt.name, item.folderType);
+                        ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
+
+                        if (ImGui::Selectable(statusOpt.name.c_str(), isSelected))
+                        {
+                            item.status = statusOpt.name;
+                            if (m_subscriptionManager)
+                            {
+                                m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                            }
+                        }
+
+                        ImGui::PopStyleColor();
+
+                        if (isSelected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor();
+
+            // Column 3: Category
+            ImGui::TableSetColumnIndex(3);
+
+            std::vector<UFB::CategoryOption> categoryOptions;
+            if (m_projectConfig && m_projectConfig->IsLoaded() && !item.folderType.empty())
+            {
+                categoryOptions = m_projectConfig->GetCategoryOptions(item.folderType);
+            }
+
+            std::string displayCategory = item.category.empty() ? "Not Set" : item.category;
+            ImVec4 categoryColor = item.category.empty() ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : GetCategoryColor(item.category, item.folderType);
+            ImGui::PushStyleColor(ImGuiCol_Text, categoryColor);
+
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::BeginCombo(("##category" + std::to_string(i)).c_str(), displayCategory.c_str()))
+            {
+                if (categoryOptions.empty())
+                {
+                    ImGui::TextDisabled("(No options configured)");
+                }
+                else
+                {
+                    for (const auto& catOpt : categoryOptions)
+                    {
+                        bool isSelected = (item.category == catOpt.name);
+                        ImVec4 optionColor = GetCategoryColor(catOpt.name, item.folderType);
+                        ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
+
+                        if (ImGui::Selectable(catOpt.name.c_str(), isSelected))
+                        {
+                            item.category = catOpt.name;
+                            if (m_subscriptionManager)
+                            {
+                                m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                            }
+                        }
+
+                        ImGui::PopStyleColor();
+
+                        if (isSelected)
+                            ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor();
+
+            // Column 4: Priority
+            ImGui::TableSetColumnIndex(4);
+
+            const char* priorityLabels[] = { "High", "Medium", "Low" };
+            const int priorityValues[] = { 1, 2, 3 };
+
+            ImVec4 priorityColor = GetPriorityColor(item.priority);
+            ImGui::PushStyleColor(ImGuiCol_Text, priorityColor);
+
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::BeginCombo(("##priority" + std::to_string(i)).c_str(), GetPriorityLabel(item.priority)))
+            {
+                for (int p = 0; p < 3; p++)
+                {
+                    bool isSelected = (item.priority == priorityValues[p]);
+                    ImVec4 optionColor = GetPriorityColor(priorityValues[p]);
+                    ImGui::PushStyleColor(ImGuiCol_Text, optionColor);
+
+                    if (ImGui::Selectable(priorityLabels[p], isSelected))
+                    {
+                        item.priority = priorityValues[p];
+                        if (m_subscriptionManager)
+                        {
+                            m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                        }
+                    }
+
+                    ImGui::PopStyleColor();
+
+                    if (isSelected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleColor();
+
+            // Column 5: Artist
+            ImGui::TableSetColumnIndex(5);
+
+            std::string displayArtist = item.artist.empty() ? "Not Set" : item.artist;
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::BeginCombo(("##artist" + std::to_string(i)).c_str(), displayArtist.c_str()))
+            {
+                if (ImGui::Selectable("-", item.artist.empty()))
+                {
+                    item.artist = "";
+                    if (m_subscriptionManager)
+                    {
+                        m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                    }
+                }
+
+                for (const auto& user : users)
+                {
+                    bool isSelected = (item.artist == user.displayName);
+                    if (ImGui::Selectable(user.displayName.c_str(), isSelected))
+                    {
+                        item.artist = user.displayName;
+                        if (m_subscriptionManager)
+                        {
+                            m_subscriptionManager->CreateOrUpdateShotMetadata(item);
+                        }
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            // Column 6: Due Date (clickable button like shot_view)
+            ImGui::TableSetColumnIndex(6);
+
+            std::string dueDateStr = (item.dueDate > 0) ? FormatDate(item.dueDate) : "Not Set";
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::Button((dueDateStr + "##duedate" + std::to_string(i)).c_str(), ImVec2(-FLT_MIN, 0)))
+            {
+                m_showAllItemsDatePicker = true;
+                m_allItemsDatePickerIndex = i;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Click to select date");
+
+            // Column 7: Modified Date (read-only, disabled text color)
+            ImGui::TableSetColumnIndex(7);
+
+            std::string modifiedDateStr = (item.modifiedTime > 0) ? FormatDate(item.modifiedTime) : "-";
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextUnformatted(modifiedDateStr.c_str());
+            ImGui::PopStyleColor();
+
+            // Column 8: Links (clickable, similar to notes)
+            ImGui::TableSetColumnIndex(8);
+
+            // Pop mono font before Links/Notes columns
+            if (font_mono)
+                ImGui::PopFont();
+
+            // Check if link exists (links field is a string, not empty means we have a link)
+            bool hasLink = !item.links.empty();
+
+            if (hasLink)
+            {
+                // 50/50 split for Edit and Link buttons (120px column / 2 = ~55px each with spacing)
+                float buttonWidth = 55.0f;
+
+                // Show "Edit" button (left side)
+                if (ImGui::Button(("Edit##linkedit" + std::to_string(i)).c_str(), ImVec2(buttonWidth, 0)))
+                {
+                    m_showLinkEditor = true;
+                    m_linkEditorItemIndex = i;
+                    m_linkEditorItemList = &m_allItems;
+                    strncpy_s(m_linkEditorBuffer, item.links.c_str(), sizeof(m_linkEditorBuffer) - 1);
+                    m_linkEditorBuffer[sizeof(m_linkEditorBuffer) - 1] = '\0';
+                }
+
+                ImGui::SameLine();
+
+                // Show "Link" button in accent color (right side)
+                ImVec4 accentColor = GetWindowsAccentColor();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));  // Transparent background
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.2f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_Text, accentColor);
+
+                if (ImGui::Button(("Link##linkopen" + std::to_string(i)).c_str(), ImVec2(buttonWidth, 0)))
+                {
+                    // Open link in default browser
+                    std::wstring wideLink(item.links.begin(), item.links.end());
+                    ShellExecuteW(nullptr, L"open", wideLink.c_str(), nullptr, nullptr, SW_SHOW);
+                }
+
+                ImGui::PopStyleColor(4);
+
+                if (ImGui::IsItemHovered())
+                {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Click to open: %s", item.links.c_str());
+                    ImGui::EndTooltip();
+                }
+            }
+            else
+            {
+                // Show "(click to add link)" in disabled color
+                ImVec4 textColor = ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+
+                if (ImGui::Selectable(("(click to add link)##linkadd" + std::to_string(i)).c_str(), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 0)))
+                {
+                    m_showLinkEditor = true;
+                    m_linkEditorItemIndex = i;
+                    m_linkEditorItemList = &m_allItems;
+                    m_linkEditorBuffer[0] = '\0';
+                }
+
+                ImGui::PopStyleColor();
+            }
+
+            // Column 9: Notes (clickable text with tooltip)
+            ImGui::TableSetColumnIndex(9);
+
+            // Create a one-line preview
+            std::string notePreview = item.note.empty() ? "(click to add note)" : item.note;
+
+            // Truncate to first line only
+            size_t newlinePos = notePreview.find('\n');
+            if (newlinePos != std::string::npos)
+            {
+                notePreview = notePreview.substr(0, newlinePos) + "...";
+            }
+
+            // Truncate if too long (max 50 chars for preview)
+            if (notePreview.length() > 50)
+            {
+                notePreview = notePreview.substr(0, 47) + "...";
+            }
+
+            // Make it selectable to detect clicks, fill the full cell height
+            // Adjust height to account for cell padding (8.0f top + 8.0f bottom = 16.0f)
+            std::string selectableId = "##note_preview_" + std::to_string(i);
+            ImVec4 textColor = item.note.empty() ? ImVec4(0.5f, 0.5f, 0.5f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+
+            // Disable frame padding for this Selectable to fill the cell properly
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 0.0f));
+            if (ImGui::Selectable(notePreview.c_str(), false, ImGuiSelectableFlags_AllowOverlap, ImVec2(0, 0)))
+            {
+                // Open note editor modal
+                m_showNoteEditor = true;
+                m_noteEditorItemIndex = i;
+                m_noteEditorItemList = &m_allItems;
+                strncpy_s(m_noteEditorBuffer, item.note.c_str(), sizeof(m_noteEditorBuffer) - 1);
+                m_noteEditorBuffer[sizeof(m_noteEditorBuffer) - 1] = '\0';
+            }
+            ImGui::PopStyleVar();
+
+            ImGui::PopStyleColor();
+
+            // Show full note on hover
+            if (ImGui::IsItemHovered() && !item.note.empty())
+            {
+                ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(400.0f);
+                ImGui::TextUnformatted(item.note.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::EndTooltip();
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+
+    // Pop cell padding style var
+    ImGui::PopStyleVar();
+
+    // Clear rendering flag
+    m_isRendering = false;
 }
