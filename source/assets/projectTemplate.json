@@ -1,9 +1,21 @@
 {
-  "version": "1.0",
+  "version": "1.1",
   "users": [
     {
       "username": "default_user",
-      "displayName": "Default User"
+      "displayName": "Not Assigned"
+    },
+     {
+      "username": "chris_bialkowski",
+      "displayName": "Chris Bialkowski"
+    },
+     {
+      "username": "sean_vickery",
+      "displayName": "Sean Vickery"
+    },
+     {
+      "username": "lauren_hafner_addison",
+      "displayName": "Lauren Hafner Addison"
     }
   ],
   "folderTypes": {
