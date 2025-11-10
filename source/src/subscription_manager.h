@@ -125,6 +125,9 @@ public:
     // Metadata bridging - convert ShotMetadata to change log entry (for initial discovery)
     void BridgeToSyncCache(const ShotMetadata& metadata, const std::wstring& jobPath);
 
+    // Helper function to infer itemType from path
+    static std::string InferItemTypeFromPath(const std::wstring& shotPath);
+
 private:
     sqlite3* m_db = nullptr;
     std::filesystem::path m_dbPath;

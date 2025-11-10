@@ -1436,7 +1436,7 @@ void PostingsView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
         // Open in Browser 1 and Browser 2
         if (onOpenInBrowser1)
         {
-            if (ImGui::MenuItem("Open in Browser 1"))
+            if (ImGui::MenuItem("Open in the Left Browser"))
             {
                 // For files, open the parent directory; for directories, open the directory itself
                 std::filesystem::path targetPath(entry.fullPath);
@@ -1448,7 +1448,7 @@ void PostingsView::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
         if (onOpenInBrowser2)
         {
-            if (ImGui::MenuItem("Open in Browser 2"))
+            if (ImGui::MenuItem("Open in the Right Browser"))
             {
                 // For files, open the parent directory; for directories, open the directory itself
                 std::filesystem::path targetPath(entry.fullPath);

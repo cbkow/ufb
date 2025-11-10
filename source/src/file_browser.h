@@ -230,7 +230,7 @@ private:
     char m_newJobNameBuffer[256] = {};
 
     // Path bar edit state
-    char m_pathBuffer[1024] = {};
+    char m_pathBuffer[1024] = {};              // Path input buffer
 
     // File extension filter (multi-selection)
     std::set<std::wstring> m_filterExtensions;  // Empty = show all, can contain multiple extensions and/or "[folders]"

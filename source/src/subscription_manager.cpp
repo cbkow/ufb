@@ -573,7 +573,8 @@ std::optional<ShotMetadata> SubscriptionManager::GetShotMetadata(const std::wstr
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        metadata.itemType = itemType ? itemType : "shot";
+        // Always infer from path to fix any corrupted data
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -635,7 +636,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetAllShotMetadata(const std::wst
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        metadata.itemType = itemType ? itemType : "shot";
+        // Always infer from path to fix any corrupted data
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -696,7 +698,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetShotMetadataByType(const std::
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        metadata.itemType = itemType ? itemType : "shot";
+        // Always infer from path to fix any corrupted data
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -783,6 +786,43 @@ SyncStatus SubscriptionManager::StringToSyncStatus(const std::string& str)
     return SyncStatus::Pending;
 }
 
+std::string SubscriptionManager::InferItemTypeFromPath(const std::wstring& shotPath)
+{
+    // Check for manual task marker
+    if (shotPath.find(L"/__task_") != std::wstring::npos)
+    {
+        return "manual_task";
+    }
+
+    // Normalize path for comparison (convert to lowercase and use consistent separators)
+    std::wstring lowerPath = shotPath;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::towlower);
+
+    // Check for assets folder (case-insensitive)
+    if (lowerPath.find(L"/assets/") != std::wstring::npos ||
+        lowerPath.find(L"\\assets\\") != std::wstring::npos ||
+        lowerPath.ends_with(L"/assets") ||
+        lowerPath.ends_with(L"\\assets"))
+    {
+        std::wcout << L"[InferItemType] Detected ASSET from path: " << shotPath << std::endl;
+        return "asset";
+    }
+
+    // Check for postings folder (case-insensitive)
+    if (lowerPath.find(L"/postings/") != std::wstring::npos ||
+        lowerPath.find(L"\\postings\\") != std::wstring::npos ||
+        lowerPath.ends_with(L"/postings") ||
+        lowerPath.ends_with(L"\\postings"))
+    {
+        std::wcout << L"[InferItemType] Detected POSTING from path: " << shotPath << std::endl;
+        return "posting";
+    }
+
+    // Default to shot (includes ae/, 3d/, comp/, etc.)
+    std::wcout << L"[InferItemType] Detected SHOT from path: " << shotPath << std::endl;
+    return "shot";
+}
+
 std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstring& jobPath, const std::string& itemType)
 {
     std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
@@ -811,7 +851,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstrin
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemTypeStr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        metadata.itemType = itemTypeStr ? itemTypeStr : "shot";
+        // Always infer from path to fix any corrupted data
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -871,7 +912,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetAllTrackedItems(const std::wst
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        metadata.itemType = itemType ? itemType : "shot";
+        // Always infer from path to fix any corrupted data
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -1136,13 +1178,14 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
         metadata.note = metaJson.value("note", "");
         metadata.links = metaJson.value("links", "");
         metadata.isTracked = metaJson.value("isTracked", false);
-        metadata.itemType = metaJson.value("itemType", "shot");
+        // Always infer itemType from path (ignore stored value to fix corrupted data)
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
     }
     catch (const std::exception& e)
     {
         std::cerr << "[SubscriptionManager] Failed to parse metadata JSON: " << e.what() << std::endl;
-        // Continue with default values
-        metadata.itemType = "shot";
+        // Continue with default values - infer itemType from path
+        metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
         metadata.priority = 2;
         metadata.isTracked = false;
     }

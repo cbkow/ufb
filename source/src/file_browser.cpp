@@ -1302,29 +1302,63 @@ void FileBrowser::ShowImGuiContextMenu(HWND hwnd, const FileEntry& entry)
 
 void FileBrowser::DrawNavigationBar()
 {
-   
-    // Editable path bar - sync buffer with current directory when not editing
-    if (!ImGui::IsItemActive() || m_pathBuffer[0] == '\0')
+    // Sync buffer with current directory when input is not active
+    if (!ImGui::IsItemActive())
     {
         WideCharToMultiByte(CP_UTF8, 0, m_currentDirectory.c_str(), -1, m_pathBuffer, sizeof(m_pathBuffer), nullptr, nullptr);
     }
 
-    // Draw read-only path text with mono font
+    // Use mono font for path
     if (font_mono)
         ImGui::PushFont(font_mono);
 
     ImGui::SetNextItemWidth(-1.0f);  // Full width
-    ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_ReadOnly);
 
-    if (font_mono)
-        ImGui::PopFont();
+    // Simple editable text input with Enter to navigate
+    if (ImGui::InputText("##path", m_pathBuffer, sizeof(m_pathBuffer), ImGuiInputTextFlags_EnterReturnsTrue))
+    {
+        // Enter was pressed - try to navigate to the new path
+        int wideLen = MultiByteToWideChar(CP_UTF8, 0, m_pathBuffer, -1, nullptr, 0);
+        if (wideLen > 0)
+        {
+            std::vector<wchar_t> widePath(wideLen);
+            MultiByteToWideChar(CP_UTF8, 0, m_pathBuffer, -1, widePath.data(), wideLen);
+            std::wstring newPath(widePath.data());
 
-    // Right-click context menu for path text area
+            // Try to navigate to the new path
+            try
+            {
+                if (std::filesystem::exists(newPath))
+                {
+                    if (std::filesystem::is_directory(newPath))
+                    {
+                        SetCurrentDirectory(newPath);
+                    }
+                    else
+                    {
+                        // If it's a file, navigate to its parent directory
+                        std::filesystem::path filePath(newPath);
+                        SetCurrentDirectory(filePath.parent_path().wstring());
+                    }
+                }
+            }
+            catch (const std::exception&)
+            {
+                // Invalid path - will revert to current directory on next frame
+            }
+        }
+    }
+
+    // Right-click context menu
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
     {
         ImGui::OpenPopup("PathContextMenu");
     }
 
+    if (font_mono)
+        ImGui::PopFont();
+
+    // Context menu
     if (ImGui::BeginPopup("PathContextMenu"))
     {
         if (ImGui::MenuItem("Copy Path"))

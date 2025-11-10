@@ -105,6 +105,9 @@ struct BrowserWindowData {
 };
 std::vector<BrowserWindowData> saved_browser_windows;
 
+// Aggregated tracker view persistence
+bool saved_aggregated_tracker_open = false;
+
 // ============================================================================
 // SINGLE INSTANCE AND COMMAND-LINE PATH HANDLING
 // ============================================================================
@@ -680,6 +683,7 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
                   const std::vector<std::unique_ptr<AssetsView>>& assetsViews,
                   const std::vector<std::unique_ptr<PostingsView>>& postingsViews,
                   const std::vector<std::unique_ptr<ProjectTrackerView>>& trackerViews,
+                  const std::unique_ptr<AggregatedTrackerView>& aggregatedTrackerView,
                   const std::vector<std::unique_ptr<FileBrowser>>& standaloneBrowsers) {
     try {
         json j;
@@ -757,6 +761,9 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
                 j["tracker_views"].push_back(trackerViewData);
             }
         }
+
+        // Save aggregated tracker view state
+        j["aggregated_tracker_open"] = (aggregatedTrackerView && aggregatedTrackerView->IsOpen());
 
         // Save open standalone browser windows
         j["standalone_browsers"] = json::array();
@@ -905,6 +912,12 @@ void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser
                 }
             }
             std::cout << "Loaded " << saved_tracker_views.size() << " tracker view(s) to restore" << std::endl;
+        }
+
+        // Load aggregated tracker view state
+        saved_aggregated_tracker_open = j.value("aggregated_tracker_open", false);
+        if (saved_aggregated_tracker_open) {
+            std::cout << "Will restore All Projects Tracker" << std::endl;
         }
 
         // Load standalone browser windows
@@ -1442,7 +1455,7 @@ int main(int argc, char** argv)
     };
 
     // Wire up settings dialog callback
-    settingsDialog.onSettingsSaved = [&window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &standaloneBrowsers, &settingsDialog]() {
+    settingsDialog.onSettingsSaved = [&window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &aggregatedTrackerView, &standaloneBrowsers, &settingsDialog]() {
         // Update global settings from dialog
         g_fontScale = settingsDialog.GetFontScale();
         // g_frameioApiKey = settingsDialog.GetFrameioApiKey();  // Frame.io integration removed
@@ -1455,7 +1468,7 @@ int main(int argc, char** argv)
 
         // Save settings immediately
         SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(),
-                    shotViews, assetsViews, postingsViews, trackerViews, standaloneBrowsers);
+                    shotViews, assetsViews, postingsViews, trackerViews, aggregatedTrackerView, standaloneBrowsers);
 
         std::cout << "[Settings] Settings saved to settings.json successfully" << std::endl;
         std::cout << "[Settings] Font scale applied immediately (no restart needed)" << std::endl;
@@ -1958,6 +1971,140 @@ int main(int argc, char** argv)
         }
     }
 
+    // Restore aggregated tracker view
+    if (saved_aggregated_tracker_open) {
+        std::cout << "[Main] Restoring All Projects Tracker..." << std::endl;
+        aggregatedTrackerView = std::make_unique<AggregatedTrackerView>();
+        aggregatedTrackerView->Initialize(&subscriptionManager, &metadataManager);
+
+        // Set up callbacks for opening items (same as individual tracker views)
+        aggregatedTrackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
+            std::filesystem::path path(shotPath);
+            std::wstring categoryPath = path.parent_path().wstring();
+            std::wstring categoryName = path.parent_path().filename().wstring();
+            openShotViewCallback(categoryPath, categoryName);
+            for (const auto& sv : shotViews) {
+                if (sv && sv->GetCategoryPath() == categoryPath) {
+                    sv->SetSelectedShot(shotPath);
+                    std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        aggregatedTrackerView->onOpenAsset = [&openAssetsViewCallback, &assetsViews](const std::wstring& assetPath) {
+            std::filesystem::path path(assetPath);
+            std::wstring assetsFolderPath = path.parent_path().wstring();
+            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+            openAssetsViewCallback(assetsFolderPath, jobName);
+            for (const auto& av : assetsViews) {
+                if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                    av->SetSelectedAsset(assetPath);
+                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Assets";
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        aggregatedTrackerView->onOpenPosting = [&openPostingsViewCallback, &postingsViews](const std::wstring& postingPath) {
+            std::filesystem::path path(postingPath);
+            std::wstring postingsFolderPath = path.parent_path().wstring();
+            std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+            openPostingsViewCallback(postingsFolderPath, jobName);
+            for (const auto& pv : postingsViews) {
+                if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                    pv->SetSelectedPosting(postingPath);
+                    std::string windowTitle = UFB::WideToUtf8(jobName) + " - Postings";
+                    ImGui::SetWindowFocus(windowTitle.c_str());
+                    break;
+                }
+            }
+        };
+
+        // Browser/window callbacks
+        aggregatedTrackerView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) { fileBrowser1.SetCurrentDirectory(path); };
+        aggregatedTrackerView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) { fileBrowser2.SetCurrentDirectory(path); };
+        aggregatedTrackerView->onOpenInNewWindow = openInNewWindowCallback;
+
+        // Callback to open individual project tracker
+        aggregatedTrackerView->onOpenProjectTracker = [&trackerViews, &subscriptionManager, &metadataManager, &openShotViewCallback, &openAssetsViewCallback, &openPostingsViewCallback, &shotViews, &assetsViews, &postingsViews, &fileBrowser1, &fileBrowser2, &openInNewWindowCallback](const std::wstring& jobPath, const std::wstring& jobName) {
+            // Check if this tracker view is already open
+            for (const auto& tv : trackerViews) {
+                if (tv && tv->GetJobPath() == jobPath) {
+                    return;
+                }
+            }
+            // Open the individual project tracker
+            auto trackerView = std::make_unique<ProjectTrackerView>();
+            trackerView->Initialize(jobPath, jobName, &subscriptionManager, &metadataManager, nullptr);
+            trackerView->onClose = [&trackerViews, jobPath]() {
+                trackerViews.erase(
+                    std::remove_if(trackerViews.begin(), trackerViews.end(),
+                        [&jobPath](const std::unique_ptr<ProjectTrackerView>& tv) {
+                            return tv && tv->GetJobPath() == jobPath;
+                        }),
+                    trackerViews.end()
+                );
+            };
+
+            // Set up callbacks (same as View menu)
+            trackerView->onOpenShot = [&openShotViewCallback, &shotViews](const std::wstring& shotPath) {
+                std::filesystem::path path(shotPath);
+                std::wstring categoryPath = path.parent_path().wstring();
+                std::wstring categoryName = path.parent_path().filename().wstring();
+                openShotViewCallback(categoryPath, categoryName);
+                for (const auto& sv : shotViews) {
+                    if (sv && sv->GetCategoryPath() == categoryPath) {
+                        sv->SetSelectedShot(shotPath);
+                        std::string windowTitle = UFB::WideToUtf8(sv->GetJobName()) + " - " + UFB::WideToUtf8(categoryName);
+                        ImGui::SetWindowFocus(windowTitle.c_str());
+                        break;
+                    }
+                }
+            };
+
+            trackerView->onOpenAsset = [&openAssetsViewCallback, &assetsViews](const std::wstring& assetPath) {
+                std::filesystem::path path(assetPath);
+                std::wstring assetsFolderPath = path.parent_path().wstring();
+                std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                openAssetsViewCallback(assetsFolderPath, jobName);
+                for (const auto& av : assetsViews) {
+                    if (av && av->GetAssetsFolderPath() == assetsFolderPath) {
+                        av->SetSelectedAsset(assetPath);
+                        std::string windowTitle = UFB::WideToUtf8(jobName) + " - Assets";
+                        ImGui::SetWindowFocus(windowTitle.c_str());
+                        break;
+                    }
+                }
+            };
+
+            trackerView->onOpenPosting = [&openPostingsViewCallback, &postingsViews](const std::wstring& postingPath) {
+                std::filesystem::path path(postingPath);
+                std::wstring postingsFolderPath = path.parent_path().wstring();
+                std::wstring jobName = path.parent_path().parent_path().filename().wstring();
+                openPostingsViewCallback(postingsFolderPath, jobName);
+                for (const auto& pv : postingsViews) {
+                    if (pv && pv->GetPostingsFolderPath() == postingsFolderPath) {
+                        pv->SetSelectedPosting(postingPath);
+                        std::string windowTitle = UFB::WideToUtf8(jobName) + " - Postings";
+                        ImGui::SetWindowFocus(windowTitle.c_str());
+                        break;
+                    }
+                }
+            };
+
+            trackerView->onOpenInBrowser1 = [&fileBrowser1](const std::wstring& path) { fileBrowser1.SetCurrentDirectory(path); };
+            trackerView->onOpenInBrowser2 = [&fileBrowser2](const std::wstring& path) { fileBrowser2.SetCurrentDirectory(path); };
+            trackerView->onOpenInNewWindow = openInNewWindowCallback;
+
+            trackerViews.push_back(std::move(trackerView));
+        };
+
+        std::cout << "[Main] Restored All Projects Tracker" << std::endl;
+    }
+
     // Restore saved standalone browser windows
     std::cout << "[Main] Restoring " << saved_browser_windows.size() << " saved standalone browser(s)..." << std::endl;
     for (const auto& savedBrowser : saved_browser_windows) {
@@ -2182,7 +2329,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.6", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.7", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -2515,7 +2662,7 @@ int main(int argc, char** argv)
 
     // Save settings before cleanup
     // Save settings including transcode queue panel state and open views
-    SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(), shotViews, assetsViews, postingsViews, trackerViews, standaloneBrowsers);
+    SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(), shotViews, assetsViews, postingsViews, trackerViews, aggregatedTrackerView, standaloneBrowsers);
 
     // Cleanup
     try
