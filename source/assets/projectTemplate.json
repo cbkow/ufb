@@ -1,9 +1,9 @@
 {
   "version": "1.1",
-  "users": [
+   "users": [
     {
-      "username": "default_user",
-      "displayName": "Not Assigned"
+      "username": "everyone",
+      "displayName": "Everyone"
     },
      {
       "username": "chris_bialkowski",
