@@ -88,8 +88,8 @@ void ThumbnailManager::RegisterExtractor(std::unique_ptr<ThumbnailExtractorInter
                   return a->GetPriority() > b->GetPriority();
               });
 
-    std::cout << "ThumbnailManager: Registered " << m_extractors.back()->GetName()
-              << " (priority: " << m_extractors.back()->GetPriority() << ")" << std::endl;
+   /* std::cout << "ThumbnailManager: Registered " << m_extractors.back()->GetName()
+              << " (priority: " << m_extractors.back()->GetPriority() << ")" << std::endl;*/
 }
 
 bool ThumbnailManager::RequestThumbnail(const std::wstring& path, int size, bool highPriority)

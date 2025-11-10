@@ -1020,45 +1020,78 @@ void P2PManager::OnHelloReceived(SOCKET socket, const json& payload)
             char ipStr[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &peerAddr.sin_addr, ipStr, INET_ADDRSTRLEN);
 
-            // Update peer registry
-            std::lock_guard<std::mutex> lock(m_peersMutex);
-
-            // Check if we already have this peer's info from peers.json
-            auto existingPeer = m_peers.find(deviceId);
-            PeerInfo peer;
-
-            if (existingPeer != m_peers.end())
+            // Determine if this is a new connection (peer was not previously active)
+            bool wasInactive = false;
             {
-                // Keep existing IPs but ensure the connected IP is first
-                peer = existingPeer->second;
+                std::lock_guard<std::mutex> lock(m_peersMutex);
 
-                // Remove the connected IP if it's already in the list
-                auto it = std::find(peer.ipAddresses.begin(), peer.ipAddresses.end(), ipStr);
-                if (it != peer.ipAddresses.end())
+                // Check if we already have this peer's info from peers.json
+                auto existingPeer = m_peers.find(deviceId);
+                PeerInfo peer;
+
+                if (existingPeer != m_peers.end())
                 {
-                    peer.ipAddresses.erase(it);
+                    // Keep existing IPs but ensure the connected IP is first
+                    peer = existingPeer->second;
+                    wasInactive = !peer.isActive;  // Track if peer was previously inactive
+
+                    // Remove the connected IP if it's already in the list
+                    auto it = std::find(peer.ipAddresses.begin(), peer.ipAddresses.end(), ipStr);
+                    if (it != peer.ipAddresses.end())
+                    {
+                        peer.ipAddresses.erase(it);
+                    }
+
+                    // Add connected IP at the front (highest priority)
+                    peer.ipAddresses.insert(peer.ipAddresses.begin(), ipStr);
+                }
+                else
+                {
+                    // New peer - create entry with connected IP
+                    peer.deviceId = deviceId;
+                    peer.deviceName = deviceName;
+                    peer.ipAddresses.push_back(ipStr);
+                    wasInactive = true;  // Brand new peer
                 }
 
-                // Add connected IP at the front (highest priority)
-                peer.ipAddresses.insert(peer.ipAddresses.begin(), ipStr);
+                peer.port = port;
+                peer.lastSeen = GetCurrentTimestamp();
+                peer.isActive = true;
+
+                m_peers[deviceId] = peer;
+                m_socketToPeer[socket] = deviceId;
+                m_peerToSocket[deviceId] = socket;
+
+                std::wcout << L"[P2P] Registered peer: " << deviceName << L" at " << std::wstring(ipStr, ipStr + strlen(ipStr)).c_str() << L":" << port << std::endl;
             }
-            else
+
+            // Trigger peer connected callback if this is a new/reconnected peer
+            // Call outside of mutex to avoid deadlock
+            if (wasInactive)
             {
-                // New peer - create entry with connected IP
-                peer.deviceId = deviceId;
-                peer.deviceName = deviceName;
-                peer.ipAddresses.push_back(ipStr);
+                std::function<void(const std::wstring&, const std::wstring&)> callback;
+                {
+                    std::lock_guard<std::mutex> lock(m_callbackMutex);
+                    callback = m_peerConnectedCallback;
+                }
+
+                if (callback)
+                {
+                    try
+                    {
+                        std::wcout << L"[P2P] Triggering peer connected callback for: " << deviceName << std::endl;
+                        callback(deviceId, deviceName);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "[P2P] Exception in peer connected callback: " << e.what() << std::endl;
+                    }
+                    catch (...)
+                    {
+                        std::cerr << "[P2P] Unknown exception in peer connected callback" << std::endl;
+                    }
+                }
             }
-
-            peer.port = port;
-            peer.lastSeen = GetCurrentTimestamp();
-            peer.isActive = true;
-
-            m_peers[deviceId] = peer;
-            m_socketToPeer[socket] = deviceId;
-            m_peerToSocket[deviceId] = socket;
-
-            std::wcout << L"[P2P] Registered peer: " << deviceName << L" at " << std::wstring(ipStr, ipStr + strlen(ipStr)).c_str() << L":" << port << std::endl;
         }
 
         // Don't send HELLO back - we already sent it when accepting or connecting
@@ -1188,10 +1221,19 @@ void P2PManager::RegisterChangeCallback(std::function<void(const std::wstring&, 
     m_changeCallback = callback;
 }
 
+// Register peer connected callback
+void P2PManager::RegisterPeerConnectedCallback(std::function<void(const std::wstring&, const std::wstring&)> callback)
+{
+    std::lock_guard<std::mutex> lock(m_callbackMutex);
+    m_peerConnectedCallback = callback;
+}
+
 // Heartbeat thread
 void P2PManager::HeartbeatThread()
 {
     std::cout << "[P2P] Heartbeat thread started" << std::endl;
+
+    int heartbeatCounter = 0;
 
     while (m_isRunning)
     {
@@ -1212,6 +1254,15 @@ void P2PManager::HeartbeatThread()
 
         // Update our entry in peers.json
         WritePeerRegistry();
+
+        // Cleanup stale peer files every 10 minutes (20 heartbeat cycles)
+        // This prevents accumulation of old peer files on disk
+        heartbeatCounter++;
+        if (heartbeatCounter >= 20)
+        {
+            CleanupStalePeerFiles();
+            heartbeatCounter = 0;
+        }
 
         // Sleep for 30 seconds
         for (int i = 0; i < 30 && m_isRunning; i++)
@@ -1235,24 +1286,37 @@ void P2PManager::LoadPeersFromFile()
         return;
     }
 
-    try
+    int loadedCount = 0;
+    int skippedCount = 0;
+    int unchangedCount = 0;
+    int networkErrorCount = 0;
+
+    // Aggregate peers from all subscribed projects
+    for (const auto& projectPath : projects)
     {
-        std::lock_guard<std::mutex> lock(m_peersMutex);
-        int loadedCount = 0;
-        int skippedCount = 0;
+        std::filesystem::path peersDir = std::filesystem::path(projectPath) / L".ufb" / L"peers";
 
-        // Aggregate peers from all subscribed projects
-        for (const auto& projectPath : projects)
+        // Check if peers directory exists (with network error handling)
+        try
         {
-            std::filesystem::path peersDir = std::filesystem::path(projectPath) / L".ufb" / L"peers";
-
             if (!std::filesystem::exists(peersDir))
             {
                 // Project doesn't have peers directory yet
                 continue;
             }
+        }
+        catch (const std::filesystem::filesystem_error& e)
+        {
+            // Network share might be unavailable
+            std::wcerr << L"[P2P] Cannot access peers directory (network issue?): " << peersDir.wstring()
+                       << L" - " << e.what() << std::endl;
+            networkErrorCount++;
+            continue;  // Use cached peer data
+        }
 
-            // Read all .json files in this project's peers directory
+        // Read all .json files in this project's peers directory
+        try
+        {
             for (const auto& entry : std::filesystem::directory_iterator(peersDir))
             {
                 // Skip temp files
@@ -1261,29 +1325,53 @@ void P2PManager::LoadPeersFromFile()
                     continue;
                 }
 
-                if (entry.is_regular_file() && entry.path().extension() == L".json")
+                if (!entry.is_regular_file() || entry.path().extension() != L".json")
                 {
-                    try
+                    continue;
+                }
+
+                // Check file timestamp - only read if changed
+                try
+                {
+                    auto lastWriteTime = std::filesystem::last_write_time(entry);
+                    std::wstring filePath = entry.path().wstring();
+
+                    // Check timestamp cache
                     {
-                        // Try to open and read the file
-                        std::ifstream file(entry.path(), std::ios::in);
-                        if (!file.is_open())
+                        std::lock_guard<std::mutex> timestampLock(m_fileTimestampMutex);
+                        auto cachedTime = m_peerFileTimestamps.find(filePath);
+
+                        if (cachedTime != m_peerFileTimestamps.end() && cachedTime->second == lastWriteTime)
                         {
-                            // File is locked - skip it and use cached peer data
-                            skippedCount++;
+                            // File hasn't changed - skip reading
+                            unchangedCount++;
                             continue;
                         }
+                    }
 
-                        // Read JSON
-                        json peerJson;
-                        file >> peerJson;
-                        file.close();
+                    // File is new or changed - read it
+                    std::ifstream file(entry.path(), std::ios::in);
+                    if (!file.is_open())
+                    {
+                        // File is locked - skip it and use cached peer data
+                        skippedCount++;
+                        continue;
+                    }
 
-                        PeerInfo peer = PeerInfo::FromJson(peerJson);
+                    // Read JSON
+                    json peerJson;
+                    file >> peerJson;
+                    file.close();
 
-                        // Don't add ourselves to the peer list
-                        if (peer.deviceId != m_deviceId)
+                    PeerInfo peer = PeerInfo::FromJson(peerJson);
+
+                    // Don't add ourselves to the peer list
+                    if (peer.deviceId != m_deviceId)
+                    {
+                        // Update peer info
                         {
+                            std::lock_guard<std::mutex> lock(m_peersMutex);
+
                             // Deduplicate: if peer already exists, keep the one with latest lastSeen
                             auto existingPeer = m_peers.find(peer.deviceId);
                             if (existingPeer == m_peers.end() || peer.lastSeen > existingPeer->second.lastSeen)
@@ -1292,29 +1380,48 @@ void P2PManager::LoadPeersFromFile()
                                 loadedCount++;
                             }
                         }
+
+                        // Update timestamp cache
+                        {
+                            std::lock_guard<std::mutex> timestampLock(m_fileTimestampMutex);
+                            m_peerFileTimestamps[filePath] = lastWriteTime;
+                        }
                     }
-                    catch (const std::exception&)
-                    {
-                        // File is locked or corrupt - skip it
-                        skippedCount++;
-                    }
+                }
+                catch (const std::filesystem::filesystem_error& e)
+                {
+                    // File access error (might be locked or network issue)
+                    skippedCount++;
+                }
+                catch (const std::exception& e)
+                {
+                    // JSON parse error or other issue - skip this file
+                    std::cerr << "[P2P] Failed to parse peer file " << entry.path() << ": " << e.what() << std::endl;
+                    skippedCount++;
                 }
             }
         }
-
-        if (loadedCount > 0 || skippedCount > 0)
+        catch (const std::filesystem::filesystem_error& e)
         {
-            std::cout << "[P2P] Loaded " << loadedCount << " peers from " << projects.size() << " project(s)";
-            if (skippedCount > 0)
-            {
-                std::cout << " (skipped " << skippedCount << " locked files)";
-            }
-            std::cout << std::endl;
+            // Directory iteration failed (network issue?)
+            std::wcerr << L"[P2P] Cannot iterate peers directory (network issue?): " << peersDir.wstring()
+                       << L" - " << e.what() << std::endl;
+            networkErrorCount++;
+            continue;  // Use cached peer data
         }
     }
-    catch (const std::exception& e)
+
+    // Log results
+    if (loadedCount > 0 || skippedCount > 0 || unchangedCount > 0)
     {
-        std::cerr << "[P2P] Failed to load peers: " << e.what() << std::endl;
+        std::cout << "[P2P] Peer file scan: loaded=" << loadedCount
+                  << " unchanged=" << unchangedCount
+                  << " skipped=" << skippedCount;
+        if (networkErrorCount > 0)
+        {
+            std::cout << " network_errors=" << networkErrorCount << " (using cached peers)";
+        }
+        std::cout << std::endl;
     }
 }
 
@@ -1383,12 +1490,7 @@ void P2PManager::SavePeersToFile()
         ourInfo.isActive = true;
 
         // Use per-device file to avoid write contention between peers
-        std::wstring deviceIdSafe = m_deviceId;
-        // Replace invalid filename characters
-        std::replace(deviceIdSafe.begin(), deviceIdSafe.end(), L'{', L'_');
-        std::replace(deviceIdSafe.begin(), deviceIdSafe.end(), L'}', L'_');
-        std::replace(deviceIdSafe.begin(), deviceIdSafe.end(), L'-', L'_');
-
+        // Note: Device IDs (GUIDs) are already filename-safe on Windows
         int successCount = 0;
         int failCount = 0;
 
@@ -1398,37 +1500,65 @@ void P2PManager::SavePeersToFile()
             std::filesystem::path ufbDir = std::filesystem::path(projectPath) / L".ufb" / L"peers";
 
             // Ensure peers directory exists
-            if (!std::filesystem::exists(ufbDir))
-            {
-                std::filesystem::create_directories(ufbDir);
-            }
-
-            std::filesystem::path ourPeerFile = ufbDir / (deviceIdSafe + L".json");
-            std::filesystem::path tempFile = ufbDir / (deviceIdSafe + L".json.tmp");
-
-            // Atomic write: write to temp file, then rename
-            {
-                std::ofstream file(tempFile);
-                if (!file.is_open())
-                {
-                    std::wcerr << L"[P2P] Failed to open temp file for writing: " << tempFile.wstring() << std::endl;
-                    failCount++;
-                    continue;
-                }
-                file << ourInfo.ToJson().dump(2);
-                file.close();
-            }
-
-            // Atomic rename (overwrites existing file)
             try
             {
+                if (!std::filesystem::exists(ufbDir))
+                {
+                    std::filesystem::create_directories(ufbDir);
+                }
+            }
+            catch (const std::filesystem::filesystem_error& e)
+            {
+                std::cerr << "[P2P] Failed to create peers directory (network issue?): " << e.what() << std::endl;
+                failCount++;
+                continue;  // Skip this project
+            }
+
+            std::filesystem::path ourPeerFile = ufbDir / (m_deviceId + L".json");
+            std::filesystem::path tempFile = ufbDir / (m_deviceId + L".json.tmp");
+
+            // Atomic write: write to temp file, then rename
+            try
+            {
+                {
+                    std::ofstream file(tempFile);
+                    if (!file.is_open())
+                    {
+                        std::wcerr << L"[P2P] Failed to open temp file for writing (network issue?): " << tempFile.wstring() << std::endl;
+                        failCount++;
+                        continue;
+                    }
+                    file << ourInfo.ToJson().dump(2);
+                    file.close();
+
+                    // Verify file was written successfully
+                    if (file.fail())
+                    {
+                        std::wcerr << L"[P2P] Failed to write temp file (network issue?): " << tempFile.wstring() << std::endl;
+                        failCount++;
+                        continue;
+                    }
+                }
+
+                // Atomic rename (overwrites existing file)
                 std::filesystem::rename(tempFile, ourPeerFile);
                 successCount++;
             }
+            catch (const std::filesystem::filesystem_error& e)
+            {
+                std::cerr << "[P2P] Filesystem error writing peer file (network issue?): " << e.what() << std::endl;
+                failCount++;
+
+                // Try to clean up temp file
+                try { std::filesystem::remove(tempFile); } catch (...) {}
+            }
             catch (const std::exception& e)
             {
-                std::cerr << "[P2P] Failed to rename temp file: " << e.what() << std::endl;
+                std::cerr << "[P2P] Error writing peer file: " << e.what() << std::endl;
                 failCount++;
+
+                // Try to clean up temp file
+                try { std::filesystem::remove(tempFile); } catch (...) {}
             }
         }
 
@@ -1544,6 +1674,112 @@ void P2PManager::CleanupStalePeers()
     for (const auto& deviceId : stalePeers)
     {
         RemovePeer(deviceId);
+    }
+}
+
+// Cleanup stale peer files from disk
+void P2PManager::CleanupStalePeerFiles()
+{
+    // Get copy of subscribed projects
+    std::vector<std::wstring> projects = GetSubscribedProjects();
+
+    if (projects.empty())
+    {
+        return;
+    }
+
+    uint64_t now = GetCurrentTimestamp();
+    uint64_t staleFileThreshold = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+
+    int deletedCount = 0;
+    int skippedCount = 0;
+
+    for (const auto& projectPath : projects)
+    {
+        std::filesystem::path peersDir = std::filesystem::path(projectPath) / L".ufb" / L"peers";
+
+        // Check if peers directory exists (with network error handling)
+        try
+        {
+            if (!std::filesystem::exists(peersDir))
+            {
+                continue;
+            }
+        }
+        catch (const std::filesystem::filesystem_error&)
+        {
+            // Network share unavailable - skip cleanup for this project
+            continue;
+        }
+
+        // Scan peer files
+        try
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(peersDir))
+            {
+                if (!entry.is_regular_file() || entry.path().extension() != L".json")
+                {
+                    continue;
+                }
+
+                try
+                {
+                    // Read peer file to get lastSeen timestamp
+                    std::ifstream file(entry.path());
+                    if (!file.is_open())
+                    {
+                        // File locked - skip it
+                        skippedCount++;
+                        continue;
+                    }
+
+                    json peerJson;
+                    file >> peerJson;
+                    file.close();
+
+                    uint64_t lastSeen = peerJson.value("lastSeen", 0ULL);
+
+                    // Check if file is stale
+                    if (lastSeen > 0 && (now - lastSeen) > staleFileThreshold)
+                    {
+                        std::wstring deviceId(peerJson.value("deviceId", "").begin(), peerJson.value("deviceId", "").end());
+
+                        // Don't delete our own file
+                        if (deviceId == m_deviceId)
+                        {
+                            continue;
+                        }
+
+                        // Delete stale peer file
+                        std::wcout << L"[P2P] Deleting stale peer file (> 7 days): " << entry.path().filename().wstring() << std::endl;
+                        std::filesystem::remove(entry.path());
+                        deletedCount++;
+
+                        // Remove from timestamp cache
+                        {
+                            std::lock_guard<std::mutex> lock(m_fileTimestampMutex);
+                            m_peerFileTimestamps.erase(entry.path().wstring());
+                        }
+                    }
+                }
+                catch (const std::exception& e)
+                {
+                    // Error reading/parsing file - skip it
+                    std::cerr << "[P2P] Error checking peer file " << entry.path() << ": " << e.what() << std::endl;
+                    skippedCount++;
+                }
+            }
+        }
+        catch (const std::filesystem::filesystem_error& e)
+        {
+            // Directory iteration failed - skip this project
+            std::wcerr << L"[P2P] Cannot iterate peers directory: " << peersDir.wstring() << std::endl;
+        }
+    }
+
+    if (deletedCount > 0)
+    {
+        std::cout << "[P2P] Deleted " << deletedCount << " stale peer file(s) (> 7 days old)" << std::endl;
     }
 }
 

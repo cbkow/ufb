@@ -100,6 +100,8 @@ add_executable(ufb
     src/project_tracker_view.h
     src/aggregated_tracker_view.cpp
     src/aggregated_tracker_view.h
+    src/console_panel.cpp
+    src/console_panel.h
     src/ImGuiDatePicker.cpp
     src/ImGuiDatePicker.hpp
     build/ufb.rc
@@ -152,14 +154,10 @@ target_link_libraries(ufb PRIVATE
 )
 
 # Console window control
-# Default: show console in Debug, hide in Release
+# Default: hide console (using in-app console instead)
 # Override with: cmake -DUFB_SHOW_CONSOLE=ON or OFF
 if(NOT DEFINED UFB_SHOW_CONSOLE)
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(UFB_SHOW_CONSOLE ON)
-    else()
-        set(UFB_SHOW_CONSOLE OFF)
-    endif()
+    set(UFB_SHOW_CONSOLE OFF)  # Use in-app console by default
 endif()
 option(UFB_SHOW_CONSOLE "Show console window for debugging" ${UFB_SHOW_CONSOLE})
 

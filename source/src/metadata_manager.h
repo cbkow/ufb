@@ -92,12 +92,10 @@ public:
     void NotifyObservers(const std::wstring& jobPath);
 
     // Get database handle (for SubscriptionManager bridge)
-    sqlite3* GetDatabase() const { return m_db; }
+    sqlite3* GetDatabase() const;
 
 private:
     SubscriptionManager* m_subManager = nullptr;
-    sqlite3* m_db = nullptr;
-    std::filesystem::path m_dbPath;
     std::mutex m_writeMutex;
 
     // Write queue for batching

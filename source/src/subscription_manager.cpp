@@ -4,6 +4,8 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <chrono>
 #include <windows.h>
 #include <nlohmann/json.hpp>
 
@@ -905,9 +907,7 @@ std::vector<ShotMetadata> SubscriptionManager::GetAllTrackedItems(const std::wst
 bool SubscriptionManager::CreateManualTask(const std::wstring& jobPath, const std::string& taskName, const ShotMetadata& metadata)
 {
     // Create a unique path for the manual task using job path + task name
-    uint64_t timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
+    uint64_t timestamp = GetCurrentTimeMs();
 
     // Convert task name to wide string
     int wideLen = MultiByteToWideChar(CP_UTF8, 0, taskName.c_str(), -1, nullptr, 0);
@@ -1042,10 +1042,17 @@ void SubscriptionManager::BridgeToSyncCache(const ShotMetadata& metadata, const 
         return;
     }
 
-    // Trigger immediate P2P notification with exact timestamp (if callback is registered)
+    // Brief delay to allow cloud sync services (Dropbox, OneDrive) to detect file change
+    // This gives them time to start propagating the file before remote peers try to read it
+    // 500ms is small enough to not impact UX but large enough for file system watchers
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // Trigger P2P notification with shot's modification time (if callback is registered)
+    // IMPORTANT: Send shot.modifiedTime (not entry.timestamp) because that's what
+    // the remote peer will find in the Shot objects after reading change logs
     if (m_localChangeCallback)
     {
-        m_localChangeCallback(jobPath, entry.timestamp);
+        m_localChangeCallback(jobPath, shot.modifiedTime);
     }
 
     // Also update local cache immediately for local UI responsiveness

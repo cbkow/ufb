@@ -113,6 +113,9 @@ public:
     // Get database handle for other managers (BookmarkManager, etc.)
     sqlite3* GetDatabase() const { return m_db; }
 
+    // Get database mutex for coordinated access (MetadataManager needs this)
+    std::recursive_mutex& GetDatabaseMutex() const { return m_dbMutex; }
+
     // Register callback for when local changes are made (for immediate P2P notifications)
     void RegisterLocalChangeCallback(std::function<void(const std::wstring& jobPath, uint64_t timestamp)> callback)
     {

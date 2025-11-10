@@ -15,6 +15,11 @@
 
 namespace UFB {
 
+// Clock skew tolerance for P2P sync (in milliseconds)
+// Must match the tolerance in metadata_manager.cpp
+// Allows for minor differences in system clocks and timestamp rounding
+constexpr uint64_t CLOCK_SKEW_TOLERANCE_MS = 10000;
+
 SyncManager::SyncManager()
 {
 }
@@ -70,6 +75,16 @@ bool SyncManager::Initialize(SubscriptionManager* subManager, MetadataManager* m
     // Register callback for remote P2P change notifications
     m_p2pManager->RegisterChangeCallback([this](const std::wstring& changedJobPath, const std::wstring& peerDeviceId, uint64_t timestamp) {
         OnP2PChangeReceived(changedJobPath, peerDeviceId, timestamp);
+    });
+
+    // Register callback for when a peer connects (trigger initial sync)
+    m_p2pManager->RegisterPeerConnectedCallback([this](const std::wstring& peerDeviceId, const std::wstring& peerDeviceName) {
+        std::wcout << L"[SyncManager] Peer connected: " << peerDeviceName << L" (" << peerDeviceId << L")" << std::endl;
+        std::wcout << L"[SyncManager] Triggering full sync to exchange historical changes..." << std::endl;
+
+        // Trigger immediate sync of all subscribed jobs to exchange historical changes
+        // This ensures that when peers reconnect after being offline, they sync their change logs
+        ForceSyncAll();
     });
 
     // Register callback for immediate P2P notifications when local changes are made
@@ -359,6 +374,7 @@ void SyncManager::SyncJob(const std::wstring& jobPath)
     // Check if we have an expected change for content verification
     std::wstring expectedDeviceId;
     uint64_t minTimestamp = 0;
+    bool hadExpectedChange = false;
     {
         std::lock_guard<std::mutex> lock(m_expectedChangesMutex);
         auto it = m_expectedChanges.find(jobPath);
@@ -366,10 +382,10 @@ void SyncManager::SyncJob(const std::wstring& jobPath)
         {
             expectedDeviceId = it->second.deviceId;
             minTimestamp = it->second.timestamp;
+            hadExpectedChange = true;
             std::wcout << L"[SyncJob] Will verify expected change: deviceId=" << expectedDeviceId
                        << L" timestamp=" << minTimestamp << std::endl;
-            // Clear after retrieval (one-time verification)
-            m_expectedChanges.erase(it);
+            // NOTE: Don't erase yet - wait until sync completes successfully
         }
     }
 
@@ -403,6 +419,37 @@ void SyncManager::SyncJob(const std::wstring& jobPath)
         else
         {
             std::cout << "  No change logs found (new job)" << std::endl;
+        }
+    }
+
+    // Validate that expected change actually arrived (if we were expecting one)
+    if (hadExpectedChange && !expectedDeviceId.empty())
+    {
+        bool foundExpectedChange = false;
+        for (const auto& [path, shot] : sharedShots)
+        {
+            std::wstring shotDeviceId(shot.deviceId.begin(), shot.deviceId.end());
+            if (shotDeviceId == expectedDeviceId && shot.modifiedTime >= minTimestamp)
+            {
+                foundExpectedChange = true;
+                break;
+            }
+        }
+
+        if (!foundExpectedChange)
+        {
+            std::wcerr << L"[SyncJob] WARNING: Expected change from device " << expectedDeviceId
+                       << L" with timestamp >= " << minTimestamp << L" was NOT found in change logs!" << std::endl;
+            std::wcerr << L"[SyncJob] Possible causes: change log file missing, corrupted, or network error" << std::endl;
+            std::wcerr << L"[SyncJob] Keeping expected change for retry on next sync..." << std::endl;
+
+            // Don't clear hadExpectedChange - this will prevent cleanup at the end
+            // so the expected change will be retried on next sync
+            hadExpectedChange = false;
+        }
+        else
+        {
+            std::wcout << L"[SyncJob] ✓ Validated: Found expected change from device " << expectedDeviceId << std::endl;
         }
     }
 
@@ -447,6 +494,14 @@ void SyncManager::SyncJob(const std::wstring& jobPath)
         RunArchival(jobPath);
     }
 
+    // Clear expected change after successful sync (exception-safe cleanup)
+    if (hadExpectedChange)
+    {
+        std::lock_guard<std::mutex> lock(m_expectedChangesMutex);
+        m_expectedChanges.erase(jobPath);
+        std::wcout << L"[SyncJob] Cleared expected change for " << jobPath << L" after successful sync" << std::endl;
+    }
+
     std::cout << "  Sync complete" << std::endl;
 }
 
@@ -475,7 +530,31 @@ SyncDiff SyncManager::ComputeDiff(const std::map<std::wstring, Shot>& cached,
             // Local is newer
             diff.localChanges.push_back(it->second);
         }
-        // If equal modified_time, no change needed
+        else if (it->second.modifiedTime == sharedShot.modifiedTime)
+        {
+            // Timestamps match - tie-breaker already handled in ShouldAcceptRemoteChange
+            // If we got here, it means: local.deviceId > remote.deviceId (lexicographic)
+            // Log this case for visibility (potential silent conflict if content differs)
+            std::string localDeviceId = it->second.deviceId;
+            std::string remoteDeviceId = sharedShot.deviceId;
+
+            if (localDeviceId != remoteDeviceId)
+            {
+                std::wcout << L"[ComputeDiff] Timestamp collision for shot: " << path << std::endl;
+                std::wcout << L"  Both modified at: " << it->second.modifiedTime << std::endl;
+                std::wcout << L"  Local deviceId: " << std::wstring(localDeviceId.begin(), localDeviceId.end()) << std::endl;
+                std::wcout << L"  Remote deviceId: " << std::wstring(remoteDeviceId.begin(), remoteDeviceId.end()) << std::endl;
+                std::wcout << L"  Tie-breaker: Keeping local (deviceId comparison)" << std::endl;
+
+                // Compare metadata to detect actual conflicts
+                if (it->second.metadata != sharedShot.metadata)
+                {
+                    std::wcerr << L"  ⚠️  WARNING: Content differs despite same timestamp!" << std::endl;
+                    std::wcerr << L"  This may indicate a conflict that should be manually reviewed." << std::endl;
+                }
+            }
+            // else: same device, same timestamp - truly no change needed
+        }
     }
 
     // Find local-only shots (need to be written to shared)
@@ -589,7 +668,28 @@ bool SyncManager::ShouldAcceptRemoteChange(const Shot& local, const Shot& remote
 
     // Tie-breaker: lexicographic device ID comparison
     if (remote.modifiedTime == local.modifiedTime)
-        return remote.deviceId > local.deviceId;
+    {
+        bool acceptRemote = remote.deviceId > local.deviceId;
+
+        // Log timestamp collision for visibility
+        if (local.deviceId != remote.deviceId)
+        {
+            std::wcout << L"[ShouldAcceptRemoteChange] Timestamp collision for shot: " << remote.shotPath << std::endl;
+            std::wcout << L"  Both modified at: " << remote.modifiedTime << std::endl;
+            std::wcout << L"  Local deviceId: " << std::wstring(local.deviceId.begin(), local.deviceId.end()) << std::endl;
+            std::wcout << L"  Remote deviceId: " << std::wstring(remote.deviceId.begin(), remote.deviceId.end()) << std::endl;
+            std::wcout << L"  Tie-breaker: " << (acceptRemote ? L"Accept remote" : L"Keep local") << std::endl;
+
+            // Compare metadata to detect actual conflicts
+            if (local.metadata != remote.metadata)
+            {
+                std::wcerr << L"  ⚠️  WARNING: Content differs despite same timestamp!" << std::endl;
+                std::wcerr << L"  This may indicate a conflict that should be manually reviewed." << std::endl;
+            }
+        }
+
+        return acceptRemote;
+    }
 
     return false;
 }

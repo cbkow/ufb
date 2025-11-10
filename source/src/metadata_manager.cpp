@@ -4,8 +4,16 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace UFB {
+
+// Clock skew tolerance for P2P sync (in milliseconds)
+// Allows for minor differences in system clocks between devices
+// Set to 10 seconds to handle typical clock drift
+constexpr uint64_t CLOCK_SKEW_TOLERANCE_MS = 10000;
 
 MetadataManager::MetadataManager()
 {
@@ -21,26 +29,18 @@ bool MetadataManager::Initialize(SubscriptionManager* subManager)
 {
     m_subManager = subManager;
 
-    // Use the same database as SubscriptionManager
-    m_dbPath = GetLocalAppDataPath() / L"ufb.db";
-
-    // Open database (should already exist from SubscriptionManager)
-    int rc = sqlite3_open(m_dbPath.string().c_str(), &m_db);
-    if (rc != SQLITE_OK)
+    if (!m_subManager)
     {
-        std::cerr << "Failed to open database: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "[MetadataManager] ERROR: SubscriptionManager is null!" << std::endl;
         return false;
     }
 
-    // Set busy timeout to 5 seconds (handles lock contention)
-    sqlite3_busy_timeout(m_db, 5000);
-
-    std::cout << "[MetadataManager] Configured SQLite: 5s busy timeout" << std::endl;
+    std::cout << "[MetadataManager] Using shared database connection from SubscriptionManager" << std::endl;
 
     // Create cache table if it doesn't exist
     if (!CreateCacheTable())
     {
-        std::cerr << "Failed to create cache table" << std::endl;
+        std::cerr << "[MetadataManager] Failed to create cache table" << std::endl;
         return false;
     }
 
@@ -52,15 +52,25 @@ void MetadataManager::Shutdown()
     // Flush any pending writes
     FlushAllPendingWrites();
 
-    if (m_db)
+    // Don't close database - it's owned by SubscriptionManager
+    std::cout << "[MetadataManager] Shutdown complete (database owned by SubscriptionManager)" << std::endl;
+}
+
+// Get database handle from SubscriptionManager (shared connection)
+sqlite3* MetadataManager::GetDatabase() const
+{
+    if (!m_subManager)
     {
-        sqlite3_close(m_db);
-        m_db = nullptr;
+        std::cerr << "[MetadataManager] ERROR: SubscriptionManager is null!" << std::endl;
+        return nullptr;
     }
+    return m_subManager->GetDatabase();
 }
 
 bool MetadataManager::CreateCacheTable()
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     const char* createCacheTable = R"(
         CREATE TABLE IF NOT EXISTS shot_cache (
             job_path TEXT NOT NULL,
@@ -86,8 +96,9 @@ bool MetadataManager::CreateCacheTable()
 
 bool MetadataManager::ExecuteSQL(const char* sql)
 {
+    // Mutex already held by caller
     char* errMsg = nullptr;
-    int rc = sqlite3_exec(m_db, sql, nullptr, nullptr, &errMsg);
+    int rc = sqlite3_exec(GetDatabase(), sql, nullptr, nullptr, &errMsg);
 
     if (rc != SQLITE_OK)
     {
@@ -101,6 +112,18 @@ bool MetadataManager::ExecuteSQL(const char* sql)
 
 bool MetadataManager::AssignShot(const std::wstring& jobPath, const std::wstring& shotPath, const std::string& shotType)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
+    // BEGIN TRANSACTION for atomic cross-table update
+    char* errMsg = nullptr;
+    int rc = sqlite3_exec(GetDatabase(), "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[MetadataManager] Failed to begin transaction: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+
     Shot shot;
     shot.shotPath = shotPath;
     shot.shotType = shotType;
@@ -110,9 +133,20 @@ bool MetadataManager::AssignShot(const std::wstring& jobPath, const std::wstring
     shot.modifiedTime = shot.createdTime;
     shot.deviceId = GetDeviceID();
 
-    // Insert into local cache
+    // Insert into local cache (also updates shot_metadata via BridgeFromSyncCache)
     if (!InsertOrUpdateCache(jobPath, shot))
     {
+        sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    // COMMIT TRANSACTION
+    rc = sqlite3_exec(GetDatabase(), "COMMIT;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[MetadataManager] Failed to commit transaction: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
         return false;
     }
 
@@ -124,11 +158,23 @@ bool MetadataManager::AssignShot(const std::wstring& jobPath, const std::wstring
 
 bool MetadataManager::UpdateShotMetadata(const std::wstring& jobPath, const std::wstring& shotPath, const std::string& metadataJson)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     // Get existing shot from cache
     auto existingShot = GetShot(jobPath, shotPath);
     if (!existingShot.has_value())
     {
         std::cerr << "Shot not found in cache: " << WideToUtf8(shotPath) << std::endl;
+        return false;
+    }
+
+    // BEGIN TRANSACTION for atomic cross-table update
+    char* errMsg = nullptr;
+    int rc = sqlite3_exec(GetDatabase(), "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[MetadataManager] Failed to begin transaction: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
         return false;
     }
 
@@ -138,9 +184,20 @@ bool MetadataManager::UpdateShotMetadata(const std::wstring& jobPath, const std:
     updatedShot.modifiedTime = GetCurrentTimeMs();
     updatedShot.deviceId = GetDeviceID();
 
-    // Update cache
+    // Update cache (also updates shot_metadata via BridgeFromSyncCache)
     if (!InsertOrUpdateCache(jobPath, updatedShot))
     {
+        sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
+        return false;
+    }
+
+    // COMMIT TRANSACTION
+    rc = sqlite3_exec(GetDatabase(), "COMMIT;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK)
+    {
+        std::cerr << "[MetadataManager] Failed to commit transaction: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
         return false;
     }
 
@@ -152,17 +209,19 @@ bool MetadataManager::UpdateShotMetadata(const std::wstring& jobPath, const std:
 
 std::optional<Shot> MetadataManager::GetShot(const std::wstring& jobPath, const std::wstring& shotPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     std::string jobPathUtf8 = WideToUtf8(jobPath);
     std::string shotPathUtf8 = WideToUtf8(shotPath);
 
     const char* sql = "SELECT shot_path, shot_type, display_name, metadata, created_time, modified_time, device_id FROM shot_cache WHERE job_path = ? AND shot_path = ?;";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(GetDatabase(), sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(GetDatabase()) << std::endl;
         return std::nullopt;
     }
 
@@ -198,6 +257,8 @@ std::vector<Shot> MetadataManager::GetAllShots(const std::wstring& jobPath)
 
 bool MetadataManager::RemoveShot(const std::wstring& jobPath, const std::wstring& shotPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     if (!DeleteFromCache(jobPath, shotPath))
     {
         return false;
@@ -310,17 +371,19 @@ void MetadataManager::FlushAllPendingWrites()
 
 std::vector<Shot> MetadataManager::GetCachedShots(const std::wstring& jobPath)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     std::vector<Shot> shots;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "SELECT shot_path, shot_type, display_name, metadata, created_time, modified_time, device_id FROM shot_cache WHERE job_path = ?;";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(GetDatabase(), sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(GetDatabase()) << std::endl;
         return shots;
     }
 
@@ -349,15 +412,54 @@ std::vector<Shot> MetadataManager::GetCachedShots(const std::wstring& jobPath)
 
 void MetadataManager::UpdateCache(const std::wstring& jobPath, const std::vector<Shot>& shots, bool notifyObservers)
 {
+    std::lock_guard<std::recursive_mutex> lock(m_subManager->GetDatabaseMutex());
+
     std::wcout << L"[MetadataManager] UpdateCache called for: " << jobPath << L" with " << shots.size() << L" shots (notify=" << notifyObservers << L")" << std::endl;
 
-    // Clear existing cache for this job
-    ClearCache(jobPath);
-
-    // Insert all shots
-    for (const auto& shot : shots)
+    // BEGIN TRANSACTION for atomic cross-table updates
+    char* errMsg = nullptr;
+    int rc = sqlite3_exec(GetDatabase(), "BEGIN TRANSACTION;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK)
     {
-        InsertOrUpdateCache(jobPath, shot);
+        std::cerr << "[MetadataManager] Failed to begin transaction: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        return;
+    }
+
+    try
+    {
+        // Clear existing cache for this job
+        ClearCache(jobPath);
+
+        // Insert all shots (this also calls BridgeFromSyncCache for each shot)
+        for (const auto& shot : shots)
+        {
+            if (!InsertOrUpdateCache(jobPath, shot))
+            {
+                // Rollback on error
+                sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
+                std::cerr << "[MetadataManager] Failed to insert shot, transaction rolled back" << std::endl;
+                return;
+            }
+        }
+
+        // COMMIT TRANSACTION
+        rc = sqlite3_exec(GetDatabase(), "COMMIT;", nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK)
+        {
+            std::cerr << "[MetadataManager] Failed to commit transaction: " << errMsg << std::endl;
+            sqlite3_free(errMsg);
+            sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
+            return;
+        }
+
+        std::wcout << L"[MetadataManager] Transaction committed successfully" << std::endl;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[MetadataManager] Exception during UpdateCache: " << e.what() << std::endl;
+        sqlite3_exec(GetDatabase(), "ROLLBACK;", nullptr, nullptr, nullptr);
+        throw;
     }
 
     // Optionally notify observers that metadata has changed
@@ -375,16 +477,17 @@ void MetadataManager::UpdateCache(const std::wstring& jobPath, const std::vector
 
 void MetadataManager::ClearCache(const std::wstring& jobPath)
 {
+    // Mutex already held by caller (UpdateCache or public caller)
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
     const char* sql = "DELETE FROM shot_cache WHERE job_path = ?;";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(GetDatabase(), sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(GetDatabase()) << std::endl;
         return;
     }
 
@@ -472,7 +575,31 @@ bool MetadataManager::WriteSharedJSON(const std::wstring& jobPath, const std::ma
         }
 
         file << doc.dump(2); // Pretty print with 2-space indent
+
+        // Explicitly flush to ensure data is written to OS before closing
+        file.flush();
+        if (!file.good())
+        {
+            std::cerr << "Failed to flush shared JSON file" << std::endl;
+            file.close();
+            return false;
+        }
         file.close();
+
+        // Force OS to sync file to disk/network share (Windows-specific)
+#ifdef _WIN32
+        HANDLE hFile = CreateFileW(tempPath.c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            if (!FlushFileBuffers(hFile))
+            {
+                std::wcerr << L"[MetadataManager] Warning: FlushFileBuffers failed for shared JSON" << std::endl;
+            }
+            CloseHandle(hFile);
+        }
+#endif
 
         // Atomic rename
         std::filesystem::rename(tempPath, jsonPath);
@@ -488,6 +615,7 @@ bool MetadataManager::WriteSharedJSON(const std::wstring& jobPath, const std::ma
 
 bool MetadataManager::InsertOrUpdateCache(const std::wstring& jobPath, const Shot& shot)
 {
+    // Mutex already held by caller (UpdateCache or public caller with lock)
     std::string jobPathUtf8 = WideToUtf8(jobPath);
     std::string shotPathUtf8 = WideToUtf8(shot.shotPath);
     std::string displayNameUtf8 = WideToUtf8(shot.displayName);
@@ -507,11 +635,11 @@ bool MetadataManager::InsertOrUpdateCache(const std::wstring& jobPath, const Sho
     )";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(GetDatabase(), sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(GetDatabase()) << std::endl;
         return false;
     }
 
@@ -544,17 +672,18 @@ bool MetadataManager::InsertOrUpdateCache(const std::wstring& jobPath, const Sho
 
 bool MetadataManager::DeleteFromCache(const std::wstring& jobPath, const std::wstring& shotPath)
 {
+    // Mutex already held by caller (RemoveShot)
     std::string jobPathUtf8 = WideToUtf8(jobPath);
     std::string shotPathUtf8 = WideToUtf8(shotPath);
 
     const char* sql = "DELETE FROM shot_cache WHERE job_path = ? AND shot_path = ?;";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    int rc = sqlite3_prepare_v2(GetDatabase(), sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
-        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(m_db) << std::endl;
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(GetDatabase()) << std::endl;
         return false;
     }
 
@@ -694,7 +823,32 @@ bool MetadataManager::AppendToChangeLog(const std::wstring& jobPath, const Chang
 
         nlohmann::json doc = entries;
         outFile << doc.dump(2);  // Pretty print with 2-space indent
+
+        // Explicitly flush to ensure data is written to OS before closing
+        outFile.flush();
+        if (!outFile.good())
+        {
+            std::cerr << "[MetadataManager] Failed to flush change log file" << std::endl;
+            outFile.close();
+            return false;
+        }
         outFile.close();
+
+        // Force OS to sync file to disk/network share (Windows-specific)
+        // This ensures cloud sync services (Dropbox, OneDrive) detect the file change immediately
+#ifdef _WIN32
+        HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE)
+        {
+            if (!FlushFileBuffers(hFile))
+            {
+                std::wcerr << L"[MetadataManager] Warning: FlushFileBuffers failed for change log" << std::endl;
+            }
+            CloseHandle(hFile);
+        }
+#endif
 
         std::wcout << L"[MetadataManager] Appended change log entry: " << entry.shotPath << std::endl;
         return true;
@@ -734,23 +888,33 @@ std::map<std::wstring, Shot> MetadataManager::ReadAllChangeLogs(const std::wstri
 
         for (const auto& entry : std::filesystem::directory_iterator(changesDir))
         {
+            // Only process files matching pattern: device-*.json
+            // Skip bootstrap-snapshot.json and any other non-device files
             if (entry.is_regular_file() && entry.path().extension() == L".json")
             {
+                std::wstring filename = entry.path().stem().wstring();
+                if (filename.find(L"device-") != 0)
+                {
+                    // Skip files that don't start with "device-"
+                    std::wcout << L"[MetadataManager] Skipping non-device file: " << entry.path().filename() << std::endl;
+                    continue;
+                }
+
                 std::wcout << L"[MetadataManager] Reading change log: " << entry.path().filename() << std::endl;
 
                 // Retry logic for file sync services (Dropbox, OneDrive, etc.)
                 // File might be locked, partially written, or not yet synced from remote
-                // Exponential backoff with cap: 200ms, 400ms, 800ms, 1600ms, 3200ms, 6400ms, 6400ms...
-                // Total max wait: ~32 seconds (sufficient for typical cloud sync delays)
+                // Exponential backoff with cap: 200ms, 400ms, 800ms, 1600ms, 3000ms, 3000ms...
+                // Total max wait: ~15 seconds (next sync runs in 30 seconds, so don't block too long)
                 bool success = false;
-                int maxRetries = 10;
+                int maxRetries = 9;
 
                 for (int attempt = 0; attempt < maxRetries && !success; ++attempt)
                 {
                     if (attempt > 0)
                     {
-                        // Exponential backoff with 6400ms cap (2^attempt * 100, capped at 6400)
-                        int delayMs = std::min(100 * (1 << attempt), 6400);
+                        // Exponential backoff with 3000ms cap (2^attempt * 100, capped at 3000)
+                        int delayMs = (std::min)(100 * (1 << attempt), 3000);
                         std::wcout << L"[MetadataManager] Retrying after " << delayMs << L"ms (attempt " << (attempt + 1) << L"/" << maxRetries << L")" << std::endl;
                         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
                     }
@@ -822,7 +986,14 @@ std::map<std::wstring, Shot> MetadataManager::ReadAllChangeLogs(const std::wstri
                             {
                                 std::wcout << L"[MetadataManager] Checking expected device file: " << entry.path().filename()
                                            << L" (extracted ID: " << fileDeviceId << L")" << std::endl;
+
+                                // Apply clock skew tolerance to handle devices with slightly different system times
+                                uint64_t adjustedMinTimestamp = (minTimestamp > CLOCK_SKEW_TOLERANCE_MS)
+                                    ? (minTimestamp - CLOCK_SKEW_TOLERANCE_MS)
+                                    : 0;
+
                                 std::wcout << L"[MetadataManager] Looking for timestamp >= " << minTimestamp
+                                           << L" (with " << CLOCK_SKEW_TOLERANCE_MS << L"ms tolerance: >= " << adjustedMinTimestamp << L")"
                                            << L", found " << parsedEntries.size() << L" entries" << std::endl;
 
                                 // Verify the parsed entries contain the expected change
@@ -832,14 +1003,14 @@ std::map<std::wstring, Shot> MetadataManager::ReadAllChangeLogs(const std::wstri
                                     std::wstring deviceIdWide(parsedEntry.deviceId.begin(), parsedEntry.deviceId.end());
                                     std::wcout << L"[MetadataManager]   Entry: deviceId=" << deviceIdWide
                                                << L" timestamp=" << parsedEntry.timestamp
-                                               << L" (" << (parsedEntry.timestamp >= minTimestamp ? L"MATCH" : L"too old") << L")"
+                                               << L" (" << (parsedEntry.timestamp >= adjustedMinTimestamp ? L"MATCH" : L"too old") << L")"
                                                << std::endl;
 
-                                    if (parsedEntry.timestamp >= minTimestamp)
+                                    if (parsedEntry.timestamp >= adjustedMinTimestamp)
                                     {
                                         foundExpectedChange = true;
                                         std::wcout << L"[MetadataManager] ✓ Verified: Found expected change with timestamp "
-                                                   << parsedEntry.timestamp << L" (>= " << minTimestamp << L")" << std::endl;
+                                                   << parsedEntry.timestamp << L" (>= " << adjustedMinTimestamp << L" with tolerance)" << std::endl;
                                         break;
                                     }
                                 }

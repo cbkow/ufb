@@ -20,6 +20,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <filesystem>
 #include "nlohmann/json.hpp"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -113,6 +114,9 @@ public:
     // Register callback for when remote changes are detected
     void RegisterChangeCallback(std::function<void(const std::wstring& jobPath, const std::wstring& peerDeviceId, uint64_t timestamp)> callback);
 
+    // Register callback for when a peer successfully connects (handshake complete)
+    void RegisterPeerConnectedCallback(std::function<void(const std::wstring& peerDeviceId, const std::wstring& peerDeviceName)> callback);
+
     // Peer discovery and management
     void UpdatePeerRegistry();          // Read peers.json from all subscribed projects and connect to new peers
     void WritePeerRegistry();           // Write our info to peers.json in all subscribed projects
@@ -154,6 +158,10 @@ private:
     uint64_t m_lastIPRefresh;
     std::mutex m_ipCacheMutex;
 
+    // File timestamp caching (avoid re-reading unchanged peer files)
+    std::map<std::wstring, std::filesystem::file_time_type> m_peerFileTimestamps;
+    std::mutex m_fileTimestampMutex;
+
     // I/O contexts - use list to allow multiple concurrent operations per socket
     std::list<std::shared_ptr<IOContext>> m_activeContexts;
     std::mutex m_contextsMutex;
@@ -165,6 +173,7 @@ private:
 
     // Callbacks
     std::function<void(const std::wstring& jobPath, const std::wstring& peerDeviceId, uint64_t timestamp)> m_changeCallback;
+    std::function<void(const std::wstring& peerDeviceId, const std::wstring& peerDeviceName)> m_peerConnectedCallback;
     std::mutex m_callbackMutex;
 
     // Worker threads
@@ -175,6 +184,7 @@ private:
     void LoadPeersFromFile();
     void SavePeersToFile();
     void CleanupStalePeers();
+    void CleanupStalePeerFiles();  // Delete old peer files from disk
 
     // IOCP worker
     void IOCPWorkerThread();

@@ -39,6 +39,7 @@
 #include "postings_view.h"
 #include "project_tracker_view.h"
 #include "aggregated_tracker_view.h"
+#include "console_panel.h"
 #include "utils.h"
 
 using json = nlohmann::json;
@@ -1348,6 +1349,10 @@ int main(int argc, char** argv)
 
     DeadlineSubmitDialog deadlineSubmitDialog;
 
+    // Initialize console panel (but don't redirect streams yet - wait until after first frame)
+    UFB::ConsolePanel consolePanel;
+    consolePanel.Initialize();
+
     // Initialize settings dialog
     SettingsDialog settingsDialog;
     settingsDialog.SetFontScale(g_fontScale);
@@ -1967,6 +1972,7 @@ int main(int argc, char** argv)
 
     // Track if we need to focus Browser on first frame
     bool needsInitialBrowserFocus = true;
+    bool streamsRedirected = false;
 
     // Main loop
     ImVec4 clear_color = ImVec4(0.128f, 0.128f, 0.128f, 1.00f);
@@ -1978,6 +1984,13 @@ int main(int argc, char** argv)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        // Redirect streams after first frame is ready (safer than during initialization)
+        if (!streamsRedirected)
+        {
+            consolePanel.RedirectStreams();
+            streamsRedirected = true;
+        }
 
         // Enable docking over the main viewport
         ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -2169,7 +2182,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.5", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.6", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -2225,6 +2238,13 @@ int main(int argc, char** argv)
                             std::wcerr << L"[Main] Failed to import bookmarks" << std::endl;
                         }
                     }
+                }
+
+                ImGui::Separator();
+
+                bool consoleOpen = consolePanel.IsVisible();
+                if (ImGui::MenuItem("Console", nullptr, &consoleOpen)) {
+                    consolePanel.Toggle();
                 }
 
                 ImGui::Separator();
@@ -2331,6 +2351,10 @@ int main(int argc, char** argv)
 
         // Settings Dialog (modal)
         settingsDialog.Draw();
+
+        // Console Panel (dockable window)
+        ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+        consolePanel.Render();
 
         // Render all shot views (dockable windows)
         for (size_t i = 0; i < shotViews.size(); ++i) {

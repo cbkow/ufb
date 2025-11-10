@@ -7,6 +7,11 @@
 #include <sstream>
 #include <iomanip>
 #include <set>
+#include <thread>
+#include <chrono>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <nlohmann/json.hpp>
 
 // TODO: Add zlib for gzip compression in future iteration
@@ -14,6 +19,10 @@
 // This still achieves the main goal of separating old/new entries
 
 namespace UFB {
+
+// Clock skew tolerance for P2P sync (in milliseconds)
+// Must match the tolerance in metadata_manager.cpp and sync_manager.cpp
+constexpr uint64_t CLOCK_SKEW_TOLERANCE_MS = 10000;
 
 ArchivalManager::ArchivalManager()
 {
@@ -31,6 +40,19 @@ std::map<std::wstring, Shot> ArchivalManager::ReadAllChangeLogs(
     // OPTIMIZATION: Load bootstrap snapshot first as baseline state
     // This provides instant access to all shots on first sync from a new device
     std::map<std::wstring, Shot> bootstrapState = ReadBootstrapSnapshot(jobPath);
+
+    // Retry logic for P2P sync: if we're expecting a specific change and the file content
+    // is stale (doesn't contain the expected entry yet), retry the entire read operation
+    int maxRetries = 9;
+    for (int attempt = 0; attempt < maxRetries; ++attempt)
+    {
+        if (attempt > 0)
+        {
+            int delayMs = (std::min)(100 * (1 << attempt), 3000);
+            std::wcout << L"[ArchivalManager] Retrying change log read after " << delayMs
+                       << L"ms (attempt " << (attempt + 1) << L"/" << maxRetries << L")" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
 
     std::vector<ChangeLogEntry> allEntries;
 
@@ -50,6 +72,17 @@ std::map<std::wstring, Shot> ArchivalManager::ReadAllChangeLogs(
 
     // Collect all device IDs from file names
     std::set<std::string> deviceIds;
+
+    // IMPORTANT: If we're expecting a specific device, add it to the set even if the file
+    // doesn't exist yet. This ensures the retry logic in ReadActiveLog gets a chance to
+    // wait for the file to sync from the network share or cloud service.
+    if (!expectedDeviceId.empty())
+    {
+        std::string expectedDeviceIdUtf8 = WideToUtf8(expectedDeviceId);
+        deviceIds.insert(expectedDeviceIdUtf8);
+        std::wcout << L"[ArchivalManager] Expecting change from device: " << expectedDeviceId
+                   << L", will retry even if file doesn't exist yet" << std::endl;
+    }
 
     for (const auto& entry : std::filesystem::directory_iterator(changesDir))
     {
@@ -126,8 +159,48 @@ std::map<std::wstring, Shot> ArchivalManager::ReadAllChangeLogs(
             return a.deviceId < b.deviceId;
         });
 
-    // Materialize current state by applying change logs on top of bootstrap baseline
-    return MaterializeState(allEntries, bootstrapState);
+        // Content verification: if expecting a specific change, verify it's present in the entries
+        // If not found, the file content is stale (hasn't synced yet), so retry
+        bool foundExpectedChange = true;  // Assume success if not verifying
+        if (!expectedDeviceId.empty() && minTimestamp > 0)
+        {
+            foundExpectedChange = false;
+            uint64_t adjustedMinTimestamp = (minTimestamp > CLOCK_SKEW_TOLERANCE_MS)
+                ? (minTimestamp - CLOCK_SKEW_TOLERANCE_MS)
+                : 0;
+
+            for (const auto& entry : allEntries)
+            {
+                std::string deviceIdUtf8 = WideToUtf8(expectedDeviceId);
+                if (entry.deviceId == deviceIdUtf8 && entry.data.modifiedTime >= adjustedMinTimestamp)
+                {
+                    foundExpectedChange = true;
+                    std::wcout << L"[ArchivalManager] ✓ Verified: Found expected change with modifiedTime "
+                               << entry.data.modifiedTime << L" (>= " << adjustedMinTimestamp << L" with tolerance)" << std::endl;
+                    break;
+                }
+            }
+
+            if (!foundExpectedChange && attempt < maxRetries - 1)
+            {
+                std::wcerr << L"[ArchivalManager] Expected change not found, content may be stale (will retry)" << std::endl;
+                std::wcerr << L"[ArchivalManager] Looking for: deviceId=" << expectedDeviceId
+                           << L" modifiedTime>=" << adjustedMinTimestamp << std::endl;
+                continue;  // Retry - read the change logs again
+            }
+            else if (!foundExpectedChange)
+            {
+                std::wcerr << L"[ArchivalManager] WARNING: Expected change still not found after "
+                           << maxRetries << L" attempts" << std::endl;
+            }
+        }
+
+        // Expected change found (or not verifying) - materialize and return
+        return MaterializeState(allEntries, bootstrapState);
+    }
+
+    // Should never reach here (loop always returns inside)
+    return bootstrapState;
 }
 
 std::vector<ChangeLogEntry> ArchivalManager::ReadDeviceChangeLogs(
@@ -145,12 +218,11 @@ std::vector<ChangeLogEntry> ArchivalManager::ReadDeviceChangeLogs(
     }
 
     // Read active log
+    // Don't check exists() - let ReadActiveLog's retry logic handle waiting for file to sync
+    // This is crucial for P2P sync where files may not be visible yet on network shares
     auto activePath = GetActiveChangeLogPath(jobPath, deviceId);
-    if (std::filesystem::exists(activePath))
-    {
-        auto activeEntries = ReadActiveLog(activePath);
-        entries.insert(entries.end(), activeEntries.begin(), activeEntries.end());
-    }
+    auto activeEntries = ReadActiveLog(activePath);
+    entries.insert(entries.end(), activeEntries.begin(), activeEntries.end());
 
     return entries;
 }
@@ -282,7 +354,31 @@ bool ArchivalManager::ArchiveOldEntries(
     }
 
     outFile << activeJson.dump(2);
+
+    // Explicitly flush to ensure data is written to OS before closing
+    outFile.flush();
+    if (!outFile.good())
+    {
+        std::cerr << "[ArchivalManager] Failed to flush active log file" << std::endl;
+        outFile.close();
+        return false;
+    }
     outFile.close();
+
+    // Force OS to sync file to disk/network share (Windows-specific)
+#ifdef _WIN32
+    HANDLE hFile = CreateFileW(activePath.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        if (!FlushFileBuffers(hFile))
+        {
+            std::wcerr << L"[ArchivalManager] Warning: FlushFileBuffers failed for active log" << std::endl;
+        }
+        CloseHandle(hFile);
+    }
+#endif
 
     std::cout << "[ArchivalManager] Archived " << oldEntries.size()
               << " old entries, kept " << recentEntries.size() << " recent entries" << std::endl;
@@ -349,16 +445,62 @@ std::vector<ChangeLogEntry> ArchivalManager::ReadActiveLog(const std::filesystem
 {
     std::vector<ChangeLogEntry> entries;
 
-    std::ifstream inFile(path);
-    if (!inFile.is_open())
-    {
-        return entries;
-    }
+    // Retry logic for file sync services (Dropbox, OneDrive, etc.)
+    // File might be locked, partially written, or not yet synced from remote
+    // Exponential backoff with cap: 200ms, 400ms, 800ms, 1600ms, 3000ms, 3000ms...
+    // Total max wait: ~15 seconds (next sync runs in 30 seconds, so don't block too long)
+    int maxRetries = 9;
+    bool success = false;
 
-    try
+    for (int attempt = 0; attempt < maxRetries && !success; ++attempt)
     {
-        nlohmann::json jsonData;
-        inFile >> jsonData;
+        if (attempt > 0)
+        {
+            // Exponential backoff with 3000ms cap (2^attempt * 100, capped at 3000)
+            int delayMs = (std::min)(100 * (1 << attempt), 3000);
+            std::wcout << L"[ArchivalManager] Retrying after " << delayMs << L"ms (attempt "
+                       << (attempt + 1) << L"/" << maxRetries << L")" << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+        }
+
+        std::ifstream inFile(path);
+        if (!inFile.is_open())
+        {
+            if (attempt < maxRetries - 1)
+            {
+                std::wcerr << L"[ArchivalManager] File locked or not found, will retry: " << path << std::endl;
+                continue;
+            }
+            else
+            {
+                std::wcerr << L"[ArchivalManager] Failed to open file after " << maxRetries << L" attempts: " << path << std::endl;
+                return entries;
+            }
+        }
+
+        try
+        {
+            // Read entire file content
+            std::string content((std::istreambuf_iterator<char>(inFile)), std::istreambuf_iterator<char>());
+            inFile.close();
+
+            // Check if empty (file sync in progress)
+            if (content.empty())
+            {
+                if (attempt < maxRetries - 1)
+                {
+                    std::wcout << L"[ArchivalManager] File empty (sync in progress), will retry: " << path << std::endl;
+                    continue;
+                }
+                else
+                {
+                    std::wcerr << L"[ArchivalManager] File still empty after " << maxRetries << L" attempts: " << path << std::endl;
+                    return entries;
+                }
+            }
+
+            // Parse JSON
+            nlohmann::json jsonData = nlohmann::json::parse(content);
 
         if (!jsonData.is_array())
         {
@@ -401,11 +543,29 @@ std::vector<ChangeLogEntry> ArchivalManager::ReadActiveLog(const std::filesystem
 
             entries.push_back(entry);
         }
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "[ArchivalManager] Failed to parse change log: " << path
-                  << " - " << e.what() << std::endl;
+
+            // Success! Mark as successful and break out of retry loop
+            success = true;
+            if (attempt > 0)
+            {
+                std::wcout << L"[ArchivalManager] Successfully read change log after " << (attempt + 1) << L" attempts" << std::endl;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            if (attempt < maxRetries - 1)
+            {
+                std::wcerr << L"[ArchivalManager] Parse error, will retry: " << path
+                           << L" - " << e.what() << std::endl;
+                entries.clear();  // Clear partial data
+                continue;
+            }
+            else
+            {
+                std::cerr << "[ArchivalManager] Failed to parse change log after " << maxRetries
+                          << " attempts: " << path << " - " << e.what() << std::endl;
+            }
+        }
     }
 
     return entries;
@@ -458,7 +618,31 @@ bool ArchivalManager::WriteArchivedLog(
     }
 
     outFile << archiveJson.dump(2);
+
+    // Explicitly flush to ensure data is written to OS before closing
+    outFile.flush();
+    if (!outFile.good())
+    {
+        std::cerr << "[ArchivalManager] Failed to flush archived log file" << std::endl;
+        outFile.close();
+        return false;
+    }
     outFile.close();
+
+    // Force OS to sync file to disk/network share (Windows-specific)
+#ifdef _WIN32
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        if (!FlushFileBuffers(hFile))
+        {
+            std::wcerr << L"[ArchivalManager] Warning: FlushFileBuffers failed for archived log" << std::endl;
+        }
+        CloseHandle(hFile);
+    }
+#endif
 
     return true;
 }
