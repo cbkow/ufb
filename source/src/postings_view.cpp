@@ -24,6 +24,12 @@
 // Note: App stores timestamps in milliseconds, but mktime uses seconds
 static tm TimestampToTm(uint64_t timestampMillis)
 {
+    // Clamp to valid range (1970-3000) to prevent crashes from corrupted data
+    const uint64_t MAX_TIMESTAMP_MS = 32503680000000ULL;  // Year 3000
+    if (timestampMillis > MAX_TIMESTAMP_MS) {
+        timestampMillis = MAX_TIMESTAMP_MS;
+    }
+
     time_t timeSeconds = static_cast<time_t>(timestampMillis / 1000);  // Convert milliseconds to seconds
     tm result = {};
     #ifdef _WIN32

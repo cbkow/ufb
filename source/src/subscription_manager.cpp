@@ -213,6 +213,12 @@ bool SubscriptionManager::SubscribeToJob(const std::wstring& jobPath, const std:
         // Don't fail the subscription if template copy fails
     }
 
+    // Notify client tracking manager (outside of db lock to avoid potential deadlock)
+    if (m_subscriptionChangeCallback)
+    {
+        m_subscriptionChangeCallback();
+    }
+
     return true;
 }
 
@@ -238,7 +244,24 @@ bool SubscriptionManager::UnsubscribeFromJob(const std::wstring& jobPath)
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
-    return (rc == SQLITE_DONE);
+    bool success = (rc == SQLITE_DONE);
+
+    if (success)
+    {
+        // Notify for server mode pruning (outside of db lock)
+        if (m_unsubscribeCallback)
+        {
+            m_unsubscribeCallback(jobPath);
+        }
+
+        // Notify client tracking manager
+        if (m_subscriptionChangeCallback)
+        {
+            m_subscriptionChangeCallback();
+        }
+    }
+
+    return success;
 }
 
 bool SubscriptionManager::SetJobActive(const std::wstring& jobPath, bool active)
@@ -788,9 +811,12 @@ SyncStatus SubscriptionManager::StringToSyncStatus(const std::string& str)
 
 std::string SubscriptionManager::InferItemTypeFromPath(const std::wstring& shotPath)
 {
-    // Check for manual task marker
-    if (shotPath.find(L"/__task_") != std::wstring::npos)
+    // Check for manual task marker (handle both /__task_ and leading __task_)
+    if (shotPath.find(L"/__task_") != std::wstring::npos ||
+        shotPath.find(L"\\__task_") != std::wstring::npos ||
+        shotPath.find(L"__task_") == 0)
     {
+        std::wcout << L"[InferItemType] Detected MANUAL_TASK from __task_ prefix: " << shotPath << std::endl;
         return "manual_task";
     }
 
@@ -1173,7 +1199,7 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
         metadata.status = metaJson.value("status", "");
         metadata.category = metaJson.value("category", "");
         metadata.priority = metaJson.value("priority", 2);
-        metadata.dueDate = metaJson.value("dueDate", 0);
+        metadata.dueDate = metaJson.value("dueDate", 0ULL);
         metadata.artist = metaJson.value("artist", "");
         metadata.note = metaJson.value("note", "");
         metadata.links = metaJson.value("links", "");

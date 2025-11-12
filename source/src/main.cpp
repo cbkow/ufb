@@ -27,6 +27,9 @@
 #include "metadata_manager.h"
 #include "backup_manager.h"
 #include "sync_manager.h"
+#include "client_tracking_manager.h"
+#include "google_oauth_manager.h"
+#include "google_sheets_manager.h"
 #include "bookmark_manager.h"
 #include "subscription_panel.h"
 #include "transcode_queue_panel.h"
@@ -50,6 +53,15 @@ bool use_windows_accent_color = true;
 // UI Settings
 float g_fontScale = 1.0f;
 std::string g_frameioApiKey;
+std::string g_operatingMode = "client";  // "client" or "server"
+std::string g_clientTrackingDirectory;
+
+// Google Sheets settings
+std::string g_googleClientId;
+std::string g_googleClientSecret;
+bool g_googleSheetsEnabled = false;
+std::string g_masterSpreadsheetId;
+std::string g_parentFolderId;
 
 // Font pointers
 ImFont* font_regular = nullptr;
@@ -717,6 +729,23 @@ void SaveSettings(GLFWwindow* window, bool showSubscriptions, bool showBrowser1,
         } else {
             j["ui"]["frameio_api_key"] = "";
         }
+        j["ui"]["operating_mode"] = g_operatingMode;
+        j["ui"]["client_tracking_directory"] = g_clientTrackingDirectory;
+
+        // Save Google Sheets settings
+        if (!g_googleClientId.empty()) {
+            j["ui"]["google_client_id"] = UFB::Base64Encode(g_googleClientId);
+        } else {
+            j["ui"]["google_client_id"] = "";
+        }
+        if (!g_googleClientSecret.empty()) {
+            j["ui"]["google_client_secret"] = UFB::Base64Encode(g_googleClientSecret);
+        } else {
+            j["ui"]["google_client_secret"] = "";
+        }
+        j["ui"]["google_sheets_enabled"] = g_googleSheetsEnabled;
+        j["ui"]["master_spreadsheet_id"] = g_masterSpreadsheetId;
+        j["ui"]["parent_folder_id"] = g_parentFolderId;
 
         // Save open shot views (category path and name)
         j["shot_views"] = json::array();
@@ -844,7 +873,35 @@ void LoadSettings(bool& showSubscriptions, bool& showBrowser1, bool& showBrowser
             } else {
                 g_frameioApiKey.clear();
             }
-            std::cout << "Loaded UI settings: font_scale=" << g_fontScale << std::endl;
+            g_operatingMode = j["ui"].value("operating_mode", "client");
+            g_clientTrackingDirectory = j["ui"].value("client_tracking_directory", "");
+
+            // Load Google Sheets settings
+            std::cout << "[LoadSettings] Loading Google Sheets credentials..." << std::endl;
+            std::string encodedClientId = j["ui"].value("google_client_id", "");
+            std::cout << "[LoadSettings]   Encoded Client ID present: " << (!encodedClientId.empty() ? "YES" : "NO") << std::endl;
+            if (!encodedClientId.empty()) {
+                std::cout << "[LoadSettings]   Encoded Client ID length: " << encodedClientId.length() << std::endl;
+                g_googleClientId = UFB::Base64Decode(encodedClientId);
+                std::cout << "[LoadSettings]   Decoded Client ID length: " << g_googleClientId.length() << std::endl;
+            } else {
+                g_googleClientId.clear();
+            }
+            std::string encodedClientSecret = j["ui"].value("google_client_secret", "");
+            std::cout << "[LoadSettings]   Encoded Client Secret present: " << (!encodedClientSecret.empty() ? "YES" : "NO") << std::endl;
+            if (!encodedClientSecret.empty()) {
+                std::cout << "[LoadSettings]   Encoded Client Secret length: " << encodedClientSecret.length() << std::endl;
+                g_googleClientSecret = UFB::Base64Decode(encodedClientSecret);
+                std::cout << "[LoadSettings]   Decoded Client Secret length: " << g_googleClientSecret.length() << std::endl;
+            } else {
+                g_googleClientSecret.clear();
+            }
+            g_googleSheetsEnabled = j["ui"].value("google_sheets_enabled", false);
+            g_masterSpreadsheetId = j["ui"].value("master_spreadsheet_id", "");
+            g_parentFolderId = j["ui"].value("parent_folder_id", "");
+
+            std::cout << "Loaded UI settings: font_scale=" << g_fontScale
+                      << ", operating_mode=" << g_operatingMode << std::endl;
         }
 
         // Load shot views
@@ -1246,8 +1303,163 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Initialize client tracking manager
+    UFB::ClientTrackingManager clientTrackingManager;
+    {
+        // Get device ID and name
+        std::wstring deviceId = syncManager.GetDeviceId();
+        std::wstring deviceName = L"Unknown";
+
+        // Get computer name
+        wchar_t computerName[MAX_COMPUTERNAME_LENGTH + 1];
+        DWORD size = sizeof(computerName) / sizeof(wchar_t);
+        if (GetComputerNameW(computerName, &size))
+        {
+            deviceName = computerName;
+        }
+
+        // Initialize with subscription manager
+        if (!clientTrackingManager.Initialize(&subscriptionManager, deviceId, deviceName))
+        {
+            std::cerr << "Failed to initialize ClientTrackingManager" << std::endl;
+            return 1;
+        }
+
+        // Set tracking directory and operating mode from settings
+        if (!g_clientTrackingDirectory.empty())
+        {
+            clientTrackingManager.SetTrackingDirectory(g_clientTrackingDirectory);
+        }
+        clientTrackingManager.SetOperatingMode(g_operatingMode);
+
+        std::cout << "ClientTrackingManager initialized in " << g_operatingMode << " mode" << std::endl;
+
+        // Sync database to tracking file on startup
+        if (!g_clientTrackingDirectory.empty())
+        {
+            std::cout << "Syncing database to tracking file on startup..." << std::endl;
+            clientTrackingManager.SyncDatabaseToTrackingFile();
+        }
+
+        // Wire up subscription change callbacks
+        subscriptionManager.RegisterSubscriptionChangeCallback([&clientTrackingManager]() {
+            // Client mode: Write own tracking file
+            if (clientTrackingManager.GetOperatingMode() == "client")
+            {
+                clientTrackingManager.WriteOwnTrackingFile();
+            }
+        });
+
+        subscriptionManager.RegisterUnsubscribeCallback([&clientTrackingManager](const std::wstring& jobPath) {
+            // Server mode: Prune job from all client tracking files
+            if (clientTrackingManager.GetOperatingMode() == "server")
+            {
+                std::wcout << L"[Main] Server mode: Pruning job from all clients: " << jobPath << std::endl;
+                clientTrackingManager.PruneJobFromAllClients(jobPath);
+            }
+        });
+
+        std::cout << "ClientTrackingManager callbacks registered" << std::endl;
+
+        // Start server sync loop if in server mode
+        if (g_operatingMode == "server" && !g_clientTrackingDirectory.empty())
+        {
+            std::cout << "Starting server mode sync loop..." << std::endl;
+            clientTrackingManager.StartServerSyncLoop(std::chrono::seconds(30));
+        }
+    }
+
     // Start background sync (5 second interval)
     syncManager.StartSync(std::chrono::seconds(5));
+
+    // Initialize Google OAuth Manager
+    std::cout << "[Google Sheets] Checking OAuth credentials at startup..." << std::endl;
+    std::cout << "[Google Sheets] Client ID empty: " << (g_googleClientId.empty() ? "YES" : "NO") << std::endl;
+    std::cout << "[Google Sheets] Client Secret empty: " << (g_googleClientSecret.empty() ? "YES" : "NO") << std::endl;
+
+    UFB::GoogleOAuthManager googleOAuthManager;
+    if (!g_googleClientId.empty() && !g_googleClientSecret.empty())
+    {
+        std::cout << "[Google Sheets] Initializing GoogleOAuthManager..." << std::endl;
+        if (googleOAuthManager.Initialize(g_googleClientId, g_googleClientSecret))
+        {
+            std::cout << "[Google Sheets] GoogleOAuthManager initialized successfully" << std::endl;
+        }
+        else
+        {
+            std::cerr << "[Google Sheets] Failed to initialize GoogleOAuthManager" << std::endl;
+        }
+    }
+    else
+    {
+        std::cout << "[Google Sheets] Skipping OAuth initialization (credentials not found in settings)" << std::endl;
+    }
+
+    // Initialize Google Sheets Manager
+    UFB::GoogleSheetsManager googleSheetsManager;
+    // Google Sheets only in server mode
+    if (g_operatingMode == "server" && (googleOAuthManager.IsAuthenticated() || !g_googleClientId.empty()))
+    {
+        try {
+            std::cout << "[Google Sheets] Initializing GoogleSheetsManager (server mode)..." << std::endl;
+            if (googleSheetsManager.Initialize(&googleOAuthManager))
+            {
+                std::cout << "[Google Sheets] GoogleSheetsManager initialized, configuring..." << std::endl;
+
+                // Set operating mode FIRST
+                googleSheetsManager.SetOperatingMode(g_operatingMode);
+
+                // Set subscription manager
+                googleSheetsManager.SetSubscriptionManager(&subscriptionManager);
+
+                // Set parent folder ID for job folders
+                if (!g_parentFolderId.empty()) {
+                    googleSheetsManager.SetParentFolderId(g_parentFolderId);
+                    std::cout << "[Google Sheets] Parent folder ID set: " << g_parentFolderId << std::endl;
+                } else {
+                    std::cout << "[Google Sheets] WARNING: No parent folder ID set - sync will be disabled" << std::endl;
+                }
+
+                // Set enabled state
+                googleSheetsManager.SetEnabled(g_googleSheetsEnabled);
+
+                // Set master spreadsheet ID (deprecated but kept for UI reference)
+                if (!g_masterSpreadsheetId.empty())
+                {
+                    std::cout << "[Google Sheets] Master spreadsheet ID found in settings: " << g_masterSpreadsheetId << std::endl;
+                    googleSheetsManager.SetMasterSpreadsheetId(g_masterSpreadsheetId);
+                }
+
+                // Start sync loop if enabled, authenticated, and parent folder set
+                if (g_googleSheetsEnabled && googleOAuthManager.IsAuthenticated() && !g_parentFolderId.empty())
+                {
+                    std::cout << "[Google Sheets] Starting sync loop..." << std::endl;
+                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));
+                    std::cout << "[Google Sheets] Sync loop started (60s interval)" << std::endl;
+                }
+
+                std::cout << "[Google Sheets] GoogleSheetsManager setup complete" << std::endl;
+
+                // Register Google Sheets cleanup callback for job unsubscribe
+                subscriptionManager.RegisterUnsubscribeCallback([&googleSheetsManager](const std::wstring& jobPath) {
+                    // Server mode: Remove job from Google Sheets sync records
+                    if (googleSheetsManager.IsServerMode() && googleSheetsManager.IsEnabled())
+                    {
+                        std::wcout << L"[Main] Removing job from Google Sheets sync records: " << jobPath << std::endl;
+                        googleSheetsManager.RemoveJobFromSheets(jobPath);
+                    }
+                });
+                std::cout << "[Google Sheets] Unsubscribe callback registered" << std::endl;
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[Google Sheets] Exception during initialization: " << e.what() << std::endl;
+        }
+    }
+    else if (g_operatingMode == "client")
+    {
+        std::cout << "[Google Sheets] Client mode - Google Sheets integration disabled" << std::endl;
+    }
 
     // Initialize bookmark manager
     UFB::BookmarkManager bookmarkManager;
@@ -1369,6 +1581,8 @@ int main(int argc, char** argv)
     // Initialize settings dialog
     SettingsDialog settingsDialog;
     settingsDialog.SetFontScale(g_fontScale);
+    settingsDialog.SetOperatingMode(g_operatingMode);
+    settingsDialog.SetClientTrackingDirectory(g_clientTrackingDirectory);
     // settingsDialog.SetFrameioApiKey(g_frameioApiKey);  // Frame.io integration removed
     settingsDialog.SetFonts(font_regular, font_mono);
 
@@ -1455,13 +1669,89 @@ int main(int argc, char** argv)
     };
 
     // Wire up settings dialog callback
-    settingsDialog.onSettingsSaved = [&window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &aggregatedTrackerView, &standaloneBrowsers, &settingsDialog]() {
+    settingsDialog.onSettingsSaved = [&window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &aggregatedTrackerView, &standaloneBrowsers, &settingsDialog, &clientTrackingManager, &googleOAuthManager, &googleSheetsManager]() {
         // Update global settings from dialog
+        std::string oldMode = g_operatingMode;
+        bool oldGoogleSheetsEnabled = g_googleSheetsEnabled;
+
         g_fontScale = settingsDialog.GetFontScale();
+        g_operatingMode = settingsDialog.GetOperatingMode();
+        g_clientTrackingDirectory = settingsDialog.GetClientTrackingDirectory();
+        g_googleClientId = settingsDialog.GetGoogleClientId();
+        g_googleClientSecret = settingsDialog.GetGoogleClientSecret();
+        g_googleSheetsEnabled = settingsDialog.GetGoogleSheetsEnabled();
+        g_masterSpreadsheetId = settingsDialog.GetMasterSpreadsheetId();
+        g_parentFolderId = settingsDialog.GetParentFolderId();
         // g_frameioApiKey = settingsDialog.GetFrameioApiKey();  // Frame.io integration removed
 
         std::cout << "[Settings] Applying font scale: " << g_fontScale << "x" << std::endl;
+        std::cout << "[Settings] Operating mode: " << g_operatingMode << std::endl;
+        std::cout << "[Settings] Client tracking directory: " << g_clientTrackingDirectory << std::endl;
+        std::cout << "[Settings] Google Sheets enabled: " << (g_googleSheetsEnabled ? "Yes" : "No") << std::endl;
         // std::cout << "[Settings] API key " << (g_frameioApiKey.empty() ? "cleared" : "set") << std::endl;
+
+        // Detect mode change
+        if (oldMode != g_operatingMode) {
+            std::cout << "[Settings] Operating mode changed: " << oldMode << " -> " << g_operatingMode << std::endl;
+
+            // Update ClientTrackingManager's operating mode
+            clientTrackingManager.SetOperatingMode(g_operatingMode);
+
+            // Handle mode transition
+            if (g_operatingMode == "server") {
+                // Switched to server mode
+                std::cout << "[Settings] Switching to server mode..." << std::endl;
+
+                // Start server sync loop if tracking directory is configured
+                if (!g_clientTrackingDirectory.empty()) {
+                    clientTrackingManager.StartServerSyncLoop(std::chrono::seconds(30));
+                    std::cout << "[Settings] Server sync loop started" << std::endl;
+                }
+            } else {
+                // Switched to client mode
+                std::cout << "[Settings] Switching to client mode..." << std::endl;
+
+                // Stop server sync loop
+                clientTrackingManager.StopServerSyncLoop();
+
+                // Write initial tracking file with current subscriptions
+                if (!g_clientTrackingDirectory.empty()) {
+                    clientTrackingManager.WriteOwnTrackingFile();
+                    std::cout << "[Settings] Client tracking file written" << std::endl;
+                }
+            }
+        }
+
+        // Update tracking directory if changed
+        clientTrackingManager.SetTrackingDirectory(g_clientTrackingDirectory);
+
+        // Update Google OAuth Manager if credentials changed
+        if (!g_googleClientId.empty() && !g_googleClientSecret.empty()) {
+            googleOAuthManager.Initialize(g_googleClientId, g_googleClientSecret);
+        }
+
+        // Update Google Sheets Manager (server mode only)
+        if (g_operatingMode == "server") {
+            googleSheetsManager.SetOperatingMode(g_operatingMode);
+            googleSheetsManager.SetEnabled(g_googleSheetsEnabled);
+            if (!g_parentFolderId.empty()) {
+                googleSheetsManager.SetParentFolderId(g_parentFolderId);
+            }
+            if (!g_masterSpreadsheetId.empty()) {
+                googleSheetsManager.SetMasterSpreadsheetId(g_masterSpreadsheetId);
+            }
+
+            // Handle Google Sheets enablement change
+            if (oldGoogleSheetsEnabled != g_googleSheetsEnabled) {
+                if (g_googleSheetsEnabled && googleOAuthManager.IsAuthenticated() && !g_parentFolderId.empty()) {
+                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));
+                    std::cout << "[Settings] Google Sheets sync started" << std::endl;
+                } else {
+                    googleSheetsManager.StopSyncLoop();
+                    std::cout << "[Settings] Google Sheets sync stopped" << std::endl;
+                }
+            }
+        }
 
         // Apply font scale immediately (no restart needed)
         ImGui::GetIO().FontGlobalScale = g_fontScale;
@@ -1472,6 +1762,104 @@ int main(int argc, char** argv)
 
         std::cout << "[Settings] Settings saved to settings.json successfully" << std::endl;
         std::cout << "[Settings] Font scale applied immediately (no restart needed)" << std::endl;
+    };
+
+    // Wire up Google Sheets callbacks
+    settingsDialog.onGoogleLogin = [&googleOAuthManager, &settingsDialog]() {
+        std::cout << "[Google Sheets] Starting OAuth flow..." << std::endl;
+
+        // Re-initialize with current credentials from settings dialog
+        std::string clientId = settingsDialog.GetGoogleClientId();
+        std::string clientSecret = settingsDialog.GetGoogleClientSecret();
+
+        if (clientId.empty() || clientSecret.empty()) {
+            std::cerr << "[Google Sheets] Client ID and Secret are required. Please enter them in settings and click Save first." << std::endl;
+            settingsDialog.SetGoogleAuthStatus("Failed");
+            return;
+        }
+
+        if (!googleOAuthManager.Initialize(clientId, clientSecret)) {
+            std::cerr << "[Google Sheets] Failed to initialize OAuth manager" << std::endl;
+            settingsDialog.SetGoogleAuthStatus("Failed");
+            return;
+        }
+
+        if (googleOAuthManager.StartAuthFlow()) {
+            std::cout << "[Google Sheets] OAuth flow started - waiting for user authorization" << std::endl;
+        } else {
+            std::cout << "[Google Sheets] Failed to start OAuth flow" << std::endl;
+        }
+    };
+
+    settingsDialog.onGoogleLogout = [&googleOAuthManager, &googleSheetsManager, &settingsDialog]() {
+        std::cout << "[Google Sheets] Logging out..." << std::endl;
+        googleSheetsManager.StopSyncLoop();
+        googleOAuthManager.Logout();
+        settingsDialog.SetGoogleAuthStatus("Not Authenticated");
+        std::cout << "[Google Sheets] Logged out successfully" << std::endl;
+    };
+
+    settingsDialog.onCreateMasterSpreadsheet = [&googleSheetsManager, &settingsDialog, &window, &transcodeQueuePanel, &shotViews, &assetsViews, &postingsViews, &trackerViews, &aggregatedTrackerView, &standaloneBrowsers]() {
+        try {
+            std::string parentFolderId = settingsDialog.GetParentFolderId();
+
+            if (googleSheetsManager.CreateMasterSpreadsheet(parentFolderId)) {
+                std::string spreadsheetId = googleSheetsManager.GetMasterSpreadsheetId();
+                settingsDialog.SetMasterSpreadsheetId(spreadsheetId);
+                g_masterSpreadsheetId = spreadsheetId;
+
+                // Auto-save settings so the spreadsheet ID is persisted
+                SaveSettings(window, true, true, true, transcodeQueuePanel.IsOpen(),
+                            shotViews, assetsViews, postingsViews, trackerViews, aggregatedTrackerView, standaloneBrowsers);
+
+                std::cout << "[Google Sheets] Spreadsheet created successfully: " << spreadsheetId << std::endl;
+                std::cout << "[Google Sheets] Spreadsheet ID saved to settings.json" << std::endl;
+            } else {
+                std::cerr << "[Google Sheets] Failed to create spreadsheet" << std::endl;
+            }
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[Google Sheets] Exception while creating spreadsheet: " << e.what() << std::endl;
+        }
+        catch (...) {
+            std::cerr << "[Google Sheets] Unknown exception while creating spreadsheet" << std::endl;
+        }
+    };
+
+    // Reset Google Sheets errors callback
+    settingsDialog.onResetGoogleSheetsErrors = [&googleSheetsManager]() {
+        std::cout << "[Google Sheets] Resetting all sync errors..." << std::endl;
+
+        if (g_operatingMode != "server") {
+            std::cout << "[Google Sheets] Cannot reset errors - not in server mode" << std::endl;
+            return;
+        }
+
+        try {
+            googleSheetsManager.ResetAllErrors();
+            std::cout << "[Google Sheets] All errors reset successfully" << std::endl;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[Google Sheets] Exception while resetting errors: " << e.what() << std::endl;
+        }
+    };
+
+    // Full Reset Google Sheets callback
+    settingsDialog.onFullResetGoogleSheets = [&googleSheetsManager]() {
+        std::cout << "[Google Sheets] Performing FULL RESET - deleting all sync data..." << std::endl;
+
+        if (g_operatingMode != "server") {
+            std::cout << "[Google Sheets] Cannot perform full reset - not in server mode" << std::endl;
+            return;
+        }
+
+        try {
+            googleSheetsManager.ResetAllSyncData();
+            std::cout << "[Google Sheets] Full reset complete - all sync data deleted" << std::endl;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[Google Sheets] Exception during full reset: " << e.what() << std::endl;
+        }
     };
 
     // Set up shot view callbacks for both file browsers
@@ -2329,7 +2717,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.7", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.8", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -2410,7 +2798,22 @@ int main(int argc, char** argv)
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Settings...")) {
-                    settingsDialog.RefreshValues(g_fontScale, "");  // Frame.io integration removed
+                    // Get auth status string
+                    std::string authStatus = "Not Authenticated";
+                    if (googleOAuthManager.IsAuthenticated()) {
+                        authStatus = "Authenticated";
+                    } else {
+                        auto status = googleOAuthManager.GetStatus();
+                        if (status == UFB::AuthStatus::Authenticating) {
+                            authStatus = "Authenticating";
+                        } else if (status == UFB::AuthStatus::Failed) {
+                            authStatus = "Failed";
+                        }
+                    }
+
+                    settingsDialog.RefreshValues(g_fontScale, "", g_operatingMode, g_clientTrackingDirectory,
+                                                g_googleClientId, g_googleClientSecret, g_googleSheetsEnabled,
+                                                g_masterSpreadsheetId, g_parentFolderId, authStatus);
                     settingsDialog.Show();
                 }
                 

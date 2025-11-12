@@ -122,6 +122,18 @@ public:
         m_localChangeCallback = callback;
     }
 
+    // Register callback for when subscriptions change (for client tracking)
+    void RegisterSubscriptionChangeCallback(std::function<void()> callback)
+    {
+        m_subscriptionChangeCallback = callback;
+    }
+
+    // Register callback for when jobs are unsubscribed (for server mode pruning)
+    void RegisterUnsubscribeCallback(std::function<void(const std::wstring& jobPath)> callback)
+    {
+        m_unsubscribeCallback = callback;
+    }
+
     // Metadata bridging - convert ShotMetadata to change log entry (for initial discovery)
     void BridgeToSyncCache(const ShotMetadata& metadata, const std::wstring& jobPath);
 
@@ -133,6 +145,8 @@ private:
     std::filesystem::path m_dbPath;
     MetadataManager* m_metaManager = nullptr;  // For bridging metadata systems
     std::function<void(const std::wstring& jobPath, uint64_t timestamp)> m_localChangeCallback;  // For immediate P2P notifications
+    std::function<void()> m_subscriptionChangeCallback;  // For client tracking file updates
+    std::function<void(const std::wstring& jobPath)> m_unsubscribeCallback;  // For server mode pruning
 
     // Thread safety - protect all database operations
     // Using recursive_mutex to allow re-entrant locking (some functions call other locked functions)

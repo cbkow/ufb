@@ -50,6 +50,9 @@ public:
     // Check if sync is running
     bool IsSyncing() const { return m_isRunning; }
 
+    // Get device ID
+    std::wstring GetDeviceId() const { return m_deviceId; }
+
 private:
     // Dependencies
     SubscriptionManager* m_subManager = nullptr;
