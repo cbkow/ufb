@@ -178,6 +178,13 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
     if (m_isShutdown)
         return;
 
+    // Handle deferred refresh (from operations during rendering)
+    if (m_needsRefresh)
+    {
+        m_needsRefresh = false;
+        RefreshTrackedItems();
+    }
+
     // Use close button and check if window was closed
     bool windowOpen = ImGui::Begin(title, &m_isOpen, ImGuiWindowFlags_None);
 
@@ -511,6 +518,9 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
             if (ImGui::DatePicker("##datepicker", currentDate, false))
             {
                 item.dueDate = TmToTimestamp(currentDate);
+                item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -520,6 +530,9 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
             if (ImGui::Button("Clear", ImVec2(120, 0)))
             {
                 item.dueDate = 0;
+                item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -573,6 +586,9 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
             if (m_noteEditorItemList && m_noteEditorItemIndex >= 0 && m_noteEditorItemIndex < m_noteEditorItemList->size())
             {
                 (*m_noteEditorItemList)[m_noteEditorItemIndex].note = m_noteEditorBuffer;
+                (*m_noteEditorItemList)[m_noteEditorItemIndex].modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata((*m_noteEditorItemList)[m_noteEditorItemIndex]);
@@ -622,6 +638,9 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
             if (m_linkEditorItemList && m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_linkEditorItemList->size())
             {
                 (*m_linkEditorItemList)[m_linkEditorItemIndex].links = m_linkEditorBuffer;
+                (*m_linkEditorItemList)[m_linkEditorItemIndex].modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata((*m_linkEditorItemList)[m_linkEditorItemIndex]);
@@ -637,6 +656,9 @@ void ProjectTrackerView::Draw(const char* title, HWND hwnd)
             if (m_linkEditorItemList && m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_linkEditorItemList->size())
             {
                 (*m_linkEditorItemList)[m_linkEditorItemIndex].links = "";
+                (*m_linkEditorItemList)[m_linkEditorItemIndex].modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata((*m_linkEditorItemList)[m_linkEditorItemIndex]);
@@ -818,11 +840,14 @@ bool ProjectTrackerView::PassesFilters(const UFB::ShotMetadata& item)
     if (item.shotPath == m_jobPath)
         return false;
 
-    // For manual tasks, ensure the path contains the task marker
+    // For manual tasks, ensure the path contains the task marker (check both slash types)
     if (item.itemType == "manual_task")
     {
-        if (item.shotPath.find(L"/__task_") == std::wstring::npos)
+        if (item.shotPath.find(L"/__task_") == std::wstring::npos &&
+            item.shotPath.find(L"\\__task_") == std::wstring::npos)
+        {
             return false;
+        }
     }
     else
     {
@@ -1104,6 +1129,15 @@ void ProjectTrackerView::DrawUnifiedTable()
                     else if (item.itemType == "posting" && onOpenPosting)
                         onOpenPosting(item.shotPath);
                 }
+
+                // Middle-click to open in new window
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+                {
+                    if (item.itemType != "manual_task" && onOpenInNewWindow)
+                    {
+                        onOpenInNewWindow(item.shotPath);
+                    }
+                }
             }
 
             if (isSelected)
@@ -1167,6 +1201,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                 if (ImGui::MenuItem("Un-track"))
                 {
                     item.isTracked = false;
+                    item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
                     if (m_subscriptionManager)
                     {
                         m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -1180,9 +1217,10 @@ void ProjectTrackerView::DrawUnifiedTable()
                     {
                         if (m_subscriptionManager)
                         {
-                            m_subscriptionManager->DeleteShotMetadata(item.shotPath);
+                            m_subscriptionManager->DeleteManualTask(item.id);
                         }
-                        RefreshTrackedItems();
+                        // Defer refresh to next frame (can't update m_allItems while rendering)
+                        m_needsRefresh = true;
                     }
                 }
 
@@ -1224,6 +1262,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                         if (ImGui::Selectable(statusOpt.name.c_str(), isSelected))
                         {
                             item.status = statusOpt.name;
+                            item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()
+                            ).count();
                             if (m_subscriptionManager)
                             {
                                 m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -1271,6 +1312,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                         if (ImGui::Selectable(catOpt.name.c_str(), isSelected))
                         {
                             item.category = catOpt.name;
+                            item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()
+                            ).count();
                             if (m_subscriptionManager)
                             {
                                 m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -1308,6 +1352,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                     if (ImGui::Selectable(priorityLabels[p], isSelected))
                     {
                         item.priority = priorityValues[p];
+                        item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count();
                         if (m_subscriptionManager)
                         {
                             m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -1333,6 +1380,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                 if (ImGui::Selectable("-", item.artist.empty()))
                 {
                     item.artist = "";
+                    item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()
+                    ).count();
                     if (m_subscriptionManager)
                     {
                         m_subscriptionManager->CreateOrUpdateShotMetadata(item);
@@ -1345,6 +1395,9 @@ void ProjectTrackerView::DrawUnifiedTable()
                     if (ImGui::Selectable(user.displayName.c_str(), isSelected))
                     {
                         item.artist = user.displayName;
+                        item.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()
+                        ).count();
                         if (m_subscriptionManager)
                         {
                             m_subscriptionManager->CreateOrUpdateShotMetadata(item);

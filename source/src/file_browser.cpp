@@ -2058,40 +2058,44 @@ void FileBrowser::DrawFileList(HWND hwnd)
     // Drop target for entire browser window (for drag and drop between browsers)
     if (ImGui::BeginDragDropTarget())
     {
-        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FILE_PATHS"))
+        // Guard: Don't accept if we just transitioned to OLE drag (prevents stale payload after external drop)
+        if (!m_transitionedToOLEDrag_list && !m_transitionedToOLEDrag_grid)
         {
-            // Get the newline-delimited list of paths
-            const char* allPathsUtf8 = (const char*)payload->Data;
-            std::string pathsString(allPathsUtf8);
-
-            std::wcout << L"[FileBrowser] Drop detected! Target: " << m_currentDirectory << std::endl;
-
-            // Parse newline-delimited paths
-            std::vector<std::wstring> sourcePaths;
-            std::istringstream iss(pathsString);
-            std::string line;
-
-            while (std::getline(iss, line))
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FILE_PATHS"))
             {
-                if (!line.empty())
+                // Get the newline-delimited list of paths
+                const char* allPathsUtf8 = (const char*)payload->Data;
+                std::string pathsString(allPathsUtf8);
+
+                std::wcout << L"[FileBrowser] Drop detected! Target: " << m_currentDirectory << std::endl;
+
+                // Parse newline-delimited paths
+                std::vector<std::wstring> sourcePaths;
+                std::istringstream iss(pathsString);
+                std::string line;
+
+                while (std::getline(iss, line))
                 {
-                    // Convert UTF-8 to wide string
-                    int wideSize = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
-                    if (wideSize > 0)
+                    if (!line.empty())
                     {
-                        std::wstring sourcePath;
-                        sourcePath.resize(wideSize);
-                        MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, &sourcePath[0], wideSize);
-                        sourcePath.resize(wideSize - 1); // Remove null terminator
-                        sourcePaths.push_back(sourcePath);
+                        // Convert UTF-8 to wide string
+                        int wideSize = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
+                        if (wideSize > 0)
+                        {
+                            std::wstring sourcePath;
+                            sourcePath.resize(wideSize);
+                            MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, &sourcePath[0], wideSize);
+                            sourcePath.resize(wideSize - 1); // Remove null terminator
+                            sourcePaths.push_back(sourcePath);
+                        }
                     }
                 }
-            }
 
-            // Copy all files/folders to current directory
-            if (!sourcePaths.empty())
-            {
-                CopyFilesToDestination(sourcePaths, m_currentDirectory);
+                // Copy all files/folders to current directory
+                if (!sourcePaths.empty())
+                {
+                    CopyFilesToDestination(sourcePaths, m_currentDirectory);
+                }
             }
         }
         ImGui::EndDragDropTarget();
@@ -2291,7 +2295,7 @@ void FileBrowser::DrawListView(HWND hwnd)
                 }
 
                 // Drag source for file/folder (supports multi-select)
-                static bool transitionedToOLEDrag = false;
+                // Note: m_transitionedToOLEDrag_list is now a class member (see file_browser.h)
 
 #if OLE_DRAG_IMMEDIATE_MODE
                 // IMMEDIATE OLE DRAG MODE: Skip ImGui drag and go straight to Windows OLE
@@ -2328,7 +2332,7 @@ void FileBrowser::DrawListView(HWND hwnd)
                 // HYBRID DRAG MODE: Start with ImGui drag, transition to OLE when leaving window
                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
                 {
-                    if (!transitionedToOLEDrag)
+                    if (!m_transitionedToOLEDrag_list)
                     {
                         // Change cursor to indicate drag operation
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -2385,14 +2389,14 @@ void FileBrowser::DrawListView(HWND hwnd)
                         if (mouseOutsideHWND && !filePaths.empty())
                         {
                             std::wcout << L"[FileBrowser] Mouse left HWND during drag, starting Windows OLE drag" << std::endl;
-                            transitionedToOLEDrag = true;
+                            m_transitionedToOLEDrag_list = true;
                             ImGui::EndDragDropSource();
 
                             // Start Windows native drag and drop (this will block until drag completes)
                             StartWindowsDragDrop(filePaths);
 
                             // Reset flag immediately after OLE drag completes
-                            transitionedToOLEDrag = false;
+                            m_transitionedToOLEDrag_list = false;
 
                             // Don't continue with ImGui drag
                         }
@@ -2438,7 +2442,7 @@ void FileBrowser::DrawListView(HWND hwnd)
                 else
                 {
                     // Drag ended - reset flag
-                    transitionedToOLEDrag = false;
+                    m_transitionedToOLEDrag_list = false;
                 }
 #endif // OLE_DRAG_IMMEDIATE_MODE
 
@@ -2457,6 +2461,16 @@ void FileBrowser::DrawListView(HWND hwnd)
 
                 // Render the context menu
                 ShowImGuiContextMenu(hwnd, entry);
+
+                // Middle-click to open in new window
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+                {
+                    if (onOpenInNewWindow)
+                    {
+                        std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
+                        onOpenInNewWindow(pathToOpen);
+                    }
+                }
 
                 // Size column with mono font and disabled color
                 ImGui::TableNextColumn();
@@ -2905,7 +2919,7 @@ void FileBrowser::DrawGridView(HWND hwnd)
         }
 
         // Drag source for file/folder (supports multi-select)
-        static bool transitionedToOLEDrag_grid = false;
+        // Note: m_transitionedToOLEDrag_grid is now a class member (see file_browser.h)
 
 #if OLE_DRAG_IMMEDIATE_MODE
         // IMMEDIATE OLE DRAG MODE: Skip ImGui drag and go straight to Windows OLE
@@ -2942,7 +2956,7 @@ void FileBrowser::DrawGridView(HWND hwnd)
         // HYBRID DRAG MODE: Start with ImGui drag, transition to OLE when leaving window
         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
         {
-            if (!transitionedToOLEDrag_grid)
+            if (!m_transitionedToOLEDrag_grid)
             {
                 // Change cursor to indicate drag operation
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -2999,14 +3013,14 @@ void FileBrowser::DrawGridView(HWND hwnd)
                 if (mouseOutsideHWND && !filePaths.empty())
                 {
                     std::wcout << L"[FileBrowser] Mouse left HWND during drag, starting Windows OLE drag" << std::endl;
-                    transitionedToOLEDrag_grid = true;
+                    m_transitionedToOLEDrag_grid = true;
                     ImGui::EndDragDropSource();
 
                     // Start Windows native drag and drop (this will block until drag completes)
                     StartWindowsDragDrop(filePaths);
 
                     // Reset flag immediately after OLE drag completes
-                    transitionedToOLEDrag_grid = false;
+                    m_transitionedToOLEDrag_grid = false;
 
                     // Don't continue with ImGui drag
                 }
@@ -3054,7 +3068,7 @@ void FileBrowser::DrawGridView(HWND hwnd)
         else
         {
             // Drag ended - reset flag
-            transitionedToOLEDrag_grid = false;
+            m_transitionedToOLEDrag_grid = false;
         }
 #endif // OLE_DRAG_IMMEDIATE_MODE
 
@@ -3202,6 +3216,16 @@ void FileBrowser::DrawGridView(HWND hwnd)
 
         // Render context menu
         ShowImGuiContextMenu(hwnd, entry);
+
+        // Middle-click to open in new window
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+        {
+            if (onOpenInNewWindow)
+            {
+                std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : std::filesystem::path(entry.fullPath).parent_path().wstring();
+                onOpenInNewWindow(pathToOpen);
+            }
+        }
 
         ImGui::PopID();
     }

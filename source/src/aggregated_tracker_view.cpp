@@ -1113,6 +1113,15 @@ void AggregatedTrackerView::DrawUnifiedTable()
                     else if (metadata.itemType == "posting" && onOpenPosting)
                         onOpenPosting(metadata.shotPath);
                 }
+
+                // Middle-click to open in new window
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+                {
+                    if (metadata.itemType != "manual_task" && onOpenInNewWindow)
+                    {
+                        onOpenInNewWindow(metadata.shotPath);
+                    }
+                }
             }
 
             if (isSelected)

@@ -141,6 +141,7 @@ private:
     // Shot metadata discovery
     void DiscoverAndTrackShots(const std::wstring& jobPath);
     void DiscoverShotsInCategory(const std::wstring& categoryPath, const std::wstring& jobPath, const std::string& folderType, const ProjectConfig& config);
+    void DiscoverManualTasks(const std::wstring& jobPath, const ProjectConfig& config);
 };
 
 } // namespace UFB

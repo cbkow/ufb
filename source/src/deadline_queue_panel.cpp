@@ -233,6 +233,16 @@ void DeadlineQueuePanel::DrawJobsTable()
                 m_selectedJobIndex = i;
             }
 
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path blendPath(job.blendFilePath);
+                    onOpenInNewWindow(blendPath.parent_path().wstring());
+                }
+            }
+
             // Right-click context menu
             if (ImGui::BeginPopupContextItem())
             {

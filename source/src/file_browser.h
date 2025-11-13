@@ -254,6 +254,10 @@ private:
     ImVec2 m_windowPos = {};
     ImVec2 m_windowSize = {};
 
+    // OLE drag transition flags (prevent internal drop after external drop)
+    bool m_transitionedToOLEDrag_list = false;  // For list view
+    bool m_transitionedToOLEDrag_grid = false;  // For grid view
+
     // Cut/copy state (static so it's shared across all browser instances)
     static std::vector<std::wstring> m_cutFiles;  // Files marked for cut operation
 

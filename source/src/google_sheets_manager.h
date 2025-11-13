@@ -2,6 +2,7 @@
 
 #include "google_oauth_manager.h"
 #include "project_config.h"
+#include "sheets_cache_manager.h"
 #include "nlohmann/json.hpp"
 #include <string>
 #include <vector>
@@ -55,7 +56,7 @@ struct JobSyncRecord {
     std::wstring jobPath;
     std::string spreadsheetId;
     std::string jobFolderId;  // Drive folder ID for this job
-    std::map<std::string, std::string> sheetIds;  // Map: itemType → sheetId (e.g., "shot" → "123456")
+    std::map<std::string, std::string> sheetIds;  // Map: folderType → sheetId (e.g., "3d" → "123456", "ae" → "789012", "assets" → "345678")
     uint64_t lastSyncTime;
     SheetSyncStatus status;
     int consecutiveErrorCount = 0;  // Error tracking for this job
@@ -102,6 +103,11 @@ public:
                   const std::string& range,
                   std::vector<SheetRow>& outRows);
 
+    // Read multiple ranges at once (batch get)
+    bool BatchGet(const std::string& spreadsheetId,
+                 const std::vector<std::string>& ranges,
+                 std::vector<std::vector<SheetRow>>& outResults);
+
     // Write data to a sheet (overwrites existing data)
     bool WriteRange(const std::string& spreadsheetId,
                    const std::string& range,
@@ -126,6 +132,10 @@ public:
     bool ClearRange(const std::string& spreadsheetId,
                    const std::string& range);
 
+    // Clear multiple ranges at once (batch clear)
+    bool BatchClear(const std::string& spreadsheetId,
+                   const std::vector<std::string>& ranges);
+
     // Sync all subscribed jobs to Google Sheets
     bool SyncAllJobs();
 
@@ -135,7 +145,7 @@ public:
     // Remove job from Google Sheets (delete row)
     bool RemoveJobFromSheets(const std::wstring& jobPath);
 
-    // Start background sync loop
+    // Start background sync loop (default: 60 seconds for responsive bidirectional sync)
     void StartSyncLoop(std::chrono::seconds interval = std::chrono::seconds(60));
     void StopSyncLoop();
 
@@ -180,6 +190,9 @@ private:
     std::map<std::wstring, JobSyncRecord> m_syncRecords;
     mutable std::mutex m_syncMutex;
 
+    // Cache manager for change detection
+    std::map<std::wstring, std::unique_ptr<SheetsCacheManager>> m_cacheManagers;  // Per-job cache managers
+
     // Background sync loop
     std::thread m_syncThread;
     std::atomic<bool> m_syncRunning;
@@ -212,7 +225,7 @@ private:
 
     // Convert job data to sheet rows
     std::vector<SheetRow> ConvertJobToSheetRows(const std::wstring& jobPath);
-    std::vector<SheetRow> ConvertJobToSheetRows(const std::wstring& jobPath, const std::string& itemType);
+    std::vector<SheetRow> ConvertJobToSheetRows(const std::wstring& jobPath, const std::string& folderType);
 
     // Find row index for a job in the sheet (deprecated)
     int FindJobRowIndex(const std::string& spreadsheetId,
@@ -224,7 +237,7 @@ private:
                         const std::wstring& shotPath);
 
     // Sheet formatting
-    bool SetupSheetFormatting(const std::string& spreadsheetId, const std::string& sheetId, const std::wstring& jobPath, const std::string& itemType);
+    bool SetupSheetFormatting(const std::string& spreadsheetId, const std::string& sheetId, const std::wstring& jobPath, const std::string& folderType);
     bool SetColumnDataValidation(const std::string& spreadsheetId, const std::string& sheetId,
                                  int columnIndex, const std::vector<std::string>& options);
     bool SetColumnDataValidationWithColors(const std::string& spreadsheetId, const std::string& sheetId,
@@ -237,16 +250,24 @@ private:
     std::vector<std::string> GetAllStatusOptions();
     std::vector<std::string> GetAllCategoryOptions();
 
-    // Get item-type-specific options with colors from per-job config
-    std::vector<StatusOption> GetStatusOptionsForItemType(const std::wstring& jobPath, const std::string& itemType);
-    std::vector<CategoryOption> GetCategoryOptionsForItemType(const std::wstring& jobPath, const std::string& itemType);
+    // Get folder-type-specific options with colors from per-job config
+    std::vector<StatusOption> GetStatusOptionsForFolderType(const std::wstring& jobPath, const std::string& folderType);
+    std::vector<CategoryOption> GetCategoryOptionsForFolderType(const std::wstring& jobPath, const std::string& folderType);
 
     // Error handling helper
     void CheckAndDisableJob(JobSyncRecord& record, const std::string& jobName);
 
+    // Bidirectional sync helpers
+    SheetsCacheManager* GetOrCreateCacheManager(const std::wstring& jobPath);
+    bool ApplyRemoteChangesToLocal(const std::wstring& jobPath, const std::string& folderType,
+                                   const std::vector<CachedSheetRow>& remoteChanges);
+    bool ConflictResolve(const CachedSheetRow& localRow, const CachedSheetRow& remoteRow,
+                        CachedSheetRow& outWinner, bool& outLocalWins);
+
     // Utility functions
     std::string WideToUtf8(const std::wstring& wstr) const;
     std::wstring Utf8ToWide(const std::string& str) const;
+    std::string ExtractNameFromPath(const std::wstring& path) const;
 
     uint64_t GetCurrentTimestamp() const;
 };

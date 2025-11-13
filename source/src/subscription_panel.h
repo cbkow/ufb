@@ -25,6 +25,7 @@ public:
     std::function<void(const std::wstring& path)> onNavigateToBrowser1;
     std::function<void(const std::wstring& path)> onNavigateToBrowser2;
     std::function<void(const std::wstring& jobPath, const std::wstring& jobName)> onOpenProjectTracker;
+    std::function<void(const std::wstring& jobPath, const std::wstring& jobName)> onOpenBackupRestore;
 
 private:
     BookmarkManager* m_bookmarkManager = nullptr;

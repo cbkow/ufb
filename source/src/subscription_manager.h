@@ -94,6 +94,7 @@ public:
 
     // Shot metadata operations
     bool CreateOrUpdateShotMetadata(const ShotMetadata& metadata);
+    bool UpdateTrackedItemFromSheets(const std::wstring& jobPath, const ShotMetadata& item);  // Apply remote Sheets changes
     std::optional<ShotMetadata> GetShotMetadata(const std::wstring& shotPath);
     std::vector<ShotMetadata> GetAllShotMetadata(const std::wstring& jobPath);
     std::vector<ShotMetadata> GetShotMetadataByType(const std::wstring& jobPath, const std::string& folderType);

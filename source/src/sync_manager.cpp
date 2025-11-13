@@ -840,6 +840,9 @@ void SyncManager::DiscoverAndTrackShots(const std::wstring& jobPath)
             DiscoverShotsInCategory(categoryPath.wstring(), jobPath, typeName, config);
         }
     }
+
+    // Discover manual tasks in .ufb/tasks/ folder
+    DiscoverManualTasks(jobPath, config);
 }
 
 void SyncManager::DiscoverShotsInCategory(const std::wstring& categoryPath, const std::wstring& jobPath, const std::string& folderType, const ProjectConfig& config)
@@ -898,6 +901,79 @@ void SyncManager::DiscoverShotsInCategory(const std::wstring& categoryPath, cons
     catch (const std::exception& e)
     {
         std::cerr << "[SyncManager] Error discovering shots in " << WideToUtf8(categoryPath) << ": " << e.what() << std::endl;
+    }
+}
+
+void SyncManager::DiscoverManualTasks(const std::wstring& jobPath, const ProjectConfig& config)
+{
+    try
+    {
+        std::filesystem::path tasksDir = std::filesystem::path(jobPath) / L".ufb" / L"tasks";
+
+        if (!std::filesystem::exists(tasksDir) || !std::filesystem::is_directory(tasksDir))
+        {
+            return;  // No tasks directory yet
+        }
+
+        // Iterate through all task folders
+        for (const auto& entry : std::filesystem::directory_iterator(tasksDir))
+        {
+            if (!entry.is_directory())
+                continue;
+
+            std::wstring taskFolderName = entry.path().filename().wstring();
+
+            // Only process folders with __task_ prefix
+            if (taskFolderName.find(L"__task_") != 0)
+                continue;
+
+            std::wstring taskPath = entry.path().wstring();
+
+            // Check if metadata already exists for this task
+            auto existingMetadata = m_subManager->GetShotMetadata(taskPath);
+
+            if (!existingMetadata.has_value())
+            {
+                // Create new metadata entry for discovered task
+                ShotMetadata metadata;
+                metadata.shotPath = taskPath;
+                metadata.itemType = "manual_task";
+                metadata.folderType = "ae";  // Use AE folder type for colors and dropdowns
+                metadata.priority = 2;  // Default to medium priority
+                metadata.isTracked = true;  // Tasks are always tracked
+                metadata.createdTime = GetCurrentTimeMs();
+                metadata.modifiedTime = GetCurrentTimeMs();
+
+                // Apply default status and category from template (use AE folder config)
+                auto folderConfigOpt = config.GetFolderTypeConfig("ae");
+                if (folderConfigOpt.has_value())
+                {
+                    const auto& folderConfig = folderConfigOpt.value();
+
+                    if (!folderConfig.statusOptions.empty())
+                    {
+                        metadata.status = folderConfig.statusOptions[0].name;
+                    }
+
+                    if (!folderConfig.categoryOptions.empty())
+                    {
+                        metadata.category = folderConfig.categoryOptions[0].name;
+                    }
+                }
+
+                // Create the metadata entry in local SQLite
+                m_subManager->CreateOrUpdateShotMetadata(metadata);
+
+                // Bridge to change logs immediately (for sync and P2P)
+                m_subManager->BridgeToSyncCache(metadata, jobPath);
+
+                std::wcout << L"[SyncManager] Discovered manual task: " << taskPath << L" - added to change logs" << std::endl;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SyncManager] Error discovering manual tasks in " << WideToUtf8(jobPath) << ": " << e.what() << std::endl;
     }
 }
 

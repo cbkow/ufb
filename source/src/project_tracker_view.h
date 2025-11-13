@@ -61,6 +61,7 @@ private:
     bool m_isOpen = true;
     bool m_isShutdown = false;  // Prevent callbacks during cleanup
     bool m_isRendering = false; // Prevent modifying m_allItems during iteration
+    bool m_needsRefresh = false; // Deferred refresh flag
     // Job path and name
     std::wstring m_jobPath;      // e.g., "D:\Projects\MyJob"
     std::wstring m_jobName;      // e.g., "MyJob"

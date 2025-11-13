@@ -7,6 +7,7 @@
 #include <ctime>
 #include <thread>
 #include <chrono>
+#include <set>
 
 namespace UFB {
 
@@ -20,16 +21,6 @@ BackupManager::~BackupManager()
 
 bool BackupManager::CreateBackup(const std::wstring& jobPath)
 {
-    // Validate current shots.json
-    std::filesystem::path shotsJsonPath = std::filesystem::path(jobPath) / L".ufb" / L"shots.json";
-
-    ValidationResult validation = ValidateJSON(shotsJsonPath.wstring());
-    if (validation != ValidationResult::Valid)
-    {
-        std::cerr << "Cannot backup: shots.json is invalid" << std::endl;
-        return false;
-    }
-
     // Ensure backup directory exists
     std::filesystem::path backupDir = GetBackupDirectory(jobPath);
     if (!EnsureDirectoryExists(backupDir))
@@ -40,41 +31,55 @@ bool BackupManager::CreateBackup(const std::wstring& jobPath)
 
     // Create backup filename with timestamp
     std::wstring timestamp = GetTimestampString();
-    std::wstring backupFilename = L"shots_" + timestamp + L".json"; // .gz extension for future compression
-    std::filesystem::path backupPath = backupDir / backupFilename;
 
-    // Read shots.json
-    std::ifstream sourceFile(shotsJsonPath, std::ios::binary);
-    if (!sourceFile.is_open())
+    int shotCount = 0;
+    size_t shotsJsonSize = 0;
+
+    // OPTIONAL: Backup legacy shots.json if it exists (for migration compatibility)
+    std::filesystem::path shotsJsonPath = std::filesystem::path(jobPath) / L".ufb" / L"shots.json";
+    if (std::filesystem::exists(shotsJsonPath))
     {
-        std::cerr << "Failed to open shots.json for backup" << std::endl;
-        return false;
+        ValidationResult validation = ValidateJSON(shotsJsonPath.wstring());
+        if (validation == ValidationResult::Valid)
+        {
+            std::wstring backupFilename = L"shots_" + timestamp + L".json";
+            std::filesystem::path backupPath = backupDir / backupFilename;
+
+            // Read shots.json
+            std::ifstream sourceFile(shotsJsonPath, std::ios::binary);
+            if (sourceFile.is_open())
+            {
+                // Get file size and shot count
+                sourceFile.seekg(0, std::ios::end);
+                shotsJsonSize = sourceFile.tellg();
+                sourceFile.seekg(0, std::ios::beg);
+
+                // Parse JSON to get shot count
+                try
+                {
+                    nlohmann::json doc;
+                    sourceFile >> doc;
+                    sourceFile.close();
+                    shotCount = doc.contains("shots") ? doc["shots"].size() : 0;
+
+                    // Copy file
+                    std::filesystem::copy_file(shotsJsonPath, backupPath, std::filesystem::copy_options::overwrite_existing);
+                    std::cout << "Backed up legacy shots.json (" << shotCount << " shots)" << std::endl;
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr << "Warning: Failed to backup legacy shots.json: " << e.what() << std::endl;
+                    // Continue with other backups
+                }
+            }
+        }
+        else
+        {
+            std::cout << "Skipping invalid shots.json file" << std::endl;
+        }
     }
 
-    // Get file size and shot count
-    sourceFile.seekg(0, std::ios::end);
-    size_t fileSize = sourceFile.tellg();
-    sourceFile.seekg(0, std::ios::beg);
-
-    // Parse JSON to get shot count
-    nlohmann::json doc;
-    try
-    {
-        sourceFile >> doc;
-        sourceFile.close();
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "Failed to parse JSON for backup: " << e.what() << std::endl;
-        return false;
-    }
-
-    int shotCount = doc.contains("shots") ? doc["shots"].size() : 0;
-
-    // Copy file (TODO: compress in future)
-    std::filesystem::copy_file(shotsJsonPath, backupPath, std::filesystem::copy_options::overwrite_existing);
-
-    // NEW: Backup change logs, archives, and snapshot
+    // Backup change logs, archives, and snapshot
     std::filesystem::path changesDir = std::filesystem::path(jobPath) / L".ufb" / L"changes";
     if (std::filesystem::exists(changesDir))
     {
@@ -90,10 +95,110 @@ bool BackupManager::CreateBackup(const std::wstring& jobPath)
                                   std::filesystem::copy_options::overwrite_existing);
 
             std::cout << "Backed up change logs and archives to: " << WideToUtf8(changesBackupDirName) << std::endl;
+
+            // Count items from change logs (for new architecture)
+            std::set<std::string> allUniquePaths;  // Collect unique paths across ALL change logs
+            int changeLogFilesProcessed = 0;
+            size_t changeLogSize = 0;
+
+            std::cout << "[Backup] Counting items from change logs in: " << WideToUtf8(changesDir.wstring()) << std::endl;
+
+            for (const auto& entry : std::filesystem::directory_iterator(changesDir))
+            {
+                if (entry.path().extension() == ".json")
+                {
+                    try
+                    {
+                        changeLogSize += entry.file_size();
+                        changeLogFilesProcessed++;
+
+                        std::ifstream file(entry.path());
+                        if (file.is_open())
+                        {
+                            nlohmann::json doc;
+                            file >> doc;
+
+                            // Change logs are arrays of change entries
+                            if (doc.is_array())
+                            {
+                                // Collect all shotPaths from this file
+                                int entriesInThisFile = 0;
+                                for (const auto& changeEntry : doc)
+                                {
+                                    if (changeEntry.contains("shotPath"))
+                                    {
+                                        allUniquePaths.insert(changeEntry["shotPath"].get<std::string>());
+                                        entriesInThisFile++;
+                                    }
+                                }
+
+                                std::cout << "[Backup]   - " << entry.path().filename() << ": " << entriesInThisFile << " entries" << std::endl;
+                            }
+                            else
+                            {
+                                std::cout << "[Backup]   - " << entry.path().filename() << ": Not an array (unexpected format)" << std::endl;
+                            }
+                        }
+                    }
+                    catch (const std::exception& e)
+                    {
+                        // Skip invalid files
+                        std::cerr << "[Backup] Warning: Failed to parse change log " << entry.path() << ": " << e.what() << std::endl;
+                    }
+                }
+            }
+
+            int changeLogItemCount = allUniquePaths.size();
+            std::cout << "[Backup] Processed " << changeLogFilesProcessed << " change log files, " << changeLogItemCount << " unique items total" << std::endl;
+            std::cout << "[Backup] shotCount before update: " << shotCount << std::endl;
+
+            // Use change log count if we didn't get a count from legacy shots.json
+            if (shotCount == 0 && changeLogItemCount > 0)
+            {
+                shotCount = changeLogItemCount;
+                shotsJsonSize = changeLogSize;
+                std::cout << "[Backup] Updated shotCount to " << shotCount << " from change logs" << std::endl;
+            }
+            else if (shotCount > 0)
+            {
+                std::cout << "[Backup] Keeping shotCount=" << shotCount << " from legacy shots.json" << std::endl;
+            }
+            else
+            {
+                std::cout << "[Backup] Warning: No items found in change logs or shots.json" << std::endl;
+            }
         }
         catch (const std::exception& e)
         {
             std::cerr << "Warning: Failed to backup change logs: " << e.what() << std::endl;
+            // Continue with backup even if this fails
+        }
+    }
+    else
+    {
+        std::cout << "Warning: No change logs directory found to backup" << std::endl;
+    }
+
+    // NEW: Backup manual task folders (.ufb/tasks/)
+    std::filesystem::path tasksDir = std::filesystem::path(jobPath) / L".ufb" / L"tasks";
+    if (std::filesystem::exists(tasksDir))
+    {
+        // Create tasks backup subdirectory
+        std::wstring tasksBackupDirName = L"tasks_" + timestamp;
+        std::filesystem::path tasksBackupDir = backupDir / tasksBackupDirName;
+
+        try
+        {
+            // Copy entire tasks directory (includes all UUID-based task folders)
+            std::filesystem::copy(tasksDir, tasksBackupDir,
+                                  std::filesystem::copy_options::recursive |
+                                  std::filesystem::copy_options::overwrite_existing);
+
+            std::cout << "Backed up manual task folders to: " << WideToUtf8(tasksBackupDirName) << std::endl;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Warning: Failed to backup task folders: " << e.what() << std::endl;
             // Continue with backup even if this fails
         }
     }
@@ -103,11 +208,13 @@ bool BackupManager::CreateBackup(const std::wstring& jobPath)
 
     BackupInfo info;
     info.timestamp = GetCurrentTimeMs();
-    info.filename = backupFilename;
+    info.filename = L"backup_" + timestamp;  // Generic backup name (includes change logs + tasks)
     info.createdBy = GetDeviceID();
-    info.shotCount = shotCount;
-    info.uncompressedSize = fileSize;
+    info.shotCount = shotCount;  // From change logs (or legacy shots.json)
+    info.uncompressedSize = shotsJsonSize;  // From change logs (or legacy shots.json)
     info.date = GetDateString();
+
+    std::cout << "[Backup] Writing metadata - shotCount: " << info.shotCount << ", size: " << info.uncompressedSize << " bytes" << std::endl;
 
     nlohmann::json backupEntry;
     backupEntry["timestamp"] = info.timestamp;
@@ -125,7 +232,7 @@ bool BackupManager::CreateBackup(const std::wstring& jobPath)
         return false;
     }
 
-    std::cout << "Backup created: " << WideToUtf8(backupFilename) << " (" << shotCount << " shots)" << std::endl;
+    std::cout << "[Backup] Backup created successfully with " << info.shotCount << " items at: " << WideToUtf8(timestamp) << std::endl;
 
     return true;
 }
@@ -286,32 +393,153 @@ std::vector<BackupInfo> BackupManager::ListBackups(const std::wstring& jobPath)
 bool BackupManager::RestoreBackup(const std::wstring& jobPath, const std::wstring& backupFilename)
 {
     std::filesystem::path backupDir = GetBackupDirectory(jobPath);
-    std::filesystem::path backupPath = backupDir / backupFilename;
-    std::filesystem::path shotsJsonPath = std::filesystem::path(jobPath) / L".ufb" / L"shots.json";
 
-    // Validate backup file
-    ValidationResult validation = ValidateJSON(backupPath.wstring());
-    if (validation != ValidationResult::Valid)
+    // Extract timestamp from backupFilename (format: backup_YYYY-MM-DD_HHMMSS or shots_YYYY-MM-DD_HHMMSS.json)
+    std::wstring timestamp;
+    size_t underscorePos = backupFilename.find(L'_');
+    if (underscorePos != std::wstring::npos)
     {
-        std::cerr << "Backup file is corrupted!" << std::endl;
+        timestamp = backupFilename.substr(underscorePos + 1);
+        // Remove .json extension if present
+        size_t dotPos = timestamp.find(L'.');
+        if (dotPos != std::wstring::npos)
+        {
+            timestamp = timestamp.substr(0, dotPos);
+        }
+    }
+    else
+    {
+        std::cerr << "Invalid backup filename format" << std::endl;
         return false;
     }
 
-    // Create "corrupt" backup of current file (if it exists)
-    if (std::filesystem::exists(shotsJsonPath))
+    bool restoredAny = false;
+
+    // OPTIONAL: Restore legacy shots.json if it exists
+    std::wstring shotsJsonFilename = L"shots_" + timestamp + L".json";
+    std::filesystem::path shotsJsonBackupPath = backupDir / shotsJsonFilename;
+    std::filesystem::path shotsJsonPath = std::filesystem::path(jobPath) / L".ufb" / L"shots.json";
+
+    if (std::filesystem::exists(shotsJsonBackupPath))
     {
-        std::wstring corruptBackup = L"corrupt_" + GetTimestampString() + L".json";
-        std::filesystem::path corruptPath = backupDir / corruptBackup;
-        std::filesystem::copy_file(shotsJsonPath, corruptPath, std::filesystem::copy_options::overwrite_existing);
+        // Validate backup file
+        ValidationResult validation = ValidateJSON(shotsJsonBackupPath.wstring());
+        if (validation == ValidationResult::Valid)
+        {
+            // Create "corrupt" backup of current file (if it exists)
+            if (std::filesystem::exists(shotsJsonPath))
+            {
+                std::wstring corruptBackup = L"corrupt_" + GetTimestampString() + L".json";
+                std::filesystem::path corruptPath = backupDir / corruptBackup;
+                try
+                {
+                    std::filesystem::copy_file(shotsJsonPath, corruptPath, std::filesystem::copy_options::overwrite_existing);
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr << "Warning: Failed to backup current shots.json: " << e.what() << std::endl;
+                }
+            }
+
+            // Copy backup to shots.json
+            try
+            {
+                std::filesystem::copy_file(shotsJsonBackupPath, shotsJsonPath, std::filesystem::copy_options::overwrite_existing);
+                std::cout << "Restored legacy shots.json" << std::endl;
+                restoredAny = true;
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "Warning: Failed to restore shots.json: " << e.what() << std::endl;
+            }
+        }
+        else
+        {
+            std::cerr << "Warning: Backup shots.json is corrupted, skipping" << std::endl;
+        }
     }
 
-    // Copy backup to shots.json
-    std::filesystem::copy_file(backupPath, shotsJsonPath, std::filesystem::copy_options::overwrite_existing);
+    // Restore change logs
+    std::wstring changesBackupDirName = L"changes_" + timestamp;
+    std::filesystem::path changesBackupDir = backupDir / changesBackupDirName;
+    std::filesystem::path changesDir = std::filesystem::path(jobPath) / L".ufb" / L"changes";
+
+    if (std::filesystem::exists(changesBackupDir))
+    {
+        try
+        {
+            // Remove existing changes directory
+            if (std::filesystem::exists(changesDir))
+            {
+                std::filesystem::remove_all(changesDir);
+            }
+
+            // Copy backup to changes directory
+            std::filesystem::copy(changesBackupDir, changesDir,
+                                  std::filesystem::copy_options::recursive |
+                                  std::filesystem::copy_options::overwrite_existing);
+
+            std::cout << "Restored change logs and archives" << std::endl;
+
+            // Update all timestamps to "now" to make restored items the latest version
+            // This ensures the restored backup overrides any changes on other devices during sync
+            uint64_t now = GetCurrentTimeMs();
+            UpdateChangeLogTimestamps(changesDir, now);
+            std::cout << "Updated all restored items to current timestamp (force as latest)" << std::endl;
+
+            restoredAny = true;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Error: Failed to restore change logs: " << e.what() << std::endl;
+            return false;
+        }
+    }
+    else
+    {
+        std::cout << "Warning: No change logs backup found for this timestamp" << std::endl;
+    }
+
+    // NEW: Restore task folders
+    std::wstring tasksBackupDirName = L"tasks_" + timestamp;
+    std::filesystem::path tasksBackupDir = backupDir / tasksBackupDirName;
+    std::filesystem::path tasksDir = std::filesystem::path(jobPath) / L".ufb" / L"tasks";
+
+    if (std::filesystem::exists(tasksBackupDir))
+    {
+        try
+        {
+            // Remove existing tasks directory
+            if (std::filesystem::exists(tasksDir))
+            {
+                std::filesystem::remove_all(tasksDir);
+            }
+
+            // Copy backup to tasks directory
+            std::filesystem::copy(tasksBackupDir, tasksDir,
+                                  std::filesystem::copy_options::recursive |
+                                  std::filesystem::copy_options::overwrite_existing);
+
+            std::cout << "Restored manual task folders" << std::endl;
+            restoredAny = true;
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "Warning: Failed to restore task folders: " << e.what() << std::endl;
+            // Continue - not fatal
+        }
+    }
+
+    if (!restoredAny)
+    {
+        std::cerr << "Error: No backup components found to restore" << std::endl;
+        return false;
+    }
 
     // Log restoration
     LogRestoration(jobPath, backupFilename);
 
-    std::cout << "Backup restored: " << WideToUtf8(backupFilename) << std::endl;
+    std::cout << "Backup restored successfully from: " << WideToUtf8(timestamp) << std::endl;
 
     return true;
 }
@@ -503,6 +731,73 @@ std::wstring BackupManager::GetTimestampString()
     std::wstringstream ss;
     ss << std::put_time(&tm, L"%Y-%m-%d_%H%M%S");
     return ss.str();
+}
+
+void BackupManager::UpdateChangeLogTimestamps(const std::filesystem::path& changesDir, uint64_t newTimestamp)
+{
+    try
+    {
+        // Iterate through all .json files in changes directory
+        for (const auto& entry : std::filesystem::directory_iterator(changesDir))
+        {
+            if (entry.path().extension() != ".json")
+                continue;
+
+            // Read the change log JSON
+            std::ifstream file(entry.path());
+            if (!file.is_open())
+            {
+                std::cerr << "[BackupManager] Failed to open change log: " << entry.path() << std::endl;
+                continue;
+            }
+
+            nlohmann::json doc;
+            try
+            {
+                file >> doc;
+                file.close();
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "[BackupManager] Failed to parse change log: " << entry.path() << " - " << e.what() << std::endl;
+                continue;
+            }
+
+            // Update modifiedTime for all items in the change log
+            bool modified = false;
+            if (doc.contains("items") && doc["items"].is_array())
+            {
+                for (auto& item : doc["items"])
+                {
+                    if (item.is_object())
+                    {
+                        item["modifiedTime"] = newTimestamp;
+                        modified = true;
+                    }
+                }
+            }
+
+            // Write back if we made changes
+            if (modified)
+            {
+                std::ofstream outFile(entry.path());
+                if (outFile.is_open())
+                {
+                    outFile << doc.dump(2);
+                    outFile.close();
+                    std::cout << "[BackupManager] Updated timestamps in: " << entry.path().filename() << std::endl;
+                }
+                else
+                {
+                    std::cerr << "[BackupManager] Failed to write updated change log: " << entry.path() << std::endl;
+                }
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[BackupManager] Error updating change log timestamps: " << e.what() << std::endl;
+    }
 }
 
 bool BackupManager::IsStalelock(const std::filesystem::path& lockFile)

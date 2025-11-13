@@ -76,6 +76,7 @@ private:
     bool IsStalelock(const std::filesystem::path& lockFile);
     int GetDaysOld(uint64_t timestamp);
     bool IsSunday(uint64_t timestamp);
+    void UpdateChangeLogTimestamps(const std::filesystem::path& changesDir, uint64_t newTimestamp);
 
     // Compression (future - for now just copy)
     bool CompressFile(const std::filesystem::path& source, const std::filesystem::path& dest);

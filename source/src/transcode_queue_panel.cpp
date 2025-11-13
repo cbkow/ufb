@@ -229,6 +229,16 @@ void TranscodeQueuePanel::RenderQueueTable() {
                 m_selectedJobId = job->id;
             }
 
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path inputPath(job->inputPath);
+                    onOpenInNewWindow(inputPath.parent_path().wstring());
+                }
+            }
+
             // Right-click context menu
             if (ImGui::BeginPopupContextItem()) {
                 if (job->status == TranscodeJob::Status::PROCESSING && ImGui::MenuItem("Cancel")) {

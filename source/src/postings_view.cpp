@@ -117,6 +117,10 @@ void PostingsView::Initialize(const std::wstring& postingsFolderPath, const std:
         if (onOpenInBrowser2) onOpenInBrowser2(path);
     };
 
+    m_fileBrowser.onOpenInNewWindow = [this](const std::wstring& path) {
+        if (onOpenInNewWindow) onOpenInNewWindow(path);
+    };
+
     // Load or create ProjectConfig for this job
     std::wstring jobPath = std::filesystem::path(postingsFolderPath).parent_path().wstring();
     m_projectConfig = new UFB::ProjectConfig();
@@ -970,6 +974,17 @@ void PostingsView::DrawPostingsPanel(HWND hwnd)
             }
 
             ShowImGuiContextMenu(hwnd, entry);
+
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path targetPath(entry.fullPath);
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                    onOpenInNewWindow(pathToOpen);
+                }
+            }
 
             // Push mono font for all metadata columns (not the name)
             if (font_mono)

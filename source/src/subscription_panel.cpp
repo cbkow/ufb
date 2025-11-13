@@ -258,6 +258,14 @@ void SubscriptionPanel::DrawJobsSection()
 
                     ImGui::PopStyleColor();
 
+                    if (ImGui::MenuItem("Backup & Restore"))
+                    {
+                        if (onOpenBackupRestore)
+                        {
+                            onOpenBackupRestore(sub.jobPath, sub.jobName);
+                        }
+                    }
+
                     ImGui::Separator();
 
                     if (ImGui::MenuItem("Unsubscribe"))

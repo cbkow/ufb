@@ -565,7 +565,30 @@ bool SubscriptionManager::CreateOrUpdateShotMetadata(const ShotMetadata& metadat
                    << metadata.shotPath << L" - not bridging to sync cache" << std::endl;
     }
 
+    // Notify observers that metadata changed (for UI auto-refresh)
+    if (m_metaManager && jobPath.has_value())
+    {
+        m_metaManager->NotifyObservers(jobPath.value());
+    }
+
     return true;
+}
+
+bool SubscriptionManager::UpdateTrackedItemFromSheets(const std::wstring& jobPath, const ShotMetadata& item)
+{
+    // Item is already ShotMetadata, just ensure it's marked as tracked
+    ShotMetadata metadata = item;
+    metadata.isTracked = true;
+
+    // Call existing update method which also writes to change log
+    bool success = CreateOrUpdateShotMetadata(metadata);
+
+    if (success)
+    {
+        std::wcout << L"[SubscriptionManager] Applied remote Sheets change: " << item.shotPath << std::endl;
+    }
+
+    return success;
 }
 
 std::optional<ShotMetadata> SubscriptionManager::GetShotMetadata(const std::wstring& shotPath)
@@ -811,12 +834,21 @@ SyncStatus SubscriptionManager::StringToSyncStatus(const std::string& str)
 
 std::string SubscriptionManager::InferItemTypeFromPath(const std::wstring& shotPath)
 {
-    // Check for manual task marker (handle both /__task_ and leading __task_)
+    // Check for NEW manual task marker (.ufb/tasks/ folder) - prioritize this format
+    if (shotPath.find(L"/.ufb/tasks/") != std::wstring::npos ||
+        shotPath.find(L"\\.ufb\\tasks\\") != std::wstring::npos ||
+        shotPath.find(L".ufb\\tasks\\") != std::wstring::npos)
+    {
+        std::wcout << L"[InferItemType] Detected MANUAL_TASK from .ufb/tasks/ path: " << shotPath << std::endl;
+        return "manual_task";
+    }
+
+    // Check for LEGACY manual task marker (backward compatibility with old __task_ prefix)
     if (shotPath.find(L"/__task_") != std::wstring::npos ||
         shotPath.find(L"\\__task_") != std::wstring::npos ||
         shotPath.find(L"__task_") == 0)
     {
-        std::wcout << L"[InferItemType] Detected MANUAL_TASK from __task_ prefix: " << shotPath << std::endl;
+        std::wcout << L"[InferItemType] Detected MANUAL_TASK from legacy __task_ prefix: " << shotPath << std::endl;
         return "manual_task";
     }
 
@@ -853,6 +885,8 @@ std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstrin
 {
     std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
 
+    std::wcout << L"[GetTrackedItems] Called with jobPath: " << jobPath << L", itemType: " << Utf8ToWide(itemType) << std::endl;
+
     std::vector<ShotMetadata> results;
     std::string jobPathUtf8 = WideToUtf8(jobPath);
 
@@ -870,15 +904,22 @@ std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstrin
     sqlite3_bind_text(stmt, 1, jobPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, itemType.c_str(), -1, SQLITE_TRANSIENT);
 
+    std::wcout << L"[GetTrackedItems] SQL query: WHERE shot_path LIKE '" << jobPath << L"%' AND item_type = '" << Utf8ToWide(itemType) << L"' AND is_tracked = 1" << std::endl;
+
+    int rowCount = 0;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
     {
+        rowCount++;
         ShotMetadata metadata;
         metadata.id = sqlite3_column_int(stmt, 0);
         metadata.shotPath = Utf8ToWide(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
 
         const char* itemTypeStr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        std::wcout << L"[GetTrackedItems] Row " << rowCount << L": path=" << metadata.shotPath << L", DB itemType=" << Utf8ToWide(itemTypeStr ? itemTypeStr : "NULL") << std::endl;
+
         // Always infer from path to fix any corrupted data
         metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
+        std::wcout << L"[GetTrackedItems] Row " << rowCount << L": After InferItemTypeFromPath, itemType=" << Utf8ToWide(metadata.itemType) << std::endl;
 
         metadata.folderType = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
@@ -908,6 +949,9 @@ std::vector<ShotMetadata> SubscriptionManager::GetTrackedItems(const std::wstrin
     }
 
     sqlite3_finalize(stmt);
+
+    std::wcout << L"[GetTrackedItems] Found " << rowCount << L" rows in database, returning " << results.size() << L" results" << std::endl;
+
     return results;
 }
 
@@ -974,16 +1018,49 @@ std::vector<ShotMetadata> SubscriptionManager::GetAllTrackedItems(const std::wst
 
 bool SubscriptionManager::CreateManualTask(const std::wstring& jobPath, const std::string& taskName, const ShotMetadata& metadata)
 {
-    // Create a unique path for the manual task using job path + task name
     uint64_t timestamp = GetCurrentTimeMs();
 
-    // Convert task name to wide string
-    int wideLen = MultiByteToWideChar(CP_UTF8, 0, taskName.c_str(), -1, nullptr, 0);
-    std::wstring taskNameWide(wideLen - 1, 0);
-    MultiByteToWideChar(CP_UTF8, 0, taskName.c_str(), -1, &taskNameWide[0], wideLen);
+    // Generate UUID for this task to ensure uniqueness across devices
+    std::string uuid = GenerateDeviceID();
+    std::wstring uuidWide = Utf8ToWide(uuid);
 
-    // Use task name in path for better display
-    std::wstring taskPath = jobPath + L"/__task_" + taskNameWide;
+    // Convert task name to wide string
+    std::wstring taskNameWide = Utf8ToWide(taskName);
+
+    // Create folder name with __task_ prefix, task name, and UUID
+    std::wstring folderName = L"__task_" + taskNameWide + L"_" + uuidWide;
+
+    // Ensure .ufb/tasks/ directory exists
+    std::filesystem::path tasksDir = std::filesystem::path(jobPath) / L".ufb" / L"tasks";
+    try
+    {
+        if (!std::filesystem::exists(tasksDir))
+        {
+            std::filesystem::create_directories(tasksDir);
+            std::wcout << L"[SubscriptionManager] Created tasks directory: " << tasksDir.wstring() << std::endl;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Failed to create tasks directory: " << e.what() << std::endl;
+        return false;
+    }
+
+    // Create physical folder for the task
+    std::filesystem::path taskFolderPath = tasksDir / folderName;
+    try
+    {
+        std::filesystem::create_directories(taskFolderPath);
+        std::wcout << L"[SubscriptionManager] Created task folder: " << taskFolderPath.wstring() << std::endl;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "[SubscriptionManager] Failed to create task folder: " << e.what() << std::endl;
+        return false;
+    }
+
+    // Store path to the physical folder
+    std::wstring taskPath = taskFolderPath.wstring();
 
     ShotMetadata taskMetadata = metadata;
     taskMetadata.shotPath = taskPath;
@@ -993,13 +1070,40 @@ bool SubscriptionManager::CreateManualTask(const std::wstring& jobPath, const st
     taskMetadata.modifiedTime = timestamp;
     taskMetadata.isTracked = true;  // Manual tasks are always tracked
 
-    return CreateOrUpdateShotMetadata(taskMetadata);
+    std::wcout << L"[CreateManualTask] Creating task with path: " << taskPath << std::endl;
+    std::wcout << L"[CreateManualTask] itemType: " << Utf8ToWide(taskMetadata.itemType) << L", isTracked: " << taskMetadata.isTracked << std::endl;
+
+    bool result = CreateOrUpdateShotMetadata(taskMetadata);
+    std::wcout << L"[CreateManualTask] CreateOrUpdateShotMetadata returned: " << (result ? L"true" : L"false") << std::endl;
+
+    return result;
 }
 
 bool SubscriptionManager::DeleteManualTask(int taskId)
 {
     std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
 
+    // FIRST: Get task path before deletion (to delete physical folder)
+    std::wstring taskPath;
+    {
+        const char* selectSql = "SELECT shot_path FROM shot_metadata WHERE id = ?;";
+        sqlite3_stmt* selectStmt;
+        if (sqlite3_prepare_v2(m_db, selectSql, -1, &selectStmt, nullptr) == SQLITE_OK)
+        {
+            sqlite3_bind_int(selectStmt, 1, taskId);
+            if (sqlite3_step(selectStmt) == SQLITE_ROW)
+            {
+                const char* pathUtf8 = reinterpret_cast<const char*>(sqlite3_column_text(selectStmt, 0));
+                if (pathUtf8)
+                {
+                    taskPath = Utf8ToWide(pathUtf8);
+                }
+            }
+            sqlite3_finalize(selectStmt);
+        }
+    }
+
+    // Delete from database
     const char* sql = "DELETE FROM shot_metadata WHERE id = ?;";
 
     sqlite3_stmt* stmt;
@@ -1020,6 +1124,65 @@ bool SubscriptionManager::DeleteManualTask(int taskId)
     {
         std::cerr << "Failed to delete manual task: " << sqlite3_errmsg(m_db) << std::endl;
         return false;
+    }
+
+    // NEW: Delete physical folder if it exists and is in .ufb/tasks/
+    if (!taskPath.empty() &&
+        (taskPath.find(L".ufb/tasks/") != std::wstring::npos ||
+         taskPath.find(L".ufb\\tasks\\") != std::wstring::npos))
+    {
+        try
+        {
+            std::filesystem::path folderPath(taskPath);
+            if (std::filesystem::exists(folderPath) && std::filesystem::is_directory(folderPath))
+            {
+                std::filesystem::remove_all(folderPath);
+                std::wcout << L"[SubscriptionManager] Deleted task folder: " << taskPath << std::endl;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "[SubscriptionManager] Failed to delete task folder: " << e.what() << std::endl;
+            // Non-fatal - database entry already deleted
+        }
+    }
+
+    // Write deletion to change logs for sync
+    if (!taskPath.empty() && m_metaManager)
+    {
+        // Extract job path from task path (everything before .ufb)
+        std::wstring jobPath;
+        size_t ufbPos = taskPath.find(L".ufb");
+        if (ufbPos != std::wstring::npos)
+        {
+            jobPath = taskPath.substr(0, ufbPos - 1);  // -1 to remove trailing slash
+
+            // Get relative path for sync
+            std::wstring relativePath = GetRelativePath(taskPath, jobPath);
+
+            // Create deletion entry
+            ChangeLogEntry entry;
+            entry.deviceId = GetDeviceID();
+            entry.timestamp = GetCurrentTimeMs();
+            entry.operation = "delete";
+            entry.shotPath = relativePath;
+            // Note: data is intentionally empty for delete operations
+
+            if (m_metaManager->AppendToChangeLog(jobPath, entry))
+            {
+                std::wcout << L"[SubscriptionManager] Wrote task deletion to change log: " << relativePath << std::endl;
+
+                // Trigger P2P notification
+                if (m_localChangeCallback)
+                {
+                    m_localChangeCallback(jobPath, entry.timestamp);
+                }
+            }
+            else
+            {
+                std::cerr << "[SubscriptionManager] Failed to write task deletion to change log" << std::endl;
+            }
+        }
     }
 
     return true;

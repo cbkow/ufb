@@ -1368,6 +1368,17 @@ void ShotView::DrawShotsPanel(HWND hwnd)
 
             ShowImGuiContextMenu(hwnd, entry, PanelType::Shots);
 
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path targetPath(entry.fullPath);
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                    onOpenInNewWindow(pathToOpen);
+                }
+            }
+
             // Push mono font for all metadata columns (not the name)
             if (font_mono)
                 ImGui::PushFont(font_mono);
@@ -2078,6 +2089,17 @@ void ShotView::DrawProjectsPanel(HWND hwnd)
 
             ShowImGuiContextMenu(hwnd, entry, PanelType::Projects);
 
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path targetPath(entry.fullPath);
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                    onOpenInNewWindow(pathToOpen);
+                }
+            }
+
             // Modified column
             ImGui::TableNextColumn();
             if (font_mono)
@@ -2475,6 +2497,17 @@ void ShotView::DrawRendersPanel(HWND hwnd)
             }
 
             ShowImGuiContextMenu(hwnd, entry, PanelType::Renders);
+
+            // Middle-click to open in new window
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Middle))
+            {
+                if (onOpenInNewWindow)
+                {
+                    std::filesystem::path targetPath(entry.fullPath);
+                    std::wstring pathToOpen = entry.isDirectory ? entry.fullPath : targetPath.parent_path().wstring();
+                    onOpenInNewWindow(pathToOpen);
+                }
+            }
 
             // Modified column
             ImGui::TableNextColumn();

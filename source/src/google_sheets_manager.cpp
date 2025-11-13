@@ -15,6 +15,14 @@
 
 #pragma comment(lib, "winhttp.lib")
 
+namespace {
+    // Only these folder types are synced to Google Sheets
+    const std::vector<std::string> SYNCED_FOLDER_TYPES = {
+        "3d", "ae", "premiere",      // Shot types we sync
+        "assets", "postings"          // Always synced
+    };
+}
+
 namespace UFB {
 
 GoogleSheetsManager::GoogleSheetsManager()
@@ -263,6 +271,70 @@ bool GoogleSheetsManager::ReadRange(const std::string& spreadsheetId,
     return true;
 }
 
+bool GoogleSheetsManager::BatchGet(const std::string& spreadsheetId,
+                                  const std::vector<std::string>& ranges,
+                                  std::vector<std::vector<SheetRow>>& outResults)
+{
+    if (!m_authManager || !m_authManager->IsAuthenticated()) {
+        std::cerr << "[GoogleSheetsManager] Not authenticated" << std::endl;
+        return false;
+    }
+
+    if (ranges.empty()) {
+        std::cerr << "[GoogleSheetsManager] BatchGet: No ranges specified" << std::endl;
+        return false;
+    }
+
+    // Build batch get URL with multiple ranges
+    std::string url = BuildSpreadsheetsUrl(spreadsheetId) + "/values:batchGet?";
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        if (i > 0) url += "&";
+        url += "ranges=" + ranges[i];
+    }
+
+    json response;
+    if (!ApiGet(url, response)) {
+        std::cerr << "[GoogleSheetsManager] Failed to batch get ranges" << std::endl;
+        return false;
+    }
+
+    if (!response.contains("valueRanges")) {
+        std::cerr << "[GoogleSheetsManager] BatchGet: No valueRanges in response" << std::endl;
+        return false;
+    }
+
+    // Parse each range result
+    outResults.clear();
+    outResults.resize(ranges.size());
+
+    for (size_t i = 0; i < response["valueRanges"].size() && i < ranges.size(); ++i) {
+        const auto& valueRange = response["valueRanges"][i];
+
+        if (!valueRange.contains("values")) {
+            // Empty range - add empty result
+            outResults[i] = std::vector<SheetRow>();
+            continue;
+        }
+
+        std::vector<SheetRow> rows;
+        for (const auto& row : valueRange["values"]) {
+            SheetRow sheetRow;
+            for (const auto& cell : row) {
+                if (cell.is_string()) {
+                    sheetRow.cells.push_back(cell.get<std::string>());
+                } else {
+                    sheetRow.cells.push_back(cell.dump());
+                }
+            }
+            rows.push_back(sheetRow);
+        }
+        outResults[i] = rows;
+    }
+
+    std::cout << "[GoogleSheetsManager] BatchGet: Successfully read " << ranges.size() << " ranges in 1 API call" << std::endl;
+    return true;
+}
+
 bool GoogleSheetsManager::WriteRange(const std::string& spreadsheetId,
                                     const std::string& range,
                                     const std::vector<SheetRow>& rows)
@@ -416,6 +488,34 @@ bool GoogleSheetsManager::ClearRange(const std::string& spreadsheetId,
         return false;
     }
 
+    return true;
+}
+
+bool GoogleSheetsManager::BatchClear(const std::string& spreadsheetId,
+                                    const std::vector<std::string>& ranges)
+{
+    if (!m_authManager || !m_authManager->IsAuthenticated()) {
+        std::cerr << "[GoogleSheetsManager] Not authenticated" << std::endl;
+        return false;
+    }
+
+    if (ranges.empty()) {
+        return true;  // Nothing to clear
+    }
+
+    // Build batch clear request
+    json requestBody;
+    requestBody["ranges"] = ranges;
+
+    std::string url = BuildSpreadsheetsUrl(spreadsheetId) + "/values:batchClear";
+    json response;
+
+    if (!ApiPost(url, requestBody, response)) {
+        std::cerr << "[GoogleSheetsManager] Failed to batch clear ranges" << std::endl;
+        return false;
+    }
+
+    std::cout << "[GoogleSheetsManager] BatchClear: Successfully cleared " << ranges.size() << " ranges in 1 API call" << std::endl;
     return true;
 }
 
@@ -586,16 +686,23 @@ bool GoogleSheetsManager::SyncJob(const std::wstring& jobPath)
         record.consecutiveErrorCount = 0;
         record.disabledDueToErrors = false;
 
-        // Map sheet names to IDs
+        // Map sheet titles to folderType IDs
         for (const auto& sheet : spreadsheet.sheets) {
-            if (sheet.title == "Shots") {
-                record.sheetIds["shot"] = sheet.sheetId;
-            } else if (sheet.title == "Assets") {
-                record.sheetIds["asset"] = sheet.sheetId;
-            } else if (sheet.title == "Postings") {
-                record.sheetIds["posting"] = sheet.sheetId;
-            } else if (sheet.title == "Tasks") {
-                record.sheetIds["manual_task"] = sheet.sheetId;
+            std::string folderType;
+            if (sheet.title == "Tasks") {
+                folderType = "manual_task";  // Special case
+            } else {
+                // Convert to lowercase: "3D" → "3d", "AE" → "ae", "ASSETS" → "assets"
+                folderType = sheet.title;
+                std::transform(folderType.begin(), folderType.end(), folderType.begin(), ::tolower);
+            }
+
+            // Only map known folder types
+            bool isKnownType = (folderType == "manual_task") ||
+                              (std::find(SYNCED_FOLDER_TYPES.begin(), SYNCED_FOLDER_TYPES.end(), folderType) != SYNCED_FOLDER_TYPES.end());
+
+            if (isKnownType) {
+                record.sheetIds[folderType] = sheet.sheetId;
             }
         }
 
@@ -606,87 +713,243 @@ bool GoogleSheetsManager::SyncJob(const std::wstring& jobPath)
     JobSyncRecord& record = it->second;
     record.status = SheetSyncStatus::Syncing;
 
-    // Sync each item type to its own sheet
-    std::vector<std::string> itemTypes = {"shot", "asset", "posting", "manual_task"};
-    std::map<std::string, std::string> sheetNames = {
-        {"shot", "Shots"},
-        {"asset", "Assets"},
-        {"posting", "Postings"},
-        {"manual_task", "Tasks"}
-    };
+    // Build list of folder types to sync from the sync record's sheetIds
+    std::vector<std::string> folderTypes;
+    std::map<std::string, std::string> sheetNames;  // folderType → sheet display name
+
+    for (const auto& [folderType, sheetId] : record.sheetIds) {
+        folderTypes.push_back(folderType);
+
+        // Build display name (capitalize folder type)
+        if (folderType == "manual_task") {
+            sheetNames[folderType] = "Tasks";
+        } else {
+            std::string displayName = folderType;
+            std::transform(displayName.begin(), displayName.end(), displayName.begin(), ::toupper);
+            sheetNames[folderType] = displayName;
+        }
+    }
 
     bool allSucceeded = true;
     int totalRowsSynced = 0;
 
-    for (const std::string& itemType : itemTypes) {
-        std::string sheetName = sheetNames[itemType];
-        std::string sheetId = record.sheetIds[itemType];
+    // ===== BATCH READ: Read all tabs at once (1 API call) =====
+    std::vector<std::string> readRanges;
+    for (const std::string& folderType : folderTypes) {
+        std::string sheetName = sheetNames[folderType];
+        readRanges.push_back(sheetName + "!A:O");
+    }
+
+    std::vector<std::vector<SheetRow>> allExistingData;
+    if (!BatchGet(record.spreadsheetId, readRanges, allExistingData)) {
+        std::cerr << "[GoogleSheetsManager] Failed to batch read existing data" << std::endl;
+
+        // Check if this is an old-format spreadsheet (has "Shots" sheet instead of folder-type sheets)
+        GoogleSpreadsheet spreadsheet;
+        if (GetSpreadsheet(record.spreadsheetId, spreadsheet)) {
+            bool hasOldFormat = false;
+            for (const auto& sheet : spreadsheet.sheets) {
+                if (sheet.title == "Shots") {
+                    hasOldFormat = true;
+                    break;
+                }
+            }
+
+            if (hasOldFormat) {
+                std::cout << "[GoogleSheetsManager] ⚠ Detected old spreadsheet format for job '" << jobNameUtf8
+                          << "' - deleting sync record to trigger recreation" << std::endl;
+                m_syncRecords.erase(jobPath);
+                SaveSyncRecords();
+                return false;  // Skip this sync, will recreate on next cycle
+            }
+        }
+
+        allSucceeded = false;
+    }
+
+    // Map folderType → existing sheet data
+    std::map<std::string, std::vector<SheetRow>> existingDataByType;
+    for (size_t i = 0; i < folderTypes.size() && i < allExistingData.size(); ++i) {
+        existingDataByType[folderTypes[i]] = allExistingData[i];
+    }
+
+    // ===== BIDIRECTIONAL SYNC: Detect and apply remote changes =====
+    SheetsCacheManager* cacheManager = GetOrCreateCacheManager(jobPath);
+
+    for (const std::string& folderType : folderTypes) {
+        std::string sheetName = sheetNames[folderType];
+        std::vector<SheetRow>& existingData = existingDataByType[folderType];
+
+        // Convert existing sheet data to CachedSheetRow format for comparison
+        SheetTabCache newCache;
+        newCache.spreadsheetId = record.spreadsheetId;
+        newCache.tabName = sheetName;
+        newCache.lastSyncTime = GetCurrentTimestamp();
+
+        for (size_t i = 1; i < existingData.size(); ++i) {  // Skip header
+            const SheetRow& row = existingData[i];
+            if (row.cells.size() < 12) continue;  // Need at least columns A-L
+
+            CachedSheetRow cachedRow;
+            // Column A (index 0) is Name - we skip it and use Shot Path as itemPath
+            cachedRow.itemPath = row.cells.size() > 1 ? row.cells[1] : "";
+            cachedRow.itemType = row.cells.size() > 2 ? row.cells[2] : "";
+            cachedRow.folderType = row.cells.size() > 3 ? row.cells[3] : "";
+            cachedRow.status = row.cells.size() > 4 ? row.cells[4] : "";
+            cachedRow.category = row.cells.size() > 5 ? row.cells[5] : "";
+            cachedRow.priority = row.cells.size() > 6 ? row.cells[6] : "";
+            cachedRow.deliveryDate = row.cells.size() > 7 ? row.cells[7] : "";
+            cachedRow.assignedArtist = row.cells.size() > 8 ? row.cells[8] : "";
+            cachedRow.notes = row.cells.size() > 9 ? row.cells[9] : "";
+            cachedRow.clientApproval = row.cells.size() > 10 ? row.cells[10] : "";
+            cachedRow.modifiedTimeStr = row.cells.size() > 11 ? row.cells[11] : "";
+
+            // Parse tracking columns M, N, O
+            if (row.cells.size() > 12) {
+                try { cachedRow.modifiedTime = std::stoull(row.cells[12]); } catch (...) { cachedRow.modifiedTime = 0; }
+            }
+            if (row.cells.size() > 13) {
+                try { cachedRow.syncedTime = std::stoull(row.cells[13]); } catch (...) { cachedRow.syncedTime = 0; }
+            }
+            if (row.cells.size() > 14) {
+                cachedRow.deviceId = row.cells[14];
+            }
+
+            if (!cachedRow.itemPath.empty()) {
+                newCache.rows[cachedRow.itemPath] = cachedRow;
+            }
+        }
+
+        // Load old cache for change detection
+        SheetTabCache oldCache;
+        cacheManager->LoadCache(record.spreadsheetId, sheetName, oldCache);
+
+        // Detect remote changes
+        auto changes = cacheManager->DetectChanges(oldCache, newCache);
+
+        std::cout << "[GoogleSheetsManager] Remote changes for " << sheetName << ": "
+                  << changes.addedRows.size() << " added, "
+                  << changes.modifiedRows.size() << " modified, "
+                  << changes.deletedPaths.size() << " deleted" << std::endl;
+
+        // Apply remote changes to local database
+        std::vector<CachedSheetRow> remoteChangesToApply;
+        remoteChangesToApply.insert(remoteChangesToApply.end(), changes.addedRows.begin(), changes.addedRows.end());
+        remoteChangesToApply.insert(remoteChangesToApply.end(), changes.modifiedRows.begin(), changes.modifiedRows.end());
+
+        if (!remoteChangesToApply.empty()) {
+            ApplyRemoteChangesToLocal(jobPath, folderType, remoteChangesToApply);
+        }
+
+        // Don't save cache here - we'll save it AFTER the push phase
+        // (so it reflects the data we actually pushed, including updated modifiedTime)
+    }
+
+    // Prepare batch write operations and cache data for after push
+    std::vector<CellUpdate> batchUpdates;
+    std::map<std::string, std::vector<SheetRow>> pushedDataByType;  // Store for cache saving
+
+    for (const std::string& folderType : folderTypes) {
+        std::string sheetName = sheetNames[folderType];
+        std::string sheetId = record.sheetIds[folderType];
 
         if (sheetId.empty()) {
             std::cerr << "[GoogleSheetsManager] Warning: No sheet ID for " << sheetName << std::endl;
             continue;
         }
 
-        // Get data for this item type
-        std::vector<SheetRow> rows = ConvertJobToSheetRows(jobPath, itemType);
+        // Get data for this folder type from local database
+        // (PULL phase already applied any remote Sheets changes to local)
+        std::vector<SheetRow> rows = ConvertJobToSheetRows(jobPath, folderType);
 
-        // Read existing sheet data for smart merge
-        std::string readRange = sheetName + "!A:K";
-        std::vector<SheetRow> existingData;
-        ReadRange(record.spreadsheetId, readRange, existingData);
+        // Store for cache saving after push
+        pushedDataByType[folderType] = rows;
 
-        // Build map of existing items by path (column A)
-        std::map<std::string, SheetRow> existingItems;
-        for (size_t i = 1; i < existingData.size(); ++i) {  // Skip header
-            if (!existingData[i].cells.empty()) {
-                existingItems[existingData[i].cells[0]] = existingData[i];
+        // Add to batch update (will clear and write all sheets in one batch)
+        if (true) {  // Always clear and rewrite, even if empty (clears deleted items)
+            CellUpdate update;
+            update.range = sheetName + "!A2:O";
+
+            // Convert SheetRow to vector<vector<string>>
+            for (const auto& row : rows) {
+                update.values.push_back(row.cells);
             }
+
+            // If empty, still add empty update to clear the sheet
+            batchUpdates.push_back(update);
+            totalRowsSynced += rows.size();
         }
 
-        // Smart merge: preserve user edits in columns D-J
-        std::vector<SheetRow> mergedRows;
-        for (auto& newRow : rows) {
-            if (newRow.cells.empty()) continue;
+        std::cout << "[GoogleSheetsManager] Prepared " << rows.size() << " rows for " << sheetName << std::endl;
+    }
 
-            std::string itemPath = newRow.cells[0];
-            auto existingIt = existingItems.find(itemPath);
+    // ===== BATCH CLEAR & WRITE: Clear and write all 4 tabs (2 API calls instead of 8) =====
+    if (!batchUpdates.empty()) {
+        // Step 1: Batch clear all ranges (1 API call)
+        std::vector<std::string> clearRanges;
+        for (const auto& update : batchUpdates) {
+            clearRanges.push_back(update.range);
+        }
 
-            if (existingIt != existingItems.end()) {
-                SheetRow& existingRow = existingIt->second;
-                SheetRow mergedRow = newRow;
+        if (!BatchClear(record.spreadsheetId, clearRanges)) {
+            std::cerr << "[GoogleSheetsManager] Failed to batch clear ranges" << std::endl;
+            allSucceeded = false;
+        }
 
-                // Preserve columns D-J if not empty
-                for (int col = 3; col <= 9; col++) {
-                    if (existingRow.cells.size() > col && !existingRow.cells[col].empty()) {
-                        mergedRow.cells[col] = existingRow.cells[col];
+        // Step 2: Batch write all data (1 API call)
+        if (allSucceeded && !BatchUpdate(record.spreadsheetId, batchUpdates)) {
+            std::cerr << "[GoogleSheetsManager] Failed to batch write data" << std::endl;
+            allSucceeded = false;
+        }
+
+        if (allSucceeded) {
+            std::cout << "[GoogleSheetsManager] ✓ Synced " << totalRowsSynced
+                      << " total rows across " << batchUpdates.size() << " sheets (3 API calls: 1 batchGet + 1 batchClear + 1 batchUpdate)" << std::endl;
+
+            // Save caches with the data we just pushed (includes updated modifiedTime)
+            for (const auto& [folderType, rows] : pushedDataByType) {
+                std::string sheetName = sheetNames[folderType];
+
+                // Build cache from pushed data
+                SheetTabCache pushedCache;
+                pushedCache.spreadsheetId = record.spreadsheetId;
+                pushedCache.tabName = sheetName;
+                pushedCache.lastSyncTime = GetCurrentTimestamp();
+
+                for (const auto& row : rows) {
+                    if (row.cells.size() < 2) continue;
+
+                    CachedSheetRow cachedRow;
+                    cachedRow.itemPath = row.cells.size() > 1 ? row.cells[1] : "";
+                    cachedRow.itemType = row.cells.size() > 2 ? row.cells[2] : "";
+                    cachedRow.folderType = row.cells.size() > 3 ? row.cells[3] : "";
+                    cachedRow.status = row.cells.size() > 4 ? row.cells[4] : "";
+                    cachedRow.category = row.cells.size() > 5 ? row.cells[5] : "";
+                    cachedRow.priority = row.cells.size() > 6 ? row.cells[6] : "";
+                    cachedRow.deliveryDate = row.cells.size() > 7 ? row.cells[7] : "";
+                    cachedRow.assignedArtist = row.cells.size() > 8 ? row.cells[8] : "";
+                    cachedRow.notes = row.cells.size() > 9 ? row.cells[9] : "";
+                    cachedRow.clientApproval = row.cells.size() > 10 ? row.cells[10] : "";
+                    cachedRow.modifiedTimeStr = row.cells.size() > 11 ? row.cells[11] : "";
+
+                    if (row.cells.size() > 12) {
+                        try { cachedRow.modifiedTime = std::stoull(row.cells[12]); } catch (...) { cachedRow.modifiedTime = 0; }
+                    }
+                    if (row.cells.size() > 13) {
+                        try { cachedRow.syncedTime = std::stoull(row.cells[13]); } catch (...) { cachedRow.syncedTime = 0; }
+                    }
+                    if (row.cells.size() > 14) {
+                        cachedRow.deviceId = row.cells[14];
+                    }
+
+                    if (!cachedRow.itemPath.empty()) {
+                        pushedCache.rows[cachedRow.itemPath] = cachedRow;
                     }
                 }
 
-                mergedRows.push_back(mergedRow);
-            } else {
-                mergedRows.push_back(newRow);
+                cacheManager->SaveCache(pushedCache);
             }
         }
-
-        // Clear and write data (not append - fixes duplicate rows)
-        std::string clearRange = sheetName + "!A2:K";
-        if (!ClearRange(record.spreadsheetId, clearRange)) {
-            std::cerr << "[GoogleSheetsManager] Failed to clear range for " << sheetName << std::endl;
-            allSucceeded = false;
-            continue;
-        }
-
-        if (!mergedRows.empty()) {
-            std::string writeRange = sheetName + "!A2:K";
-            if (!WriteRange(record.spreadsheetId, writeRange, mergedRows)) {
-                std::cerr << "[GoogleSheetsManager] Failed to write data to " << sheetName << std::endl;
-                allSucceeded = false;
-                continue;
-            }
-            totalRowsSynced += mergedRows.size();
-        }
-
-        std::cout << "[GoogleSheetsManager] ✓ Synced " << mergedRows.size() << " " << sheetName << std::endl;
     }
 
     // Update sync record based on success/failure
@@ -895,21 +1158,46 @@ bool GoogleSheetsManager::CreateJobSpreadsheet(const std::string& jobName, const
     std::string spreadsheetId = outSpreadsheet.spreadsheetId;
     std::string defaultSheetId = outSpreadsheet.sheets.empty() ? "" : outSpreadsheet.sheets[0].sheetId;
 
-    // Build batch update request to:
-    // 1. Add "Shots" sheet
-    // 2. Add "Assets" sheet
-    // 3. Add "Postings" sheet
-    // 4. Add "Tasks" sheet
-    // 5. Delete the default Sheet1
+    // Load ProjectConfig to determine which folder types exist for this job
+    UFB::ProjectConfig config;
+    config.LoadProjectConfig(jobPath);
+
+    // Build list of sheets to create based on SYNCED_FOLDER_TYPES whitelist
+    std::vector<std::string> newSheetNames;
+    std::vector<std::string> folderTypesToSync;
+
+    for (const auto& folderType : SYNCED_FOLDER_TYPES) {
+        // Check if this folder type exists in project config
+        if (config.GetFolderTypeConfig(folderType).has_value()) {
+            // Capitalize for sheet name: "3d" → "3D", "ae" → "AE", "assets" → "ASSETS"
+            std::string sheetName = folderType;
+            std::transform(sheetName.begin(), sheetName.end(), sheetName.begin(), ::toupper);
+
+            newSheetNames.push_back(sheetName);
+            folderTypesToSync.push_back(folderType);
+        }
+    }
+
+    // Always add Tasks sheet for manual tasks
+    newSheetNames.push_back("Tasks");
+    folderTypesToSync.push_back("manual_task");
+
+    std::cout << "[GoogleSheetsManager] Creating " << newSheetNames.size() << " sheets: ";
+    for (size_t i = 0; i < newSheetNames.size(); ++i) {
+        std::cout << newSheetNames[i];
+        if (i < newSheetNames.size() - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
+
+    // Build batch update request to add all sheets and delete the default sheet
     json requests = json::array();
 
-    // Requests 1-4: Add all 4 sheets
-    std::vector<std::string> newSheetNames = {"Shots", "Assets", "Postings", "Tasks"};
+    // Add all sheets
     for (const auto& sheetName : newSheetNames) {
         json addSheetRequest;
         addSheetRequest["addSheet"]["properties"]["title"] = sheetName;
         addSheetRequest["addSheet"]["properties"]["gridProperties"]["rowCount"] = 1000;
-        addSheetRequest["addSheet"]["properties"]["gridProperties"]["columnCount"] = 11;
+        addSheetRequest["addSheet"]["properties"]["gridProperties"]["columnCount"] = 15;  // A-O: Name + Shot Path + metadata + tracking columns
         requests.push_back(addSheetRequest);
     }
 
@@ -943,17 +1231,21 @@ bool GoogleSheetsManager::CreateJobSpreadsheet(const std::string& jobName, const
 
     // Apply formatting and validation to all sheets (skip Sheet1 if it still exists)
     for (const auto& sheet : outSpreadsheet.sheets) {
-        // Determine itemType from sheet title
-        std::string itemType;
-        if (sheet.title == "Shots") {
-            itemType = "shot";
-        } else if (sheet.title == "Assets") {
-            itemType = "asset";
-        } else if (sheet.title == "Postings") {
-            itemType = "posting";
-        } else if (sheet.title == "Tasks") {
-            itemType = "manual_task";
+        // Determine folderType from sheet title (convert to lowercase)
+        std::string folderType;
+        if (sheet.title == "Tasks") {
+            folderType = "manual_task";  // Special case
         } else {
+            // Convert sheet title to lowercase: "3D" → "3d", "AE" → "ae", "ASSETS" → "assets"
+            folderType = sheet.title;
+            std::transform(folderType.begin(), folderType.end(), folderType.begin(), ::tolower);
+        }
+
+        // Verify this is a synced folder type
+        bool isKnownSheet = (folderType == "manual_task") ||
+                           (std::find(SYNCED_FOLDER_TYPES.begin(), SYNCED_FOLDER_TYPES.end(), folderType) != SYNCED_FOLDER_TYPES.end());
+
+        if (!isKnownSheet) {
             // Skip unknown sheets (like Sheet1 if deletion hasn't propagated yet)
             std::cout << "[GoogleSheetsManager] Skipping unknown sheet: " << sheet.title << " (ID: " << sheet.sheetId << ")" << std::endl;
             continue;
@@ -964,17 +1256,18 @@ bool GoogleSheetsManager::CreateJobSpreadsheet(const std::string& jobName, const
         // Write headers for this sheet
         std::vector<SheetRow> headerRows;
         SheetRow header;
-        header.cells = {"Shot Path", "Item Type", "Folder Type", "Status", "Category",
-                       "Priority", "Due Date", "Artist", "Note", "Links", "Last Modified"};
+        header.cells = {"Name", "Shot Path", "Item Type", "Folder Type", "Status", "Category",
+                       "Priority", "Due Date", "Artist", "Note", "Links", "Last Modified",
+                       "ModifiedTime (ms)", "SyncedTime (ms)", "Device ID"};
         headerRows.push_back(header);
 
-        std::string headerRange = sheet.title + "!A1:K1";
+        std::string headerRange = sheet.title + "!A1:O1";
         if (!WriteRange(spreadsheetId, headerRange, headerRows)) {
             std::cerr << "[GoogleSheetsManager] Warning: Failed to write headers for sheet: " << sheet.title << std::endl;
         }
 
-        // Apply formatting and data validation with per-job, per-itemType options
-        if (!SetupSheetFormatting(spreadsheetId, sheet.sheetId, jobPath, itemType)) {
+        // Apply formatting and data validation with per-job, per-folderType options
+        if (!SetupSheetFormatting(spreadsheetId, sheet.sheetId, jobPath, folderType)) {
             std::cerr << "[GoogleSheetsManager] Warning: Failed to apply formatting to sheet: " << sheet.title << std::endl;
         }
     }
@@ -1912,22 +2205,25 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
     for (const auto& shot : shots) {
         SheetRow row;
 
-        // Column A: Shot Path
+        // Column A: Name (extracted from path)
+        row.cells.push_back(ExtractNameFromPath(shot.shotPath));
+
+        // Column B: Shot Path (full path)
         row.cells.push_back(WideToUtf8(shot.shotPath));
 
-        // Column B: Item Type
+        // Column C: Item Type
         row.cells.push_back(shot.itemType.empty() ? "" : shot.itemType);
 
-        // Column C: Folder Type
+        // Column D: Folder Type
         row.cells.push_back(shot.folderType.empty() ? "" : shot.folderType);
 
-        // Column D: Status
+        // Column E: Status
         row.cells.push_back(shot.status.empty() ? "" : shot.status);
 
-        // Column E: Category
+        // Column F: Category
         row.cells.push_back(shot.category.empty() ? "" : shot.category);
 
-        // Column F: Priority (convert to HIGH/MEDIUM/LOW)
+        // Column G: Priority (convert to HIGH/MEDIUM/LOW)
         std::string priorityStr = "";
         if (shot.priority == 1) {
             priorityStr = "HIGH";
@@ -1938,7 +2234,7 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(priorityStr);
 
-        // Column G: Due Date (format as readable date if set)
+        // Column H: Due Date (format as readable date if set)
         std::string dueDateStr = "";
         if (shot.dueDate > 0) {
             time_t dueDateTime = shot.dueDate / 1000;  // Convert ms to seconds
@@ -1951,16 +2247,16 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(dueDateStr);
 
-        // Column H: Artist
+        // Column I: Artist
         row.cells.push_back(shot.artist.empty() ? "" : shot.artist);
 
-        // Column I: Note
+        // Column J: Note
         row.cells.push_back(shot.note.empty() ? "" : shot.note);
 
-        // Column J: Links
+        // Column K: Links
         row.cells.push_back(shot.links.empty() ? "" : shot.links);
 
-        // Column K: Last Modified (human-readable format)
+        // Column L: Last Modified (human-readable format)
         std::string modifiedStr = "";
         if (shot.modifiedTime > 0) {
             time_t modifiedDateTime = shot.modifiedTime / 1000;  // Convert ms to seconds
@@ -1973,13 +2269,23 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(modifiedStr);
 
+        // Column M: ModifiedTime (ms) - raw timestamp for tracking
+        row.cells.push_back(std::to_string(shot.modifiedTime));
+
+        // Column N: SyncedTime (ms) - current sync timestamp
+        uint64_t syncTime = GetCurrentTimeMs();
+        row.cells.push_back(std::to_string(syncTime));
+
+        // Column O: Device ID - originating device
+        row.cells.push_back(GetDeviceID());
+
         rows.push_back(row);
     }
 
     return rows;
 }
 
-std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstring& jobPath, const std::string& itemType)
+std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstring& jobPath, const std::string& folderType)
 {
     std::vector<SheetRow> rows;
 
@@ -1990,31 +2296,44 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
     // Get all tracked items for this job
     auto allItems = m_subscriptionManager->GetAllTrackedItems(jobPath);
 
-    // Filter by itemType
+    // Filter by folderType
     for (const auto& item : allItems) {
-        // Skip items that don't match the requested type
-        if (item.itemType != itemType) {
-            continue;
+        // Special case for manual tasks (they have itemType="manual_task")
+        if (folderType == "manual_task") {
+            if (item.itemType != "manual_task") {
+                continue;
+            }
+        } else {
+            // Normal case: match folderType (but exclude manual tasks)
+            if (item.itemType == "manual_task") {
+                continue;  // Manual tasks only go in Tasks sheet, not in other sheets
+            }
+            if (item.folderType != folderType) {
+                continue;
+            }
         }
 
         SheetRow row;
 
-        // Column A: Shot Path (or item path for assets/postings/tasks)
+        // Column A: Name (extracted from path)
+        row.cells.push_back(ExtractNameFromPath(item.shotPath));
+
+        // Column B: Shot Path (or item path for assets/postings/tasks)
         row.cells.push_back(WideToUtf8(item.shotPath));
 
-        // Column B: Item Type
+        // Column C: Item Type
         row.cells.push_back(item.itemType.empty() ? "" : item.itemType);
 
-        // Column C: Folder Type
+        // Column D: Folder Type
         row.cells.push_back(item.folderType.empty() ? "" : item.folderType);
 
-        // Column D: Status
+        // Column E: Status
         row.cells.push_back(item.status.empty() ? "" : item.status);
 
-        // Column E: Category
+        // Column F: Category
         row.cells.push_back(item.category.empty() ? "" : item.category);
 
-        // Column F: Priority (convert to HIGH/MEDIUM/LOW)
+        // Column G: Priority (convert to HIGH/MEDIUM/LOW)
         std::string priorityStr = "";
         if (item.priority == 1) {
             priorityStr = "HIGH";
@@ -2025,7 +2344,7 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(priorityStr);
 
-        // Column G: Due Date (format as readable date if set)
+        // Column H: Due Date (format as readable date if set)
         std::string dueDateStr = "";
         if (item.dueDate > 0) {
             time_t dueDateTime = item.dueDate / 1000;  // Convert ms to seconds
@@ -2038,16 +2357,16 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(dueDateStr);
 
-        // Column H: Artist
+        // Column I: Artist
         row.cells.push_back(item.artist.empty() ? "" : item.artist);
 
-        // Column I: Note
+        // Column J: Note
         row.cells.push_back(item.note.empty() ? "" : item.note);
 
-        // Column J: Links
+        // Column K: Links
         row.cells.push_back(item.links.empty() ? "" : item.links);
 
-        // Column K: Last Modified (human-readable format)
+        // Column L: Last Modified (human-readable format)
         std::string modifiedStr = "";
         if (item.modifiedTime > 0) {
             time_t modifiedDateTime = item.modifiedTime / 1000;  // Convert ms to seconds
@@ -2060,11 +2379,21 @@ std::vector<SheetRow> GoogleSheetsManager::ConvertJobToSheetRows(const std::wstr
         }
         row.cells.push_back(modifiedStr);
 
+        // Column M: ModifiedTime (ms) - raw timestamp for tracking
+        row.cells.push_back(std::to_string(item.modifiedTime));
+
+        // Column N: SyncedTime (ms) - current sync timestamp
+        uint64_t syncTime = GetCurrentTimeMs();
+        row.cells.push_back(std::to_string(syncTime));
+
+        // Column O: Device ID - originating device
+        row.cells.push_back(GetDeviceID());
+
         rows.push_back(row);
     }
 
     std::cout << "[GoogleSheetsManager] ConvertJobToSheetRows: Found " << rows.size()
-              << " items of type '" << itemType << "' for job" << std::endl;
+              << " items of type '" << folderType << "' for job" << std::endl;
 
     return rows;
 }
@@ -2085,9 +2414,9 @@ int GoogleSheetsManager::FindShotRowIndex(const std::vector<SheetRow>& sheetData
 
     // Start from row 1 (skip header row at index 0)
     for (size_t i = 1; i < sheetData.size(); ++i) {
-        if (!sheetData[i].cells.empty()) {
-            // Shot path is in column A (index 0)
-            if (sheetData[i].cells[0] == shotPathUtf8) {
+        if (sheetData[i].cells.size() > 1) {
+            // Shot path is in column B (index 1) - column A is Name
+            if (sheetData[i].cells[1] == shotPathUtf8) {
                 return (int)i;
             }
         }
@@ -2164,7 +2493,7 @@ std::vector<std::string> GoogleSheetsManager::GetAllCategoryOptions()
     return std::vector<std::string>(uniqueCategories.begin(), uniqueCategories.end());
 }
 
-std::vector<StatusOption> GoogleSheetsManager::GetStatusOptionsForItemType(const std::wstring& jobPath, const std::string& itemType)
+std::vector<StatusOption> GoogleSheetsManager::GetStatusOptionsForFolderType(const std::wstring& jobPath, const std::string& folderType)
 {
     std::vector<StatusOption> options;
 
@@ -2176,30 +2505,11 @@ std::vector<StatusOption> GoogleSheetsManager::GetStatusOptionsForItemType(const
         return {{"Not Started", "#94A3B8"}, {"In Progress", "#3B82F6"}, {"For Review", "#F59E0B"}, {"Complete", "#10B981"}};
     }
 
-    // Get all folder types for this job
-    auto folderTypes = config.GetAllFolderTypes();
-
-    // Filter by itemType
-    for (const auto& folderType : folderTypes) {
-        auto folderConfig = config.GetFolderTypeConfig(folderType);
-        if (!folderConfig.has_value()) {
-            continue;
-        }
-
-        bool matchesItemType = false;
-        if (itemType == "shot" && folderConfig->isShot) {
-            matchesItemType = true;
-        } else if (itemType == "asset" && folderConfig->isAsset) {
-            matchesItemType = true;
-        } else if (itemType == "posting" && folderConfig->isPosting) {
-            matchesItemType = true;
-        } else if (itemType == "manual_task") {
-            // Tasks don't have specific folder types, use all options
-            matchesItemType = true;
-        }
-
-        if (matchesItemType) {
-            auto statusOptions = config.GetStatusOptions(folderType);
+    // Special case: manual_task aggregates all status options
+    if (folderType == "manual_task") {
+        auto folderTypes = config.GetAllFolderTypes();
+        for (const auto& ft : folderTypes) {
+            auto statusOptions = config.GetStatusOptions(ft);
             for (const auto& status : statusOptions) {
                 // Check if not already added
                 bool exists = false;
@@ -2214,6 +2524,9 @@ std::vector<StatusOption> GoogleSheetsManager::GetStatusOptionsForItemType(const
                 }
             }
         }
+    } else {
+        // Normal case: get options for specific folderType
+        options = config.GetStatusOptions(folderType);
     }
 
     // If no options found, use defaults
@@ -2224,7 +2537,7 @@ std::vector<StatusOption> GoogleSheetsManager::GetStatusOptionsForItemType(const
     return options;
 }
 
-std::vector<CategoryOption> GoogleSheetsManager::GetCategoryOptionsForItemType(const std::wstring& jobPath, const std::string& itemType)
+std::vector<CategoryOption> GoogleSheetsManager::GetCategoryOptionsForFolderType(const std::wstring& jobPath, const std::string& folderType)
 {
     std::vector<CategoryOption> options;
 
@@ -2236,30 +2549,11 @@ std::vector<CategoryOption> GoogleSheetsManager::GetCategoryOptionsForItemType(c
         return {{"Offline", "#8B5CF6"}, {"Online", "#EC4899"}, {"On Hold", "#F59E0B"}, {"Killed", "#EF4444"}};
     }
 
-    // Get all folder types for this job
-    auto folderTypes = config.GetAllFolderTypes();
-
-    // Filter by itemType
-    for (const auto& folderType : folderTypes) {
-        auto folderConfig = config.GetFolderTypeConfig(folderType);
-        if (!folderConfig.has_value()) {
-            continue;
-        }
-
-        bool matchesItemType = false;
-        if (itemType == "shot" && folderConfig->isShot) {
-            matchesItemType = true;
-        } else if (itemType == "asset" && folderConfig->isAsset) {
-            matchesItemType = true;
-        } else if (itemType == "posting" && folderConfig->isPosting) {
-            matchesItemType = true;
-        } else if (itemType == "manual_task") {
-            // Tasks don't have specific folder types, use all options
-            matchesItemType = true;
-        }
-
-        if (matchesItemType) {
-            auto categoryOptions = config.GetCategoryOptions(folderType);
+    // Special case: manual_task aggregates all category options
+    if (folderType == "manual_task") {
+        auto folderTypes = config.GetAllFolderTypes();
+        for (const auto& ft : folderTypes) {
+            auto categoryOptions = config.GetCategoryOptions(ft);
             for (const auto& category : categoryOptions) {
                 // Check if not already added
                 bool exists = false;
@@ -2274,6 +2568,9 @@ std::vector<CategoryOption> GoogleSheetsManager::GetCategoryOptionsForItemType(c
                 }
             }
         }
+    } else {
+        // Normal case: get options for specific folderType
+        options = config.GetCategoryOptions(folderType);
     }
 
     // If no options found, use defaults
@@ -2518,22 +2815,22 @@ bool GoogleSheetsManager::FormatLinksAsHyperlinks(const std::string& spreadsheet
 bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
                                                const std::string& sheetId,
                                                const std::wstring& jobPath,
-                                               const std::string& itemType)
+                                               const std::string& folderType)
 {
-    std::cout << "[GoogleSheetsManager] Setting up sheet formatting for itemType: " << itemType << std::endl;
+    std::cout << "[GoogleSheetsManager] Setting up sheet formatting for folderType: " << folderType << std::endl;
 
     // Build ALL formatting requests in ONE array (reduces 4 API calls to 1)
     json allRequests = json::array();
 
-    // ===== COLUMN D: Status dropdown with colors (index 3) =====
-    auto statusOptions = GetStatusOptionsForItemType(jobPath, itemType);
+    // ===== COLUMN E: Status dropdown with colors (index 4) =====
+    auto statusOptions = GetStatusOptionsForFolderType(jobPath, folderType);
     if (!statusOptions.empty()) {
         // Status validation request
         json statusValidationRequest;
         statusValidationRequest["setDataValidation"]["range"]["sheetId"] = std::stoi(sheetId);
         statusValidationRequest["setDataValidation"]["range"]["startRowIndex"] = 1;
-        statusValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 3;
-        statusValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 4;
+        statusValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 4;
+        statusValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 5;
         statusValidationRequest["setDataValidation"]["rule"]["condition"]["type"] = "ONE_OF_LIST";
         statusValidationRequest["setDataValidation"]["rule"]["condition"]["values"] = json::array();
         for (const auto& option : statusOptions) {
@@ -2547,53 +2844,6 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
 
         // Status conditional formatting (one rule per option)
         for (const auto& option : statusOptions) {
-            json formatRequest;
-            formatRequest["addConditionalFormatRule"]["rule"]["ranges"] = json::array();
-            json range;
-            range["sheetId"] = std::stoi(sheetId);
-            range["startRowIndex"] = 1;
-            range["startColumnIndex"] = 3;
-            range["endColumnIndex"] = 4;
-            formatRequest["addConditionalFormatRule"]["rule"]["ranges"].push_back(range);
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["type"] = "TEXT_EQ";
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"] = json::array();
-            json condValue;
-            condValue["userEnteredValue"] = option.name;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"].push_back(condValue);
-            float r, g, b;
-            HexToRgb(option.color, r, g, b);
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["red"] = r;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["green"] = g;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["blue"] = b;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["red"] = 1.0;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["green"] = 1.0;
-            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["blue"] = 1.0;
-            allRequests.push_back(formatRequest);
-        }
-    }
-
-    // ===== COLUMN E: Category dropdown with colors (index 4) =====
-    auto categoryOptions = GetCategoryOptionsForItemType(jobPath, itemType);
-    if (!categoryOptions.empty()) {
-        // Category validation request
-        json categoryValidationRequest;
-        categoryValidationRequest["setDataValidation"]["range"]["sheetId"] = std::stoi(sheetId);
-        categoryValidationRequest["setDataValidation"]["range"]["startRowIndex"] = 1;
-        categoryValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 4;
-        categoryValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 5;
-        categoryValidationRequest["setDataValidation"]["rule"]["condition"]["type"] = "ONE_OF_LIST";
-        categoryValidationRequest["setDataValidation"]["rule"]["condition"]["values"] = json::array();
-        for (const auto& option : categoryOptions) {
-            json value;
-            value["userEnteredValue"] = option.name;
-            categoryValidationRequest["setDataValidation"]["rule"]["condition"]["values"].push_back(value);
-        }
-        categoryValidationRequest["setDataValidation"]["rule"]["showCustomUi"] = true;
-        categoryValidationRequest["setDataValidation"]["rule"]["strict"] = false;
-        allRequests.push_back(categoryValidationRequest);
-
-        // Category conditional formatting (one rule per option)
-        for (const auto& option : categoryOptions) {
             json formatRequest;
             formatRequest["addConditionalFormatRule"]["rule"]["ranges"] = json::array();
             json range;
@@ -2619,15 +2869,62 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
         }
     }
 
-    // ===== COLUMN F: Priority dropdown with colors (index 5) =====
+    // ===== COLUMN F: Category dropdown with colors (index 5) =====
+    auto categoryOptions = GetCategoryOptionsForFolderType(jobPath, folderType);
+    if (!categoryOptions.empty()) {
+        // Category validation request
+        json categoryValidationRequest;
+        categoryValidationRequest["setDataValidation"]["range"]["sheetId"] = std::stoi(sheetId);
+        categoryValidationRequest["setDataValidation"]["range"]["startRowIndex"] = 1;
+        categoryValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 5;
+        categoryValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 6;
+        categoryValidationRequest["setDataValidation"]["rule"]["condition"]["type"] = "ONE_OF_LIST";
+        categoryValidationRequest["setDataValidation"]["rule"]["condition"]["values"] = json::array();
+        for (const auto& option : categoryOptions) {
+            json value;
+            value["userEnteredValue"] = option.name;
+            categoryValidationRequest["setDataValidation"]["rule"]["condition"]["values"].push_back(value);
+        }
+        categoryValidationRequest["setDataValidation"]["rule"]["showCustomUi"] = true;
+        categoryValidationRequest["setDataValidation"]["rule"]["strict"] = false;
+        allRequests.push_back(categoryValidationRequest);
+
+        // Category conditional formatting (one rule per option)
+        for (const auto& option : categoryOptions) {
+            json formatRequest;
+            formatRequest["addConditionalFormatRule"]["rule"]["ranges"] = json::array();
+            json range;
+            range["sheetId"] = std::stoi(sheetId);
+            range["startRowIndex"] = 1;
+            range["startColumnIndex"] = 5;
+            range["endColumnIndex"] = 6;
+            formatRequest["addConditionalFormatRule"]["rule"]["ranges"].push_back(range);
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["type"] = "TEXT_EQ";
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"] = json::array();
+            json condValue;
+            condValue["userEnteredValue"] = option.name;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"].push_back(condValue);
+            float r, g, b;
+            HexToRgb(option.color, r, g, b);
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["red"] = r;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["green"] = g;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["backgroundColor"]["blue"] = b;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["red"] = 1.0;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["green"] = 1.0;
+            formatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["blue"] = 1.0;
+            allRequests.push_back(formatRequest);
+        }
+    }
+
+    // ===== COLUMN G: Priority dropdown with colors (index 6) =====
     // HIGH=Red, MEDIUM=Yellow, LOW=Grey
 
     // Priority validation request
     json priorityValidationRequest;
     priorityValidationRequest["setDataValidation"]["range"]["sheetId"] = std::stoi(sheetId);
     priorityValidationRequest["setDataValidation"]["range"]["startRowIndex"] = 1;
-    priorityValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 5;
-    priorityValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 6;
+    priorityValidationRequest["setDataValidation"]["range"]["startColumnIndex"] = 6;
+    priorityValidationRequest["setDataValidation"]["range"]["endColumnIndex"] = 7;
     priorityValidationRequest["setDataValidation"]["rule"]["condition"]["type"] = "ONE_OF_LIST";
     priorityValidationRequest["setDataValidation"]["rule"]["condition"]["values"] = json::array();
 
@@ -2648,8 +2945,8 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
     json highRange;
     highRange["sheetId"] = std::stoi(sheetId);
     highRange["startRowIndex"] = 1;
-    highRange["startColumnIndex"] = 5;
-    highRange["endColumnIndex"] = 6;
+    highRange["startColumnIndex"] = 6;
+    highRange["endColumnIndex"] = 7;
     highFormatRequest["addConditionalFormatRule"]["rule"]["ranges"].push_back(highRange);
     highFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["type"] = "TEXT_EQ";
     highFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"] = json::array();
@@ -2670,8 +2967,8 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
     json medRange;
     medRange["sheetId"] = std::stoi(sheetId);
     medRange["startRowIndex"] = 1;
-    medRange["startColumnIndex"] = 5;
-    medRange["endColumnIndex"] = 6;
+    medRange["startColumnIndex"] = 6;
+    medRange["endColumnIndex"] = 7;
     medFormatRequest["addConditionalFormatRule"]["rule"]["ranges"].push_back(medRange);
     medFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["type"] = "TEXT_EQ";
     medFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"] = json::array();
@@ -2692,8 +2989,8 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
     json lowRange;
     lowRange["sheetId"] = std::stoi(sheetId);
     lowRange["startRowIndex"] = 1;
-    lowRange["startColumnIndex"] = 5;
-    lowRange["endColumnIndex"] = 6;
+    lowRange["startColumnIndex"] = 6;
+    lowRange["endColumnIndex"] = 7;
     lowFormatRequest["addConditionalFormatRule"]["rule"]["ranges"].push_back(lowRange);
     lowFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["type"] = "TEXT_EQ";
     lowFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"] = json::array();
@@ -2708,19 +3005,29 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
     lowFormatRequest["addConditionalFormatRule"]["rule"]["booleanRule"]["format"]["textFormat"]["foregroundColor"]["blue"] = 1.0;
     allRequests.push_back(lowFormatRequest);
 
-    // ===== COLUMN J: Links formatting (index 9) =====
+    // ===== COLUMN K: Links formatting (index 10) =====
     // Format links column with blue text and underline
     json linksFormatRequest;
     linksFormatRequest["repeatCell"]["range"]["sheetId"] = std::stoi(sheetId);
     linksFormatRequest["repeatCell"]["range"]["startRowIndex"] = 1;  // Skip header
-    linksFormatRequest["repeatCell"]["range"]["startColumnIndex"] = 9;  // Column J
-    linksFormatRequest["repeatCell"]["range"]["endColumnIndex"] = 10;
+    linksFormatRequest["repeatCell"]["range"]["startColumnIndex"] = 10;  // Column K
+    linksFormatRequest["repeatCell"]["range"]["endColumnIndex"] = 11;
     linksFormatRequest["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["foregroundColor"]["blue"] = 1.0;
     linksFormatRequest["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["foregroundColor"]["red"] = 0.0;
     linksFormatRequest["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["foregroundColor"]["green"] = 0.0;
     linksFormatRequest["repeatCell"]["cell"]["userEnteredFormat"]["textFormat"]["underline"] = true;
     linksFormatRequest["repeatCell"]["fields"] = "userEnteredFormat.textFormat";
     allRequests.push_back(linksFormatRequest);
+
+    // ===== HIDE TRACKING COLUMNS M, N, O (indices 12, 13, 14) =====
+    json hideColumnsRequest;
+    hideColumnsRequest["updateDimensionProperties"]["range"]["sheetId"] = std::stoi(sheetId);
+    hideColumnsRequest["updateDimensionProperties"]["range"]["dimension"] = "COLUMNS";
+    hideColumnsRequest["updateDimensionProperties"]["range"]["startIndex"] = 12;  // Column M
+    hideColumnsRequest["updateDimensionProperties"]["range"]["endIndex"] = 15;    // Up to O (exclusive)
+    hideColumnsRequest["updateDimensionProperties"]["properties"]["hiddenByUser"] = true;
+    hideColumnsRequest["updateDimensionProperties"]["fields"] = "hiddenByUser";
+    allRequests.push_back(hideColumnsRequest);
 
     // ===== SEND ALL FORMATTING IN ONE BATCH REQUEST =====
     json requestBody;
@@ -2733,7 +3040,7 @@ bool GoogleSheetsManager::SetupSheetFormatting(const std::string& spreadsheetId,
         return false;
     }
 
-    std::cout << "[GoogleSheetsManager] ✓ Sheet formatting complete for " << itemType
+    std::cout << "[GoogleSheetsManager] ✓ Sheet formatting complete for " << folderType
               << " (" << allRequests.size() << " formatting rules in 1 API call)" << std::endl;
     return true;
 }
@@ -2748,6 +3055,29 @@ std::wstring GoogleSheetsManager::Utf8ToWide(const std::string& str) const
 {
     std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
     return converter.from_bytes(str);
+}
+
+std::string GoogleSheetsManager::ExtractNameFromPath(const std::wstring& path) const
+{
+    // Extract the last folder/file name from the path
+    // E.g., "C:\jobs\project\shots\shot_001" -> "shot_001"
+    // E.g., "tasks\task_123" -> "task_123"
+
+    if (path.empty()) {
+        return "";
+    }
+
+    // Find the last backslash or forward slash
+    size_t lastSlash = path.find_last_of(L"\\/");
+
+    if (lastSlash == std::wstring::npos) {
+        // No slash found - return the whole path
+        return WideToUtf8(path);
+    }
+
+    // Extract everything after the last slash
+    std::wstring name = path.substr(lastSlash + 1);
+    return WideToUtf8(name);
 }
 
 void GoogleSheetsManager::CheckAndDisableJob(JobSyncRecord& record, const std::string& jobName)
@@ -2767,6 +3097,107 @@ uint64_t GoogleSheetsManager::GetCurrentTimestamp() const
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()
     ).count();
+}
+
+SheetsCacheManager* GoogleSheetsManager::GetOrCreateCacheManager(const std::wstring& jobPath)
+{
+    auto it = m_cacheManagers.find(jobPath);
+    if (it != m_cacheManagers.end()) {
+        return it->second.get();
+    }
+
+    // Create new cache manager for this job
+    auto cacheManager = std::make_unique<SheetsCacheManager>();
+    cacheManager->Initialize(jobPath);
+    SheetsCacheManager* ptr = cacheManager.get();
+    m_cacheManagers[jobPath] = std::move(cacheManager);
+
+    std::wcout << L"[GoogleSheetsManager] Created cache manager for job: " << jobPath << std::endl;
+    return ptr;
+}
+
+bool GoogleSheetsManager::ConflictResolve(const CachedSheetRow& localRow, const CachedSheetRow& remoteRow,
+                                         CachedSheetRow& outWinner, bool& outLocalWins)
+{
+    // Latest timestamp wins
+    if (localRow.modifiedTime > remoteRow.modifiedTime) {
+        outWinner = localRow;
+        outLocalWins = true;
+        std::cout << "[GoogleSheetsManager] Conflict: Local wins (" << localRow.itemPath
+                  << ") - Local:" << localRow.modifiedTime << " > Remote:" << remoteRow.modifiedTime << std::endl;
+        return true;
+    } else if (remoteRow.modifiedTime > localRow.modifiedTime) {
+        outWinner = remoteRow;
+        outLocalWins = false;
+        std::cout << "[GoogleSheetsManager] Conflict: Remote wins (" << remoteRow.itemPath
+                  << ") - Remote:" << remoteRow.modifiedTime << " > Local:" << localRow.modifiedTime << std::endl;
+        return true;
+    } else {
+        // Equal timestamps - no conflict, no change needed
+        outWinner = localRow;
+        outLocalWins = true;
+        return false;  // No actual conflict
+    }
+}
+
+bool GoogleSheetsManager::ApplyRemoteChangesToLocal(const std::wstring& jobPath, const std::string& folderType,
+                                                   const std::vector<CachedSheetRow>& remoteChanges)
+{
+    if (!m_subscriptionManager) {
+        std::cerr << "[GoogleSheetsManager] No subscription manager - cannot apply remote changes" << std::endl;
+        return false;
+    }
+
+    if (remoteChanges.empty()) {
+        return true;  // Nothing to apply
+    }
+
+    std::cout << "[GoogleSheetsManager] Applying " << remoteChanges.size()
+              << " remote changes for " << folderType << std::endl;
+
+    // Apply each remote change to local database
+    for (const auto& remoteRow : remoteChanges) {
+        // Convert CachedSheetRow to ShotMetadata for subscription manager
+        ShotMetadata item;
+        item.shotPath = Utf8ToWide(remoteRow.itemPath);
+        item.itemType = remoteRow.itemType;
+        item.folderType = remoteRow.folderType;
+        item.status = remoteRow.status;
+        item.category = remoteRow.category;
+        item.note = remoteRow.notes;
+        item.artist = remoteRow.assignedArtist;
+        item.links = remoteRow.clientApproval;  // Note: This might need adjustment based on schema
+        // Set modifiedTime to NOW because this change just came from Sheets
+        // (Users don't update the hidden Column M when editing, so remoteRow.modifiedTime is stale)
+        item.modifiedTime = GetCurrentTimestamp();
+
+        // Parse priority
+        if (remoteRow.priority == "HIGH") item.priority = 1;
+        else if (remoteRow.priority == "MEDIUM") item.priority = 2;
+        else if (remoteRow.priority == "LOW") item.priority = 3;
+        else item.priority = 0;
+
+        // Parse delivery date (Column G in sheets)
+        if (!remoteRow.deliveryDate.empty()) {
+            // Parse date string "YYYY-MM-DD" to timestamp
+            std::tm tm = {};
+            std::istringstream ss(remoteRow.deliveryDate);
+            ss >> std::get_time(&tm, "%Y-%m-%d");
+            if (!ss.fail()) {
+                item.dueDate = std::mktime(&tm) * 1000ULL;  // Convert to milliseconds
+            }
+        }
+
+        // Update item in local database (this will also write to change log)
+        if (!m_subscriptionManager->UpdateTrackedItemFromSheets(jobPath, item)) {
+            std::cerr << "[GoogleSheetsManager] Failed to apply remote change: " << remoteRow.itemPath << std::endl;
+            // Continue with other items even if one fails
+        } else {
+            std::cout << "[GoogleSheetsManager] ✓ Applied remote change: " << remoteRow.itemPath << std::endl;
+        }
+    }
+
+    return true;
 }
 
 } // namespace UFB

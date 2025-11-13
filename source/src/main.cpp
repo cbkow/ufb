@@ -42,6 +42,7 @@
 #include "postings_view.h"
 #include "project_tracker_view.h"
 #include "aggregated_tracker_view.h"
+#include "backup_restore_view.h"
 #include "console_panel.h"
 #include "utils.h"
 
@@ -1433,9 +1434,9 @@ int main(int argc, char** argv)
                 // Start sync loop if enabled, authenticated, and parent folder set
                 if (g_googleSheetsEnabled && googleOAuthManager.IsAuthenticated() && !g_parentFolderId.empty())
                 {
-                    std::cout << "[Google Sheets] Starting sync loop..." << std::endl;
-                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));
-                    std::cout << "[Google Sheets] Sync loop started (60s interval)" << std::endl;
+                    std::cout << "[Google Sheets] Starting bidirectional sync loop..." << std::endl;
+                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));  // 60 seconds
+                    std::cout << "[Google Sheets] Bidirectional sync loop started (60 second interval)" << std::endl;
                 }
 
                 std::cout << "[Google Sheets] GoogleSheetsManager setup complete" << std::endl;
@@ -1640,11 +1641,14 @@ int main(int argc, char** argv)
     // Aggregated tracker view (single instance for all projects)
     std::unique_ptr<AggregatedTrackerView> aggregatedTrackerView;
 
+    // Backup restore views management
+    std::vector<std::unique_ptr<BackupRestoreView>> backupRestoreViews;
+
     // Standalone browser windows management
     std::vector<std::unique_ptr<FileBrowser>> standaloneBrowsers;
 
     // Set up "Open in New Window" callback for all browsers (defined early so custom views can use it)
-    auto openInNewWindowCallback = [&standaloneBrowsers, &bookmarkManager, &subscriptionManager](const std::wstring& path) {
+    std::function<void(const std::wstring&)> openInNewWindowCallback = [&standaloneBrowsers, &bookmarkManager, &subscriptionManager, &openInNewWindowCallback](const std::wstring& path) {
         // Create new standalone browser
         auto browser = std::make_unique<FileBrowser>();
 
@@ -1663,6 +1667,9 @@ int main(int argc, char** argv)
             browser->SetCurrentDirectory(path);
             std::wcout << L"[Main] Opened standalone browser for: " << path << std::endl;
         }
+
+        // Wire up callback so this browser can also open new windows
+        browser->onOpenInNewWindow = openInNewWindowCallback;
 
         // Store browser
         standaloneBrowsers.push_back(std::move(browser));
@@ -1744,8 +1751,8 @@ int main(int argc, char** argv)
             // Handle Google Sheets enablement change
             if (oldGoogleSheetsEnabled != g_googleSheetsEnabled) {
                 if (g_googleSheetsEnabled && googleOAuthManager.IsAuthenticated() && !g_parentFolderId.empty()) {
-                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));
-                    std::cout << "[Settings] Google Sheets sync started" << std::endl;
+                    googleSheetsManager.StartSyncLoop(std::chrono::seconds(60));  // 60 seconds
+                    std::cout << "[Settings] Google Sheets bidirectional sync started (60 second interval)" << std::endl;
                 } else {
                     googleSheetsManager.StopSyncLoop();
                     std::cout << "[Settings] Google Sheets sync stopped" << std::endl;
@@ -2131,6 +2138,35 @@ int main(int argc, char** argv)
 
         trackerViews.push_back(std::move(trackerView));
         std::wcout << L"[Main] Opened tracker view for: " << jobPath << std::endl;
+    };
+
+    // Set up backup restore view callback for subscription panel
+    subscriptionPanel.onOpenBackupRestore = [&backupRestoreViews, &backupManager, hwnd](const std::wstring& jobPath, const std::wstring& jobName) {
+        // Check if this backup restore view is already open
+        for (const auto& brv : backupRestoreViews) {
+            if (brv && brv->GetJobPath() == jobPath) {
+                std::wcout << L"[Main] Backup restore view already open for: " << jobPath << std::endl;
+                return;
+            }
+        }
+
+        // Create new backup restore view
+        auto backupRestoreView = std::make_unique<BackupRestoreView>();
+        backupRestoreView->Initialize(jobPath, jobName, &backupManager);
+
+        // Set up close callback
+        backupRestoreView->onClose = [&backupRestoreViews, jobPath]() {
+            // Remove this view from the list
+            backupRestoreViews.erase(
+                std::remove_if(backupRestoreViews.begin(), backupRestoreViews.end(),
+                               [&jobPath](const std::unique_ptr<BackupRestoreView>& brv) {
+                                   return brv && brv->GetJobPath() == jobPath && !brv->IsOpen();
+                               }),
+                backupRestoreViews.end());
+        };
+
+        backupRestoreViews.push_back(std::move(backupRestoreView));
+        std::wcout << L"[Main] Opened backup restore view for: " << jobPath << std::endl;
     };
 
     // Set up "Open in Other Browser" callbacks
@@ -2717,7 +2753,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.1.8", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.1.9", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -2966,13 +3002,38 @@ int main(int argc, char** argv)
             aggregatedTrackerView->Draw("All Projects - Tracker", hwnd);
         }
 
+        // Render all backup restore views (dockable windows)
+        for (size_t i = 0; i < backupRestoreViews.size(); ++i) {
+            if (backupRestoreViews[i]) {
+                // Format: "JobName - Backup & Restore" (e.g., "MyJob - Backup & Restore")
+                std::string windowTitle = UFB::WideToUtf8(backupRestoreViews[i]->GetJobName()) + " - Backup & Restore";
+
+                // Dock into main dockspace on first use
+                ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
+
+                backupRestoreViews[i]->Draw(windowTitle.c_str(), hwnd);
+            }
+        }
+
+        // Remove closed backup restore views
+        backupRestoreViews.erase(
+            std::remove_if(backupRestoreViews.begin(), backupRestoreViews.end(),
+                           [](const std::unique_ptr<BackupRestoreView>& brv) {
+                               return brv && !brv->IsOpen();
+                           }),
+            backupRestoreViews.end()
+        );
+
         // Render all standalone browser windows (dockable windows)
         for (size_t i = 0; i < standaloneBrowsers.size(); ++i) {
             if (standaloneBrowsers[i]) {
                 // Get current directory path for window title
                 std::wstring currentPath = standaloneBrowsers[i]->GetCurrentDirectory();
                 std::filesystem::path path(currentPath);
-                std::string windowTitle = "Browser - " + UFB::WideToUtf8(path.filename().wstring());
+
+                // Include unique pointer ID to prevent ImGui window ID conflicts (## suffix is hidden)
+                std::string windowTitle = "Browser - " + UFB::WideToUtf8(path.filename().wstring()) +
+                                         "##" + std::to_string((uintptr_t)standaloneBrowsers[i].get());
 
                 // Dock into main dockspace on first use
                 ImGui::SetNextWindowDockID(dockspace_id, ImGuiCond_FirstUseEver);
