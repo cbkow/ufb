@@ -70,6 +70,14 @@ add_executable(ufb
     src/archival_manager.h
     src/sync_manager.cpp
     src/sync_manager.h
+    src/client_tracking_manager.cpp
+    src/client_tracking_manager.h
+    src/google_oauth_manager.cpp
+    src/google_oauth_manager.h
+    src/google_sheets_manager.cpp
+    src/google_sheets_manager.h
+    src/sheets_cache_manager.cpp
+    src/sheets_cache_manager.h
     src/file_watcher.cpp
     src/file_watcher.h
     src/p2p_manager.cpp
@@ -100,6 +108,8 @@ add_executable(ufb
     src/project_tracker_view.h
     src/aggregated_tracker_view.cpp
     src/aggregated_tracker_view.h
+    src/backup_restore_view.cpp
+    src/backup_restore_view.h
     src/console_panel.cpp
     src/console_panel.h
     src/ImGuiDatePicker.cpp
@@ -135,6 +145,8 @@ target_link_libraries(ufb PRIVATE
     shlwapi
     comctl32
     winhttp
+    wininet
+    ws2_32
     # FFmpeg libraries
     avformat
     avcodec

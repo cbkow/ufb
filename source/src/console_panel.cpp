@@ -402,6 +402,12 @@ int ConsoleStreamBuf::overflow(int_type c)
         {
             sync();
         }
+        // Force flush if buffer exceeds 64KB (prevent unbounded growth)
+        else if (m_buffer.size() >= 65536)
+        {
+            std::cerr << "[ConsolePanel] WARNING: Stream buffer exceeded 64KB without newline, forcing flush" << std::endl;
+            sync();
+        }
     }
     return c;
 }
@@ -443,6 +449,12 @@ std::wstreambuf::int_type ConsoleWStreamBuf::overflow(int_type c)
         // If we hit a newline, flush the buffer
         if (c == L'\n')
         {
+            sync();
+        }
+        // Force flush if buffer exceeds 32K wide characters (64KB in UTF-16)
+        else if (m_buffer.size() >= 32768)
+        {
+            std::wcerr << L"[ConsolePanel] WARNING: Wide stream buffer exceeded 64KB without newline, forcing flush" << std::endl;
             sync();
         }
     }

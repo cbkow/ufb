@@ -168,6 +168,7 @@ private:
 
     // Message handling
     std::map<SOCKET, std::vector<char>> m_receiveBuffers; // Partial message buffers
+    std::map<SOCKET, uint64_t> m_receiveBufferLastActivity; // Timestamp of last activity per buffer
     std::map<SOCKET, int> m_zeroLengthMessageCount; // Track consecutive zero-length messages per socket
     std::mutex m_buffersMutex;
 
@@ -185,6 +186,7 @@ private:
     void SavePeersToFile();
     void CleanupStalePeers();
     void CleanupStalePeerFiles();  // Delete old peer files from disk
+    void CleanupStaleReceiveBuffers();  // Clean up receive buffers that haven't been updated in 5+ minutes
 
     // IOCP worker
     void IOCPWorkerThread();

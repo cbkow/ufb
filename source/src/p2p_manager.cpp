@@ -732,6 +732,9 @@ void P2PManager::HandleReceive(IOContext* context, DWORD bytesTransferred)
         auto& buffer = m_receiveBuffers[socket];
         buffer.insert(buffer.end(), context->buffer.begin(), context->buffer.begin() + bytesTransferred);
 
+        // Update last activity timestamp for this buffer
+        m_receiveBufferLastActivity[socket] = GetCurrentTimestamp();
+
         // Process complete messages (length-prefixed)
         while (buffer.size() >= 4)
         {
@@ -1251,6 +1254,9 @@ void P2PManager::HeartbeatThread()
 
         // Cleanup stale peers (not seen in 60 seconds)
         CleanupStalePeers();
+
+        // Cleanup stale receive buffers (not updated in 5+ minutes)
+        CleanupStaleReceiveBuffers();
 
         // Update our entry in peers.json
         WritePeerRegistry();
@@ -1783,6 +1789,46 @@ void P2PManager::CleanupStalePeerFiles()
     }
 }
 
+// Cleanup stale receive buffers (not updated in 5+ minutes)
+void P2PManager::CleanupStaleReceiveBuffers()
+{
+    uint64_t now = GetCurrentTimestamp();
+    uint64_t staleThreshold = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+    std::vector<SOCKET> socketsToClose;
+
+    // Find stale buffers
+    {
+        std::lock_guard<std::mutex> lock(m_buffersMutex);
+
+        for (const auto& [socket, lastActivity] : m_receiveBufferLastActivity)
+        {
+            if ((now - lastActivity) > staleThreshold)
+            {
+                auto it = m_receiveBuffers.find(socket);
+                if (it != m_receiveBuffers.end() && !it->second.empty())
+                {
+                    std::cerr << "[P2P] WARNING: Receive buffer for socket #" << socket
+                              << " has been stalled for " << ((now - lastActivity) / 1000) << " seconds with "
+                              << it->second.size() << " bytes. Closing connection." << std::endl;
+                    socketsToClose.push_back(socket);
+                }
+            }
+        }
+    }
+
+    // Close stale sockets (outside of lock to prevent deadlock)
+    for (SOCKET socket : socketsToClose)
+    {
+        CloseSocket(socket);
+    }
+
+    if (!socketsToClose.empty())
+    {
+        std::cout << "[P2P] Closed " << socketsToClose.size() << " connection(s) with stale receive buffers" << std::endl;
+    }
+}
+
 // Connect to a peer
 bool P2PManager::ConnectToPeer(const std::string& ipAddress, uint16_t port)
 {
@@ -1949,6 +1995,7 @@ void P2PManager::CloseSocket(SOCKET socket)
     {
         std::lock_guard<std::mutex> lock(m_buffersMutex);
         m_receiveBuffers.erase(socket);
+        m_receiveBufferLastActivity.erase(socket);
         m_zeroLengthMessageCount.erase(socket);
     }
 

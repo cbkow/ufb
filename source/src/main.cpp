@@ -2753,7 +2753,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.2.0", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.2.1", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
