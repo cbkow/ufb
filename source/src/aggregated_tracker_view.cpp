@@ -584,6 +584,10 @@ void AggregatedTrackerView::Draw(const char* title, HWND hwnd)
             if (m_noteEditorItemIndex >= 0 && m_noteEditorItemIndex < m_allItems.size())
             {
                 m_allItems[m_noteEditorItemIndex].metadata.note = m_noteEditorBuffer;
+                // Update timestamp so sync detects this change
+                m_allItems[m_noteEditorItemIndex].metadata.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata(m_allItems[m_noteEditorItemIndex].metadata);
@@ -633,6 +637,10 @@ void AggregatedTrackerView::Draw(const char* title, HWND hwnd)
             if (m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_allItems.size())
             {
                 m_allItems[m_linkEditorItemIndex].metadata.links = m_linkEditorBuffer;
+                // Update timestamp so sync detects this change
+                m_allItems[m_linkEditorItemIndex].metadata.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata(m_allItems[m_linkEditorItemIndex].metadata);
@@ -648,6 +656,10 @@ void AggregatedTrackerView::Draw(const char* title, HWND hwnd)
             if (m_linkEditorItemIndex >= 0 && m_linkEditorItemIndex < m_allItems.size())
             {
                 m_allItems[m_linkEditorItemIndex].metadata.links = "";
+                // Update timestamp so sync detects this change
+                m_allItems[m_linkEditorItemIndex].metadata.modifiedTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()
+                ).count();
                 if (m_subscriptionManager)
                 {
                     m_subscriptionManager->CreateOrUpdateShotMetadata(m_allItems[m_linkEditorItemIndex].metadata);

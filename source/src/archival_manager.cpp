@@ -742,8 +742,48 @@ std::map<std::wstring, Shot> ArchivalManager::MaterializeState(
     {
         if (entry.operation == "update")
         {
-            // Last-write-wins: just overwrite
-            state[entry.shotPath] = entry.data;
+            // Check if shot already exists in state
+            auto it = state.find(entry.shotPath);
+            if (it != state.end())
+            {
+                // Shot exists - merge metadata fields (preserve fields not in incoming JSON)
+                Shot& existingShot = it->second;
+                const Shot& incomingShot = entry.data;
+
+                try
+                {
+                    // Parse both metadata JSONs
+                    nlohmann::json existingMeta = nlohmann::json::parse(existingShot.metadata);
+                    nlohmann::json incomingMeta = nlohmann::json::parse(incomingShot.metadata);
+
+                    // Merge: incoming fields overwrite existing (last-write-wins for present fields)
+                    // But preserve existing fields that aren't in incoming (handles schema evolution)
+                    for (auto& [key, value] : incomingMeta.items())
+                    {
+                        existingMeta[key] = value;  // Overwrite with incoming value
+                    }
+
+                    // Update shot with merged metadata
+                    existingShot.metadata = existingMeta.dump();
+                    existingShot.shotType = incomingShot.shotType;
+                    existingShot.displayName = incomingShot.displayName;
+                    existingShot.createdTime = incomingShot.createdTime;
+                    existingShot.modifiedTime = incomingShot.modifiedTime;  // Last-write-wins
+                    existingShot.deviceId = incomingShot.deviceId;
+                }
+                catch (const std::exception& e)
+                {
+                    // If JSON parsing fails, fall back to wholesale replacement
+                    std::cerr << "[ArchivalManager] Failed to merge metadata, using replacement: "
+                              << e.what() << std::endl;
+                    state[entry.shotPath] = entry.data;
+                }
+            }
+            else
+            {
+                // New shot - just insert
+                state[entry.shotPath] = entry.data;
+            }
         }
         else if (entry.operation == "delete")
         {

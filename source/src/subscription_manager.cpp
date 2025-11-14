@@ -113,16 +113,58 @@ bool SubscriptionManager::CreateTables()
         CREATE INDEX IF NOT EXISTS idx_shot_metadata_tracked ON shot_metadata(is_tracked);
     )";
 
-    // Add item_type column if it doesn't exist (migration for existing databases)
+    // Add columns if they don't exist (migrations for existing databases)
     const char* addItemTypeColumn = "ALTER TABLE shot_metadata ADD COLUMN item_type TEXT DEFAULT 'shot';";
+    const char* addNoteColumn = "ALTER TABLE shot_metadata ADD COLUMN note TEXT;";
+    const char* addLinksColumn = "ALTER TABLE shot_metadata ADD COLUMN links TEXT;";
+    const char* addSyncStatusColumn = "ALTER TABLE subscriptions ADD COLUMN sync_status TEXT DEFAULT 'pending';";
+    const char* addShotCountColumn = "ALTER TABLE subscriptions ADD COLUMN shot_count INTEGER DEFAULT 0;";
 
     bool tablesCreated = ExecuteSQL(createSubscriptionsTable) &&
                          ExecuteSQL(createSettingsTable) &&
                          ExecuteSQL(createShotMetadataTable) &&
                          ExecuteSQL(createIndexes);
 
-    // Try to add item_type column for existing databases (will fail silently if column exists)
-    sqlite3_exec(m_db, addItemTypeColumn, nullptr, nullptr, nullptr);
+    // Try to add columns for existing databases (will fail silently if columns already exist)
+    {
+        char* errMsg = nullptr;
+        int rc;
+
+        rc = sqlite3_exec(m_db, addItemTypeColumn, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK && errMsg && std::string(errMsg).find("duplicate column") == std::string::npos)
+        {
+            std::cerr << "[SubscriptionManager] Warning: Failed to add item_type column: " << errMsg << std::endl;
+        }
+        if (errMsg) { sqlite3_free(errMsg); errMsg = nullptr; }
+
+        rc = sqlite3_exec(m_db, addNoteColumn, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK && errMsg && std::string(errMsg).find("duplicate column") == std::string::npos)
+        {
+            std::cerr << "[SubscriptionManager] Warning: Failed to add note column: " << errMsg << std::endl;
+        }
+        if (errMsg) { sqlite3_free(errMsg); errMsg = nullptr; }
+
+        rc = sqlite3_exec(m_db, addLinksColumn, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK && errMsg && std::string(errMsg).find("duplicate column") == std::string::npos)
+        {
+            std::cerr << "[SubscriptionManager] Warning: Failed to add links column: " << errMsg << std::endl;
+        }
+        if (errMsg) { sqlite3_free(errMsg); errMsg = nullptr; }
+
+        rc = sqlite3_exec(m_db, addSyncStatusColumn, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK && errMsg && std::string(errMsg).find("duplicate column") == std::string::npos)
+        {
+            std::cerr << "[SubscriptionManager] Warning: Failed to add sync_status column: " << errMsg << std::endl;
+        }
+        if (errMsg) { sqlite3_free(errMsg); errMsg = nullptr; }
+
+        rc = sqlite3_exec(m_db, addShotCountColumn, nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK && errMsg && std::string(errMsg).find("duplicate column") == std::string::npos)
+        {
+            std::cerr << "[SubscriptionManager] Warning: Failed to add shot_count column: " << errMsg << std::endl;
+        }
+        if (errMsg) { sqlite3_free(errMsg); errMsg = nullptr; }
+    }
 
     return tablesCreated;
 }
@@ -1347,12 +1389,40 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
 {
     std::lock_guard<std::recursive_mutex> lock(m_dbMutex);
 
+    std::wcout << L"[BridgeFromSyncCache] CALLED for shot: " << shot.shotPath << std::endl;
+    std::wcout << L"[BridgeFromSyncCache] Incoming metadata JSON: " << Utf8ToWide(shot.metadata) << std::endl;
+
     // Convert Shot → ShotMetadata
     ShotMetadata metadata;
     metadata.shotPath = GetAbsolutePath(shot.shotPath, jobPath);
     metadata.folderType = shot.shotType;
     metadata.createdTime = shot.createdTime;
     metadata.modifiedTime = shot.modifiedTime;
+
+    // First, fetch existing note and links values (for field-level merging)
+    std::string existingNote;
+    std::string existingLinks;
+    std::string shotPathUtf8 = WideToUtf8(metadata.shotPath);
+
+    const char* selectSql = "SELECT note, links FROM shot_metadata WHERE shot_path = ?;";
+    sqlite3_stmt* selectStmt;
+    int rc = sqlite3_prepare_v2(m_db, selectSql, -1, &selectStmt, nullptr);
+
+    if (rc == SQLITE_OK)
+    {
+        sqlite3_bind_text(selectStmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
+
+        if (sqlite3_step(selectStmt) == SQLITE_ROW)
+        {
+            // Row exists - fetch existing values
+            const char* noteText = reinterpret_cast<const char*>(sqlite3_column_text(selectStmt, 0));
+            const char* linksText = reinterpret_cast<const char*>(sqlite3_column_text(selectStmt, 1));
+
+            if (noteText) existingNote = noteText;
+            if (linksText) existingLinks = linksText;
+        }
+        sqlite3_finalize(selectStmt);
+    }
 
     // Parse JSON metadata blob
     try
@@ -1364,8 +1434,32 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
         metadata.priority = metaJson.value("priority", 2);
         metadata.dueDate = metaJson.value("dueDate", 0ULL);
         metadata.artist = metaJson.value("artist", "");
-        metadata.note = metaJson.value("note", "");
-        metadata.links = metaJson.value("links", "");
+
+        // Field-level merging for new schema fields
+        // Only update if field exists in incoming JSON (last-write-wins when present)
+        // Otherwise preserve existing value (handles old change logs missing these fields)
+        if (metaJson.contains("note")) {
+            metadata.note = metaJson.value("note", "");
+        } else {
+            metadata.note = existingNote;  // Preserve existing
+            if (!existingNote.empty())
+            {
+                std::wcout << L"[SubscriptionManager] Preserving existing note (not in sync data): "
+                          << metadata.shotPath << std::endl;
+            }
+        }
+
+        if (metaJson.contains("links")) {
+            metadata.links = metaJson.value("links", "");
+        } else {
+            metadata.links = existingLinks;  // Preserve existing
+            if (!existingLinks.empty())
+            {
+                std::wcout << L"[SubscriptionManager] Preserving existing links (not in sync data): "
+                          << metadata.shotPath << std::endl;
+            }
+        }
+
         metadata.isTracked = metaJson.value("isTracked", false);
         // Always infer itemType from path (ignore stored value to fix corrupted data)
         metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
@@ -1377,6 +1471,9 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
         metadata.itemType = InferItemTypeFromPath(metadata.shotPath);
         metadata.priority = 2;
         metadata.isTracked = false;
+        // Preserve existing note/links on parse error
+        metadata.note = existingNote;
+        metadata.links = existingLinks;
     }
 
     // Write to shot_metadata table (but don't call BridgeToSyncCache again to avoid infinite loop!)
@@ -1398,7 +1495,7 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
     )";
 
     sqlite3_stmt* stmt;
-    int rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
+    rc = sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr);
 
     if (rc != SQLITE_OK)
     {
@@ -1406,7 +1503,8 @@ void SubscriptionManager::BridgeFromSyncCache(const Shot& shot, const std::wstri
         return;
     }
 
-    std::string shotPathUtf8 = WideToUtf8(metadata.shotPath);
+    // Reuse shotPathUtf8 declared earlier (no need to redeclare)
+    shotPathUtf8 = WideToUtf8(metadata.shotPath);
     std::string itemType = metadata.itemType.empty() ? "shot" : metadata.itemType;
     sqlite3_bind_text(stmt, 1, shotPathUtf8.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, itemType.c_str(), -1, SQLITE_TRANSIENT);
