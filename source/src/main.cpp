@@ -45,6 +45,7 @@
 #include "backup_restore_view.h"
 #include "console_panel.h"
 #include "utils.h"
+#include "drop_target.h"
 
 using json = nlohmann::json;
 
@@ -1562,6 +1563,9 @@ int main(int argc, char** argv)
     fileBrowser1.Initialize(&bookmarkManager, &subscriptionManager);
     fileBrowser2.Initialize(&bookmarkManager, &subscriptionManager);
 
+    // IDropTarget for handling drag-drop from unfocused apps (initialized later)
+    DropTarget* pDropTarget = nullptr;
+
     // Initialize subscription panel
     UFB::SubscriptionPanel subscriptionPanel;
     subscriptionPanel.Initialize(&bookmarkManager, &subscriptionManager, &subscriptionIconManager);
@@ -2248,6 +2252,24 @@ int main(int argc, char** argv)
         std::cout << "[Main] Drop ignored (no target browser)" << std::endl;
     });
 
+    // Register OLE IDropTarget for drag-drop from unfocused apps
+    // IMPORTANT: Must disable GLFW's DragAcceptFiles before using RegisterDragDrop
+    DragAcceptFiles(hwnd, FALSE);
+    std::cout << "[Main] Disabled GLFW DragAcceptFiles in favor of IDropTarget" << std::endl;
+
+    pDropTarget = new DropTarget(hwnd, &fileBrowser1, &fileBrowser2, &assetsViews, &postingsViews, &standaloneBrowsers);
+    HRESULT hr = RegisterDragDrop(hwnd, pDropTarget);
+    if (SUCCEEDED(hr))
+    {
+        std::cout << "[Main] IDropTarget registered successfully" << std::endl;
+    }
+    else
+    {
+        std::cerr << "[Main] Failed to register IDropTarget, hr=0x" << std::hex << hr << std::dec << std::endl;
+        pDropTarget->Release();
+        pDropTarget = nullptr;
+    }
+
     // Note: Settings already loaded early in main() for font scale and window dimensions
 
     // Apply saved window size (in case it changed during initialization)
@@ -2753,7 +2775,7 @@ int main(int argc, char** argv)
             if (ImGui::BeginMenu("Help"))
             {
                 ImGui::BeginDisabled();
-                ImGui::MenuItem("u.f.b. v0.2.1", nullptr, false);
+                ImGui::MenuItem("u.f.b. v0.2.2", nullptr, false);
                 ImGui::EndDisabled();
                 ImGui::Separator();
 
@@ -3148,6 +3170,15 @@ int main(int argc, char** argv)
 
         std::cout << "Destroying ImGui context..." << std::endl;
         ImGui::DestroyContext();
+
+        // Revoke OLE drop target before destroying window
+        if (pDropTarget)
+        {
+            std::cout << "Revoking IDropTarget..." << std::endl;
+            RevokeDragDrop(hwnd);
+            pDropTarget->Release();
+            pDropTarget = nullptr;
+        }
 
         std::cout << "Destroying GLFW window..." << std::endl;
         glfwDestroyWindow(window);
