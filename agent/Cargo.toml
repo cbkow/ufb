@@ -1,0 +1,96 @@
+[package]
+name = "ufb-agent"
+version = "1.0.7"
+edition = "2021"
+description = "UFB VFS mount agent (was mediamount-agent)"
+license = "GPL-3.0-or-later"
+authors = ["Chris Bialkowski"]
+
+[[bin]]
+name = "ufb-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+simplelog = "0.12"
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
+# NFC-normalize filenames at the VFS boundary: the macOS NFS client
+# sends NFD, the NAS stores NFC — raw-byte cache keys made accented
+# filenames unopenable/duplicated.
+unicode-normalization = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+notify = "7"  # FSEvents file watcher for NAS change detection
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+# NFS3 loopback server — presents SMB mounts to Finder via native kernel NFS
+# client, sidestepping FileProvider's per-op framework overhead.
+nfsserve = "0.10"
+async-trait = "0.1"
+# core-foundation is consumed by netfs.rs for the SMB-mount FFI
+# (CFString / CFURL / CFMutableDictionary). Credentials live in a
+# plaintext JSON file (see src/platform/macos/credentials.rs), so the
+# slice-02 keychain dependencies are gone.
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+# WinFsp user-mode filesystem driver, native API. Requires WinFsp 2.x runtime
+# + Developer SDK installed (headers and import lib at
+# `C:\Program Files (x86)\WinFsp\{inc,lib}\`). Build also needs LLVM libclang
+# for `winfsp-sys`'s bindgen step — set LIBCLANG_PATH or install LLVM to PATH.
+# Licensed GPL-3.0; UFB is GPL-3.0 to satisfy the FLOSS exception.
+# DO NOT enable the "debug" feature. It routes FspDebugLog output to
+# stderr via `GetStdHandle(STD_ERROR_HANDLE).unwrap()` — which panics
+# when the agent runs without a console attached. Leave `debug` off in release.
+winfsp = { version = "0.12", features = ["system"] }
+widestring = "1.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+# Sets up delay-loading for winfsp-x64.dll so Windows can find it via the
+# WinFsp install registry at runtime without the DLL being in PATH.
+winfsp = { version = "0.12", features = ["delayload"] }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security_Credentials",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+]
+
+# Slice F (mount+sync refactor): forked nfsserve adds NFSPROC3_COMMIT
+# support + honors the per-WRITE `stable_how` flag. The upstream 0.10.2
+# crate sends FILE_SYNC on every WRITE response and never dispatches
+# COMMIT, so PassthroughFs had to `f.sync_all()` per chunk — devastating
+# write amplification over SMB. Patch entry shadows crates.io for any
+# crate in the agent's dep graph that resolves `nfsserve`.
+#
+# Upgrade procedure: see docs/nfsserve-fork.md.
+[patch.crates-io]
+nfsserve = { path = "../external/nfsserve" }

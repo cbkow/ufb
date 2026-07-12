@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened runtime: bundled dylibs (cxx-qt linked statically into
+         libbindings.a, but Qt's own frameworks + the vendored
+         pdfium / ffmpeg dylibs need library-validation off because the
+         deploy target re-signs them ad-hoc, not with the same Team ID
+         until the post-build script runs the deep sign). -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Mesh sync (HTTP control + data servers) and agent IPC. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- File picker + drag-out target paths. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- App group: shared with UFBTray + UFBFinderSync so the
+         agent IPC socket inside ~/Library/Group Containers/<group>/
+         is reachable from all three. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>5Z4S9VHV56.group.com.unionfiles.ufb</string>
+    </array>
+
+    <!-- NOTE: tried `keychain-access-groups` here on 2026-05-03; macOS
+         Sequoia rejects the launch with `taskgated-helper: Disallowing
+         dev.ufb.app because no eligible provisioning profiles found`
+         and `amfid: Error -413 "No matching profile found"`. The
+         entitlement is restricted on macOS Developer-ID-with-hardened-
+         runtime apps without a provisioning profile, regardless of
+         what Apple's older docs claim. To re-enable shared keychain
+         access we need to either: (a) generate a Developer ID
+         provisioning profile via Apple Developer portal that lists
+         this entitlement and embed it in the bundle, or (b) ship as
+         a Mac App Store app where profiles are part of the contract.
+         For now we live with per-app ACL prompts. -->
+</dict>
+</plist>

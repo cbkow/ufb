@@ -1,0 +1,10 @@
+title: UFB
+description: Union File Browser — docs and downloads
+remote_theme: just-the-docs/just-the-docs
+
+# Same GitHub Pages setup as the minNotes sister site: just-the-docs
+# remote theme, dark scheme with a toggle. The appcast-*.xml files in
+# this folder are served as static files at ufbrowser.com — they are
+# the live Sparkle/WinSparkle update feeds (see scripts/make-appcast.sh).
+color_scheme: dark
+enable_dark_mode: true

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>ufb</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.ufb.app</string>
+    <key>CFBundleName</key>
+    <string>UFB</string>
+    <key>CFBundleDisplayName</key>
+    <string>UFB</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@CMAKE_PROJECT_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@CMAKE_PROJECT_VERSION@</string>
+    <!-- Legacy raster icon name (macOS 13–25, points at UFB.icns if
+         present). On macOS 26+ the layered .icon takes over via
+         CFBundleIconName → Assets.car (compiled by actool in
+         app/CMakeLists.txt). -->
+    <key>CFBundleIconFile</key>
+    <string>UFB</string>
+    <key>CFBundleIconName</key>
+    <string>ufbmacOS</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>UFB. GPL-3.0-or-later.</string>
+
+    <!-- Deep-link URI schemes — main.cpp's QFileOpenEvent handler
+         (slice 04) routes these into AppController::uriRequested. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>UFB Deep Link</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>ufb</string>
+                <string>union</string>
+            </array>
+        </dict>
+    </array>
+
+    <!-- TCC (Transparency, Consent, Control) usage descriptions.
+         macOS shows these strings in the consent dialog the FIRST
+         time UFB tries to read a protected folder. Without these
+         entries (the "Reason" string) macOS may silently deny
+         instead of prompting. Persistent consent requires a stable
+         bundle identifier (set above as dev.ufb.app instead of Qt's
+         randomised com.yourcompany.<hash>.ufb default) so consent
+         survives across rebuilds — without that the user is
+         re-prompted every launch. -->
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>UFB needs access to your Documents folder to browse and
+manage project files.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>UFB needs access to your Downloads folder to browse and
+manage downloaded media.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>UFB needs access to your Desktop to browse files there.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>UFB needs access to removable volumes (USB drives, SD
+cards) to browse files.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>UFB needs access to network volumes (NAS shares, mounted
+drives) to browse files.</string>
+
+    <!-- AppleEvents: needed by core/src/shell_context_menu.rs (slice 07
+         AppleScript reveal) so osascript can drive Finder + System
+         Events. macOS gates this behind a separate consent prompt;
+         the message tells the user what's being requested. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>UFB uses AppleScript to drive Finder for the
+"Show Shell Menu" action.</string>
+
+    <!-- Sparkle auto-update (Phase 2). The appcast is the committed
+         docs/appcast-mac.xml, served by GitHub Pages at ufbrowser.com;
+         release binaries live on GitHub Releases (see
+         scripts/make-appcast.sh). macOS ships as a multi-bundle drag-
+         install DMG, so Sparkle can't atomically swap a single .app —
+         the appcast items are INFORMATIONAL: Sparkle shows the version
+         + release notes and a button that opens the DMG URL; the
+         Developer-ID + notarization on that DMG are the integrity
+         guarantee. SUPublicEDKey is substituted from the CMake cache
+         var UFB_UPDATE_PUBLIC_KEY (run Sparkle's generate_keys and pass
+         -DUFB_UPDATE_PUBLIC_KEY=<base64>); it is the EdDSA verification
+         key Sparkle uses if/when an item carries a real download
+         enclosure, and the same key WinSparkle uses on Windows. -->
+    <key>SUFeedURL</key>
+    <string>https://ufbrowser.com/appcast-mac.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>@UFB_UPDATE_PUBLIC_KEY@</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+
+</dict>
+</plist>

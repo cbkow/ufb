@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>UFB</title>
+    <link>https://ufbrowser.com/appcast-mac.xml</link>
+    <description>UFB updates (macOS)</description>
+    <language>en</language>
+    <!-- Items are inserted below by scripts/make-appcast.sh (newest
+         first). Informational items: Sparkle shows version + notes and
+         a button that opens the DMG link on GitHub Releases. -->
+    <!-- @@APPCAST_INSERT@@ -->
+  </channel>
+</rss>

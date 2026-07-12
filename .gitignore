@@ -1,0 +1,68 @@
+# Build artifacts
+/build/
+/target/
+agent/target/
+agent/Cargo.lock
+
+# IDE / agent state (Claude Code stores per-project conversation +
+# task state under .claude/ — local-only, must stay out of git).
+.vscode/
+.idea/
+.claude/
+*.swp
+.DS_Store
+*.user
+CMakeUserPresets.json
+
+# Qt build outputs
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+qmlcache/
+
+# OS
+Thumbs.db
+
+# Local config (don't commit)
+.env
+.env.local
+
+# Internal planning + working notes — kept on disk (and in the private
+# history archive) but not part of the public repo.
+/plans/
+/macOSplans/
+scripts/macos-uninstall-tauri.sh
+
+# Vendored prebuilt libraries (~150 MB).
+# Populated by scripts/setup-external.ps1 (Windows) /
+# scripts/setup-external-mac.sh (macOS); binaries don't belong in git.
+# EXCEPTION: external/nfsserve is our hand-maintained SOURCE fork
+# (devdocs/nfsserve-fork.md) with no other home — it must be tracked, or
+# agent builds on other machines silently use a stale copy.
+/external/*
+!/external/nfsserve/
+
+# vcpkg manifest-mode install dir (regenerated from vcpkg.json).
+/vcpkg_installed/
+
+# Built installers (output of `iscc installer/ufb_installer.iss`).
+# Source script + redistributables stay tracked; the compiled .exe
+# is regenerated per release.
+installer/ufb-setup-*.exe
+
+# Release artifacts (output of scripts/build-mac-dmg.sh +
+# notarize-mac-dmg.sh). DMGs are 100M+ each — they belong on a
+# release page, not in git.
+/dist/
+
+# Swift companion build artifacts. The xcodeproj is regenerated from
+# project.yml via `xcodegen generate`, so it doesn't belong in git.
+# DerivedData / xcuserdata / build are per-developer.
+macos-helpers/UFBHelpers.xcodeproj/
+macos-helpers/build/
+macos-helpers/DerivedData/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+/external/nfsserve/.cargo-ok
+installer/UFB-1.0.4-x64.exe
+installer/UFB-*.exe

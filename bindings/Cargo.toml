@@ -1,0 +1,47 @@
+[package]
+name = "bindings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "UFB Rust↔Qt bindings (cxx-qt QObjects exposing ufb-core to QML)"
+
+[lib]
+name = "bindings"
+# staticlib for CMake/corrosion to link into the Qt executable;
+# rlib so cargo can compile it as a normal Rust library too (build deps,
+# tests, etc.).
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+ufb-core = { path = "../core" }
+log.workspace = true
+env_logger.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+dirs = "5"
+# Direct rusqlite dep so service modules can reach for `named_params!`
+# and other helpers without re-exporting them through ufb-core. Version
+# pinned to ufb-core's to keep one symbol set in the linked binary
+# (otherwise WHOLEARCHIVE pulls in two copies of libsqlite3-sys symbols).
+rusqlite = { version = "0.31", features = ["bundled"] }
+# UUIDs for IPC command_id round-trip (Slice C of the mount+sync refactor).
+# v4 only — no need to match ufb-core's v5 feature flag.
+uuid = { version = "1", features = ["v4"] }
+
+# cxx-qt — Rust↔Qt bridge generator.
+# `link_qt_object_files` makes cxx-qt-build emit cargo:rustc-link-arg
+# directives that pull Qt's object files in directly, so the static
+# library produced for CMake is self-contained on the Qt side.
+cxx = "1"
+cxx-qt = "0.7"
+cxx-qt-lib = { version = "0.7", features = ["full"] }
+
+[build-dependencies]
+cxx-qt-build = { version = "0.7", features = ["link_qt_object_files"] }
+
+# macOS heal-on-open chain in services/mount.rs needs libc for kill(2)
+# + getuid(3). Per macOSplans/03.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

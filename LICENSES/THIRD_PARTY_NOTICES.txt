@@ -1,0 +1,172 @@
+THIRD PARTY NOTICES
+===================
+
+Union File Browser (UFB) is licensed GPL-3.0-or-later (see /LICENSE).
+
+This software incorporates third-party material. Direct runtime
+dependencies are listed below with the applicable license terms; the
+full license text for each is in the corresponding file in this
+directory. Indirect / transitive dependencies (Qt-bundled libraries,
+Rust crate dependencies via Cargo) are noted at the end.
+
+UFB is distributed under GPL-3.0-or-later in part to satisfy the
+WinFsp FLOSS exception, which requires the distributing application
+itself to be Free/Libre Open Source Software.
+
+===============================================================================
+Direct runtime dependencies (shipped as binary alongside UFB)
+===============================================================================
+
+1. Qt 6 (Qt Framework, Qt Quick, Qt Quick Controls, Qt Qml, Qt Network)
+   Copyright (C) The Qt Company Ltd. and other contributors
+   License: LGPL-3.0
+   File:    Qt-LGPL-3.0.txt
+   https://www.qt.io
+   Linkage: dynamic. Users have the right under LGPL-3 to relink UFB
+            against a modified Qt build of their own. The Qt 6 DLLs
+            (Qt6Core, Qt6Gui, Qt6Qml, Qt6Quick*, Qt6Network, etc.)
+            ship next to ufb.exe; replacing them with binary-compatible
+            builds preserves a working UFB.
+
+2. cxx-qt + cxx-qt-lib
+   Copyright (c) 2021-2024 KDAB GmbH and the cxx-qt authors
+   License: MIT OR Apache-2.0
+   File:    CxxQt-LICENSE.txt
+   https://github.com/KDAB/cxx-qt
+   Linkage: static (compiled into bindings.lib).
+
+3. Phosphor Icons
+   Copyright (c) 2020-2021 Phosphor Icons (Helena Zhang, Tobias Fried)
+   License: MIT
+   File:    Phosphor-LICENSE.txt
+   https://phosphoricons.com
+   Asset:   app/qml/Ufb/App/fonts/Phosphor.ttf
+
+4. FFmpeg (avcodec, avformat, avutil, swscale, swresample)
+   Copyright (c) 2000-2025 FFmpeg developers
+   License: LGPL-2.1-or-later (with optional GPL components)
+   File:    FFmpeg-LICENSE.txt
+   https://ffmpeg.org
+   Linkage: dynamic. FFmpeg DLLs are vendored from a known-good
+            prebuilt and ship next to ufb.exe. Used by the C++
+            video thumbnail backend (app/thumbnails/VideoBackend.cpp).
+
+5. PDFium
+   Copyright 2014 The PDFium Authors
+   License: BSD-3-Clause (with Apache-2.0 portions)
+   File:    Pdfium-LICENSE.txt
+   https://pdfium.googlesource.com/pdfium/
+   Linkage: dynamic. pdfium.dll ships next to ufb.exe. Used by the
+            C++ PDF/AI thumbnail backend (app/thumbnails/PdfBackend.cpp).
+
+6. OpenEXR + Imath
+   Copyright (c) Contributors to the OpenEXR Project
+   License: BSD-3-Clause
+   File:    OpenEXR-LICENSE.txt
+   https://www.openexr.com
+   Linkage: dynamic. OpenEXR / Imath / Iex / IlmThread DLLs ship next
+            to ufb.exe. Used by the C++ EXR thumbnail backend.
+
+7. psd_sdk (Photoshop file format reader)
+   Copyright 2011-2020 Molecular Matters GmbH
+   License: BSD-2-Clause
+   File:    PsdSdk-LICENSE.txt
+   https://github.com/MolecularMatters/psd_sdk
+   Linkage: static (compiled into ufb.exe). Used by the C++ PSD/PSB
+            thumbnail backend (app/thumbnails/PsdBackend.cpp).
+
+8. WinFsp (Windows File System Proxy)
+   Copyright (C) Bill Zissimopoulos
+   License: GPL-3.0 with FLOSS exception
+   File:    WinFsp-LICENSE.txt
+   https://github.com/winfsp/winfsp
+   Distribution: bundled installer redistributable. WinFsp's MSI is
+                 silently installed by UFB's installer when the target
+                 machine doesn't already have it. Linked at runtime
+                 by the agent via the `winfsp` Rust crate (delay-load).
+
+9. SQLite (via the bundled feature of the rusqlite crate)
+   Public Domain
+   File:    SQLite-LICENSE.txt
+   https://www.sqlite.org
+   Linkage: static (compiled into bindings.lib and ufb-agent.exe).
+
+===============================================================================
+Indirect dependencies — Qt runtime libraries
+===============================================================================
+
+The Qt 6 distribution dynamically links against a set of permissively
+licensed support libraries that ship as DLLs alongside UFB. These are
+covered by their own upstream licenses (BSD / MIT / FTL / public
+domain / similar) and are redistributed verbatim from the Qt build.
+Notable libraries include:
+
+  * zlib (zlib license)
+  * libpng (libpng / zlib-style)
+  * libjpeg-turbo (BSD + IJG)
+  * libtiff (libtiff / MIT-style)
+  * libwebp + libsharpyuv (BSD)
+  * brotli (MIT)
+  * bzip2 (bzip2 / BSD-style)
+  * liblzma / xz (public domain / 0BSD)
+  * libdeflate (MIT)
+  * FreeType (FTL or GPL-2)
+  * HarfBuzz (MIT)
+  * ICU (Unicode license)
+  * D3DCompiler_47, dxcompiler (Microsoft permissive redistributables)
+
+For the canonical license texts of these libraries refer to the Qt
+6 source distribution at https://download.qt.io/official_releases/qt/.
+None of these libraries impose copyleft obligations on UFB.
+
+===============================================================================
+Indirect dependencies — Rust crates
+===============================================================================
+
+UFB's Rust crates (core/, bindings/, agent/) pull in a substantial
+graph of dependencies via Cargo. The vast majority are dual-licensed
+MIT OR Apache-2.0; a minority are BSD-2 / BSD-3 / ISC / Unlicense /
+CC0. None impose copyleft obligations.
+
+For an authoritative listing run:
+    cargo install cargo-license
+    cargo license --manifest-path bindings/Cargo.toml
+    cargo license --manifest-path agent/Cargo.toml
+
+Notable transitive dependencies that ship as part of UFB binaries:
+
+  * tokio                  MIT
+  * serde + serde_json     MIT OR Apache-2.0
+  * rusqlite               MIT
+  * r2d2 + r2d2_sqlite     MIT OR Apache-2.0
+  * axum + reqwest         MIT
+  * windows + windows-sys  MIT OR Apache-2.0
+  * winfsp (Rust crate)    MIT OR Apache-2.0
+  * cxx                    MIT OR Apache-2.0
+  * dirs / dunce / glob    MIT OR Apache-2.0
+  * trash / fs_extra       MIT OR Apache-2.0
+  * arboard                MIT OR Apache-2.0
+  * opener                 MIT OR Apache-2.0
+  * rfd                    MIT
+  * uuid                   Apache-2.0 OR MIT
+  * urlencoding            MIT
+  * hostname               MIT
+  * flume                  Apache-2.0 OR MIT
+  * socket2                MIT OR Apache-2.0
+  * base64                 MIT OR Apache-2.0
+  * md5                    BSD-3 OR MIT
+  * thiserror / anyhow     MIT OR Apache-2.0
+  * log / env_logger       MIT OR Apache-2.0
+  * once_cell              MIT OR Apache-2.0
+  * chrono                 MIT OR Apache-2.0
+  * cloud-filter           MIT (Windows on-demand sync)
+  * objc2 / objc2-foundation / objc2-app-kit (macOS only)  MIT
+  * libc                   MIT OR Apache-2.0
+  * widestring             MIT OR Apache-2.0
+  * notify (macOS only)    CC0-1.0
+  * nfsserve (macOS only)  BSD-3-Clause
+
+===============================================================================
+
+For the GPL-3 text under which UFB is itself distributed see /LICENSE
+in the source tree or the LICENSE.txt installed alongside ufb.exe.

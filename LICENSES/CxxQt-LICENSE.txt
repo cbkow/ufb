@@ -1,0 +1,37 @@
+cxx-qt and cxx-qt-lib
+=====================
+
+The cxx-qt project (https://github.com/KDAB/cxx-qt) is the Rust↔Qt
+bridge that UFB's bindings/ crate uses to expose Rust services as
+QObject/QML types. It is dual-licensed under MIT OR Apache-2.0; the
+MIT terms are reproduced below. Copyright on the project is held by
+KDAB GmbH and the cxx-qt authors.
+
+Per the project's REUSE-compliant headers each source file carries
+its own SPDX-FileCopyrightText line. For the canonical license texts
+and the full list of contributor copyrights see the LICENSES/ dir of
+https://github.com/KDAB/cxx-qt.
+
+-------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2021-2024 KDAB GmbH and the cxx-qt authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

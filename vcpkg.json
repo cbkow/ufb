@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "ufb",
+  "version-string": "0.9.9902",
+  "description": "Union File Browser (Qt edition) - vcpkg manifest",
+  "dependencies": [
+    "openexr"
+  ]
+}

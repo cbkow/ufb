@@ -1,0 +1,61 @@
+# UFBHelpers — xcodegen spec for UFB's Swift build artifacts.
+#
+# One target since 1.0.7 (UFBTray deleted — plans/17 slice E close-out;
+# the in-app Qt tray replaced it):
+#   • UFBFinderSync — FIFinderSync app-extension. Built standalone here,
+#     then embedded into UFB.app/Contents/PlugIns/ by release-mac.sh
+#     and signed by sign-mac-dev.sh's [app] section.
+#
+# Build:
+#   cd macos-helpers
+#   xcodegen generate
+#   xcodebuild -project UFBHelpers.xcodeproj \
+#       -scheme UFBFinderSync -configuration Release BUILD_DIR=build
+#
+# Output: macos-helpers/build/Release/UFBFinderSync.appex
+#
+# The bundle id stays `dev.ufb.tray.findersync` deliberately: changing
+# it would deregister the extension on every machine and force a fresh
+# System Settings approval fleet-wide. Identity > tidiness.
+
+name: UFBHelpers
+options:
+  deploymentTarget:
+    macOS: "13.0"
+  bundleIdPrefix: dev.ufb
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    DEVELOPMENT_TEAM: 5Z4S9VHV56
+    CODE_SIGN_STYLE: Automatic
+    # Keep Swift output usable from Xcode + xcodebuild on dev machines
+    # whose default Xcode bumps Swift past 5.9; downgrades cleanly.
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+
+targets:
+  UFBFinderSync:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: UFBFinderSync
+    settings:
+      base:
+        INFOPLIST_FILE: UFBFinderSync/Info.plist
+        CODE_SIGN_ENTITLEMENTS: UFBFinderSync/UFBFinderSync.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: dev.ufb.tray.findersync
+        PRODUCT_NAME: UFBFinderSync
+        # Module name must differ from product name so source files can
+        # `import FinderSync` (the Apple framework) without
+        # self-referencing this extension's own module. Same workaround
+        # the Tauri spec used.
+        PRODUCT_MODULE_NAME: UFBFinderSyncModule
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+    frameworks:
+      - sdk: FinderSync.framework

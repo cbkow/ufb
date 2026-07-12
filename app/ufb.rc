@@ -1,0 +1,10 @@
+// Windows resource for ufb.exe — embeds the app icon so Explorer,
+// taskbar, Alt-Tab, and file properties show the right icon without
+// any runtime work. Qt's setWindowIcon() handles the in-app titlebar
+// separately; this is for OS shell surfaces.
+//
+// IDI_ICON1 (numeric value 32512 / "1") is what Windows picks up by
+// default for the main app icon - using the literal "1" keeps the
+// resource compiler happy without #include <windows.h> here.
+
+1 ICON "icons\\icon.ico"

@@ -1,0 +1,5 @@
+# Provisioning profiles are tied to a specific Apple developer account
+# and aren't checked into the repo. Each developer drops their own
+# copies here per docs/macos-provisioning-profile.md. The directory
+# itself is tracked via this .gitignore so the path is stable.
+*.provisionprofile

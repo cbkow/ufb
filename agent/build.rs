@@ -1,0 +1,51 @@
+fn main() {
+    #[cfg(windows)]
+    {
+        // Delay-load winfsp-x64.dll so Windows finds it via registry at runtime.
+        winfsp::build::winfsp_link_delayload();
+
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("icons/icon.ico");
+        res.compile().expect("Failed to compile Windows resources");
+
+        // Copy icon.ico next to the agent binary for Quick Access shortcut use
+        let icon_src = std::path::Path::new("icons/icon.ico");
+        if icon_src.exists() {
+            if let Ok(out_dir) = std::env::var("OUT_DIR") {
+                let target_dir = std::path::PathBuf::from(&out_dir)
+                    .ancestors()
+                    .find(|p| p.ends_with("debug") || p.ends_with("release"))
+                    .map(|p| p.to_path_buf());
+                if let Some(dir) = target_dir {
+                    let _ = std::fs::copy(icon_src, dir.join("icon.ico"));
+                }
+            }
+        }
+    }
+
+    // macOS-only frameworks linked from src/platform/macos/.
+    // NetFS is the C API behind `mount_smbfs` and Finder's Connect to
+    // Server — see platform/macos/netfs.rs for why we use it instead
+    // of shelling out to mount_smbfs.
+    #[cfg(target_os = "macos")]
+    {
+        println!("cargo:rustc-link-lib=framework=NetFS");
+    }
+
+    // Copy icon.png next to the agent binary for tray icon (macOS).
+    #[cfg(not(windows))]
+    {
+        let icon_src = std::path::Path::new("icons/icon.png");
+        if icon_src.exists() {
+            if let Ok(out_dir) = std::env::var("OUT_DIR") {
+                let target_dir = std::path::PathBuf::from(&out_dir)
+                    .ancestors()
+                    .find(|p| p.ends_with("debug") || p.ends_with("release"))
+                    .map(|p| p.to_path_buf());
+                if let Some(dir) = target_dir {
+                    let _ = std::fs::copy(icon_src, dir.join("icon.png"));
+                }
+            }
+        }
+    }
+}

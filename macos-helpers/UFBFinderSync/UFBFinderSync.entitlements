@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Apple requires Finder extensions to be sandboxed. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Shared App Group with the agent + tray + main app. The
+         sandboxed extension reaches the IPC socket via this group. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>5Z4S9VHV56.group.com.unionfiles.ufb</string>
+    </array>
+
+    <!-- Network client: the BadgeClient connects to the agent's Unix
+         socket via the App Group container. Apple's sandbox treats
+         Unix sockets as a network primitive, hence this entitlement. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

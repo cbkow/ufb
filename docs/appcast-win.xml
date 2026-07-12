@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>UFB</title>
+    <link>https://ufbrowser.com/appcast-win.xml</link>
+    <description>UFB updates (Windows)</description>
+    <language>en</language>
+    <!-- Items are inserted below by scripts/make-appcast.sh (newest
+         first). Download items: WinSparkle fetches the Inno installer
+         from GitHub Releases and verifies its ed25519 signature. -->
+    <!-- @@APPCAST_INSERT@@ -->
+  </channel>
+</rss>
