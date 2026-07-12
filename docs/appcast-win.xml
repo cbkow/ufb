@@ -9,5 +9,19 @@
          first). Download items: WinSparkle fetches the Inno installer
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
+    <item>
+      <title>Version 1.0.8</title>
+      <sparkle:version>1.0.8</sparkle:version>
+      <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.0.8</h2>
+<ul>
+  <li><b>New update home:</b> updates are now delivered from
+      <a href="https://ufbrowser.com">ufbrowser.com</a>, with downloads
+      hosted on GitHub Releases. This release completes the move — no
+      app-functionality changes.</li>
+</ul>]]></description>
+      <pubDate>Sun, 12 Jul 2026 16:55:29 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.0.8/UFB-1.0.8-x64.exe" type="application/octet-stream" sparkle:edSignature="EiomVxKD1FDGMxjK/ZjoSeQFpVr9nOhXjbRfgSJbZYms/pzr/fAkRuMBFJr+AG24QVqzZ86taYU2zPLzvvz2Cg==" length="105692228" />
+    </item>
   </channel>
 </rss>
