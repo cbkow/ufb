@@ -109,12 +109,16 @@ if (Test-Path (Join-Path $ufbExifTool 'exiftool.exe')) {
     if (-not (Test-Path $ufbExifTool)) { New-Item -ItemType Directory -Path $ufbExifTool | Out-Null }
     robocopy $tauriExifTool $ufbExifTool /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 } else {
-    # No ufb-tauri vendored copy: download the official Windows package from
-    # exiftool.org (exiftool(-k).exe + its bundled Perl tree exiftool_files/).
+    # No ufb-tauri vendored copy: download the official Windows package
+    # (exiftool(-k).exe + its bundled Perl tree exiftool_files/). exiftool.org
+    # stopped hosting the zips directly (404 as of 2026-07); its download links
+    # now point at SourceForge. Use the downloads.sourceforge.net mirror
+    # endpoint - the sourceforge.net/...(/download) page serves HTML to
+    # Invoke-WebRequest, not the zip.
     $exiftoolVersion = '13.59'
-    Write-Host "exiftool: ufb-tauri absent; downloading exiftool $exiftoolVersion from exiftool.org..."
+    Write-Host "exiftool: ufb-tauri absent; downloading exiftool $exiftoolVersion from SourceForge..."
     $exZip = Join-Path $env:TEMP "exiftool-$($exiftoolVersion)_64.zip"
-    Invoke-WebRequest -Uri "https://exiftool.org/exiftool-$($exiftoolVersion)_64.zip" -OutFile $exZip -UseBasicParsing
+    Invoke-WebRequest -Uri "https://downloads.sourceforge.net/project/exiftool/exiftool-$($exiftoolVersion)_64.zip" -OutFile $exZip -UseBasicParsing -UserAgent 'ufb-setup'
     $exTmp = Join-Path $env:TEMP 'ufb-exiftool-extract'
     if (Test-Path $exTmp) { Remove-Item $exTmp -Recurse -Force }
     Expand-Archive $exZip -DestinationPath $exTmp -Force
