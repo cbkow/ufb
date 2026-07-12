@@ -1,6 +1,6 @@
 [package]
 name = "ufb-agent"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2021"
 description = "UFB VFS mount agent (was mediamount-agent)"
 license = "GPL-3.0-or-later"
