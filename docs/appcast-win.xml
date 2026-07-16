@@ -10,6 +10,21 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.0.9</title>
+      <sparkle:version>1.0.9</sparkle:version>
+      <sparkle:shortVersionString>1.0.9</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.0.9</h2>
+<ul>
+  <li><b>AE tab — renders/proxies subtabs:</b> After Effects folder tabs
+      now show a subtab strip on the bottom pane, switching between the
+      <i>renders</i> (default) and <i>proxies</i> subfolders. The choice
+      is remembered per folder, and Tracker reveal links open the
+      matching subtab.</li>
+</ul>]]></description>
+      <pubDate>Thu, 16 Jul 2026 11:53:52 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.0.9/UFB-1.0.9-x64.exe" type="application/octet-stream" sparkle:edSignature="FlpFRTyIkWsG1YcxCIf60sNN7hP9NEk9WdM1mDCylMnySpvvozF7IGPHkPfDQnC6BHoFZf0rvqVsm8Mu+1EjBQ==" length="107483841" />
+    </item>
+    <item>
       <title>Version 1.0.8</title>
       <sparkle:version>1.0.8</sparkle:version>
       <sparkle:shortVersionString>1.0.8</sparkle:shortVersionString>
