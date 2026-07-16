@@ -10,7 +10,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
 endif()
 
 project(UFB
-    VERSION 1.0.8
+    VERSION 1.0.9
     DESCRIPTION "Union File Browser (Qt edition)"
     LANGUAGES C CXX
 )
