@@ -206,6 +206,12 @@ pub mod qobject {
         #[qinvokable]
         fn find_render_subdir(self: &FileOps, item_path: QString) -> QString;
 
+        /// Returns the path of the first PROXIES-named subdirectory
+        /// (proxies/, proxy/), or "". Drives the AE tab's bottom-pane
+        /// renders/proxies subtab strip in FolderTabView.
+        #[qinvokable]
+        fn find_proxies_subdir(self: &FileOps, item_path: QString) -> QString;
+
         /// Returns the Add Item dialog mode for `folder_name`. One of
         /// "shot" | "date_prefixed" | "folder" | "none". QML hides the
         /// Add button when "none"; for other modes it shapes the
@@ -640,6 +646,15 @@ impl qobject::FileOps {
     ) -> cxx_qt_lib::QString {
         cxx_qt_lib::QString::from(
             &file_ops::find_render_subdir(&item_path.to_string()).unwrap_or_default(),
+        )
+    }
+
+    fn find_proxies_subdir(
+        self: &qobject::FileOps,
+        item_path: cxx_qt_lib::QString,
+    ) -> cxx_qt_lib::QString {
+        cxx_qt_lib::QString::from(
+            &file_ops::find_proxies_subdir(&item_path.to_string()).unwrap_or_default(),
         )
     }
 

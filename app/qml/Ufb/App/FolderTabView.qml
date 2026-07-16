@@ -10,6 +10,13 @@
 // RENDER-named subfolder (renders, comp, output, …) inside each item;
 // when either is missing, the corresponding browser falls back to
 // the item folder itself.
+//
+// AE tabs only: the bottom (renders) pane grows a renders/proxies
+// subtab strip. Both subtabs behave identically — they only change
+// which item subfolder the pane targets (renders/ vs proxies/, same
+// item-folder fallback). The choice persists per folder via
+// Settings.folder_view_prefs and is also stashed in the in-session
+// _tabMemory alongside the pane paths.
 
 import QtQuick
 import QtQuick.Controls
@@ -29,6 +36,30 @@ Item {
     /// Detected layout — "B" or "C". Auto-set when tabPath changes;
     /// the host can also set this manually to force a layout.
     property string mode: "B"
+
+    /// True when `p` is an AE folder tab (folder named "ae", like
+    /// detect_add_mode keys on name, not contents). Plain function so
+    /// onTabPathChanged can evaluate the INCOMING path directly —
+    /// reading the bottomSubtabsEnabled binding inside that handler
+    /// is order-dependent (the binding may not have re-evaluated
+    /// yet), which left the subtab restore gated on the OUTGOING
+    /// tab's value and the strip highlighting "renders" while the
+    /// pane showed proxies.
+    function _isAeFolder(p) {
+        if (!p || p.length === 0) return false
+        var idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"))
+        var name = idx >= 0 ? p.substring(idx + 1) : p
+        return name.toLowerCase() === "ae"
+    }
+    /// AE folder tabs get a renders/proxies subtab strip on the
+    /// bottom (renders) pane; every other folder type renders the
+    /// plain single renders pane.
+    readonly property bool bottomSubtabsEnabled: _isAeFolder(tabPath)
+    /// Active bottom-pane subtab — "renders" | "proxies". Only
+    /// meaningful when bottomSubtabsEnabled. Persisted per folder in
+    /// the same folder_view_prefs row the browser panes use (read on
+    /// tab switch in onTabPathChanged, written on subtab click).
+    property string bottomSubtab: "renders"
 
     /// Bubbled up from FileBrowser's "Open in New Tab" menu item.
     /// JobView re-emits to Main, which spawns a new Files tab.
@@ -77,7 +108,8 @@ Item {
                 sel: itemList.selectedItemPath,
                 right: rightDir.current_path,
                 top: topDir.current_path,
-                bottom: bottomDir.current_path
+                bottom: bottomDir.current_path,
+                bottomTab: bottomSubtab
             }
         }
         // Re-probe layout mode and clear any prior selection state.
@@ -86,6 +118,20 @@ Item {
         } else {
             mode = "B"
         }
+        // Bottom-pane subtab: load the persisted per-folder choice
+        // (default "renders"). The session-memory restore below may
+        // override it — the two normally agree since clicks write
+        // both, but memory wins within a session (matches how the
+        // pane paths behave). NOTE: gate on _isAeFolder(tabPath), not
+        // the bottomSubtabsEnabled binding — see _isAeFolder.
+        var subtabsOn = _isAeFolder(tabPath)
+        var savedSub = "renders"
+        if (subtabsOn) {
+            try {
+                savedSub = JSON.parse(Settings.folder_view_prefs(tabPath)).bottomSubtab || "renders"
+            } catch (e) { savedSub = "renders" }
+        }
+        bottomSubtab = savedSub
         itemList.selectedItemPath = ""
         // clear() resets state without triggering a list_directory("")
         // (which would produce a "Not a directory" error banner).
@@ -100,6 +146,7 @@ Item {
         if (m) {
             if (m.sel && m.sel.length > 0) itemList.selectedItemPath = m.sel
             if (root.mode === "C") {
+                if (m.bottomTab && subtabsOn) bottomSubtab = m.bottomTab
                 if (m.top && m.top.length > 0) topDir.navigate_to(m.top)
                 if (m.bottom && m.bottom.length > 0) bottomDir.navigate_to(m.bottom)
             } else if (m.right && m.right.length > 0) {
@@ -109,12 +156,41 @@ Item {
         _memPath = tabPath
     }
 
+    /// Resolve the bottom pane's target subfolder for `itemPath`
+    /// under the active subtab. Same fallback rule the renders pane
+    /// always had: missing subfolder → the item folder itself.
+    function _bottomTargetFor(itemPath) {
+        var sub = (bottomSubtabsEnabled && bottomSubtab === "proxies")
+            ? FileOps.find_proxies_subdir(itemPath)
+            : FileOps.find_render_subdir(itemPath)
+        return (sub && sub.length > 0) ? sub : itemPath
+    }
+
+    /// Switch the bottom-pane subtab: persist the choice for this
+    /// folder (read-merge-write, coexists with the folder's other
+    /// view-prefs fields) and re-point the bottom browser for the
+    /// currently selected item. Pass persist=false for transient
+    /// switches that shouldn't overwrite the user's saved choice.
+    function _selectBottomSubtab(name, persist) {
+        if (bottomSubtab === name) return
+        bottomSubtab = name
+        if (persist !== false && tabPath.length > 0) {
+            var prefs = ({})
+            try { prefs = JSON.parse(Settings.folder_view_prefs(tabPath)) } catch (e) { prefs = ({}) }
+            prefs.bottomSubtab = name
+            Settings.set_folder_view_prefs(tabPath, JSON.stringify(prefs))
+        }
+        var sel = itemList.selectedItemPath
+        if (root.mode === "C" && sel && sel.length > 0) {
+            bottomDir.navigate_to(_bottomTargetFor(sel))
+        }
+    }
+
     function _onItemSelected(itemPath) {
         if (root.mode === "C") {
             var proj = FileOps.find_project_subdir(itemPath)
-            var rend = FileOps.find_render_subdir(itemPath)
             topDir.navigate_to(proj && proj.length > 0 ? proj : itemPath)
-            bottomDir.navigate_to(rend && rend.length > 0 ? rend : itemPath)
+            bottomDir.navigate_to(_bottomTargetFor(itemPath))
         } else {
             rightDir.navigate_to(itemPath)
         }
@@ -151,7 +227,18 @@ Item {
         if (root.mode === "C") {
             var proj = FileOps.find_project_subdir(itemPath)
             var rend = FileOps.find_render_subdir(itemPath)
-            if (rend && rend.length > 0 && rp.indexOf(norm(rend) + "/") === 0) {
+            var prox = root.bottomSubtabsEnabled
+                ? FileOps.find_proxies_subdir(itemPath) : ""
+            if (prox && prox.length > 0 && rp.indexOf(norm(prox) + "/") === 0) {
+                // Under the item's proxies subdir — flip the bottom
+                // pane to the proxies subtab (transient: a link click
+                // shouldn't overwrite the saved choice) and reveal
+                // there.
+                _selectBottomSubtab("proxies", false)
+                bottomBrowser.selectAfterLoadPath = revealPath
+                bottomDir.navigate_to(parent)
+            } else if (rend && rend.length > 0 && rp.indexOf(norm(rend) + "/") === 0) {
+                if (root.bottomSubtabsEnabled) _selectBottomSubtab("renders", false)
                 bottomBrowser.selectAfterLoadPath = revealPath
                 bottomDir.navigate_to(parent)
             } else {
@@ -319,19 +406,85 @@ Item {
                     onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
                     onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
                 }
-                FileBrowser {
-                    id: bottomBrowser
+                // Bottom pane. For AE tabs a renders/proxies subtab
+                // strip sits above the browser (same styling as the
+                // JobView inner tab bar); every other folder type
+                // renders the browser alone — the strip collapses to
+                // zero height when hidden.
+                Item {
                     SplitView.fillHeight: true
                     SplitView.minimumHeight: 180
-                    dir: bottomDir
-                    showPathField: false
-                    allowCollapse: false
-                    allowOpenInOtherBrowser: false
-                    allowOpenInMainBrowser: true
-                    active: root.activeBrowser === bottomBrowser
-                    onActivated: root.activeBrowser = bottomBrowser
-                    onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-                    onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 0
+
+                        Rectangle {
+                            visible: root.bottomSubtabsEnabled
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Theme.dim.toolStripHeight
+                            color: Theme.colors.bg
+
+                            Row {
+                                anchors.fill: parent
+                                spacing: 0
+                                clip: true
+
+                                Repeater {
+                                    model: ["renders", "proxies"]
+                                    delegate: Rectangle {
+                                        required property string modelData
+                                        readonly property bool isActive: root.bottomSubtab === modelData
+                                        height: parent.height
+                                        width: Math.max(subtabLabel.implicitWidth + 22, 80)
+                                        color: isActive
+                                            ? Theme.colors.surfaceHover
+                                            : (subtabMa.containsMouse ? Theme.colors.surface : "transparent")
+
+                                        Label {
+                                            id: subtabLabel
+                                            anchors.centerIn: parent
+                                            text: modelData
+                                            color: isActive
+                                                ? Theme.colors.textBright
+                                                : Theme.colors.textMuted
+                                            font.pixelSize: Theme.font.sizeBody
+                                            font.bold: isActive
+                                        }
+                                        Rectangle {
+                                            visible: isActive
+                                            anchors.bottom: parent.bottom
+                                            anchors.left: parent.left
+                                            anchors.right: parent.right
+                                            height: 2
+                                            color: Theme.colors.accentSelected
+                                        }
+                                        MouseArea {
+                                            id: subtabMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            onClicked: root._selectBottomSubtab(parent.modelData)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        FileBrowser {
+                            id: bottomBrowser
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            dir: bottomDir
+                            showPathField: false
+                            allowCollapse: false
+                            allowOpenInOtherBrowser: false
+                            allowOpenInMainBrowser: true
+                            active: root.activeBrowser === bottomBrowser
+                            onActivated: root.activeBrowser = bottomBrowser
+                            onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
+                            onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
+                        }
+                    }
                 }
             }
         }

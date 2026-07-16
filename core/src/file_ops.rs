@@ -843,6 +843,12 @@ const RENDER_SUBDIR_NAMES: &[&str] = &[
     "export", "exports", "deliverables", "plates", "precomp",
 ];
 
+/// Subdirectory name patterns for the "proxies" alternate output
+/// location. Case-insensitive. Only the AE folder type surfaces
+/// this today (its bottom pane gets a renders/proxies subtab strip),
+/// but detection is item-shape based like the other two lists.
+const PROXY_SUBDIR_NAMES: &[&str] = &["proxies", "proxy"];
+
 fn matches_any_ci(name: &str, list: &[&str]) -> bool {
     list.iter().any(|n| name.eq_ignore_ascii_case(n))
 }
@@ -934,6 +940,13 @@ pub fn find_project_subdir(item_path: &str) -> Option<String> {
 /// of the first one whose name matches RENDER_SUBDIR_NAMES, or None.
 pub fn find_render_subdir(item_path: &str) -> Option<String> {
     find_named_subdir(item_path, RENDER_SUBDIR_NAMES)
+}
+
+/// Look at the immediate children of `item_path` and return the path
+/// of the first one whose name matches PROXY_SUBDIR_NAMES, or None.
+/// Drives the AE tab's bottom-pane "proxies" subtab.
+pub fn find_proxies_subdir(item_path: &str) -> Option<String> {
+    find_named_subdir(item_path, PROXY_SUBDIR_NAMES)
 }
 
 fn find_named_subdir(item_path: &str, list: &[&str]) -> Option<String> {
