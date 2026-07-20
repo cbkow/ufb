@@ -43,13 +43,21 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    Asset:   app/qml/Ufb/App/fonts/Phosphor.ttf
 
 4. FFmpeg (avcodec, avformat, avutil, swscale, swresample)
-   Copyright (c) 2000-2025 FFmpeg developers
-   License: LGPL-2.1-or-later (with optional GPL components)
+   Copyright (c) 2000-2026 FFmpeg developers
+   License: GPL-2.0-or-later (build includes GPL components: libx264)
    File:    FFmpeg-LICENSE.txt
    https://ffmpeg.org
-   Linkage: dynamic. FFmpeg DLLs are vendored from a known-good
-            prebuilt and ship next to ufb.exe. Used by the C++
-            video thumbnail backend (app/thumbnails/VideoBackend.cpp).
+   Linkage: dynamic. Windows vendors BtbN's GPL shared prebuilt next
+            to ufb.exe; macOS builds from source with libx264 linked
+            in (scripts/build-external-ffmpeg-mac.sh). Used by the
+            C++ video thumbnail backend (app/thumbnails/
+            VideoBackend.cpp), the lightbox player, and the ffmpeg/
+            ffprobe CLI tools spawned for transcode.
+
+4a. x264 (H.264 encoder, statically linked into libavcodec)
+   Copyright (C) 2003-2026 x264 project
+   License: GPL-2.0-or-later
+   https://code.videolan.org/videolan/x264
 
 5. PDFium
    Copyright 2014 The PDFium Authors

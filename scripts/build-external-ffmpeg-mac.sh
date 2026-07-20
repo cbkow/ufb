@@ -28,11 +28,12 @@
 
 set -euo pipefail
 
-FFMPEG_VERSION="7.1"
+FFMPEG_VERSION="8.1.2"
 DEPLOYMENT_TARGET="13.0"
 SOURCE_DIR="/tmp/ufb-ffmpeg-build/ffmpeg-${FFMPEG_VERSION}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUTPUT_DIR="$REPO_ROOT/external/ffmpeg"
+X264_PREFIX="/tmp/ufb-ffmpeg-build/x264-prefix"
 
 if [[ -f "$OUTPUT_DIR/include/libavcodec/avcodec.h" \
    && -x "$OUTPUT_DIR/bin/ffmpeg" \
@@ -52,6 +53,33 @@ fi
 
 mkdir -p /tmp/ufb-ffmpeg-build
 cd /tmp/ufb-ffmpeg-build
+
+# x264: static-only PIC build linked into libavcodec. Static keeps the
+# bundle free of an extra dylib to patch + sign; PIC is required since
+# libavcodec itself is shared. The Windows side already ships BtbN's
+# GPL build with libx264 — this brings the mac transcode path to
+# parity (transcode.rs hardcodes -c:v libx264).
+if [[ ! -f "$X264_PREFIX/lib/libx264.a" ]]; then
+    if [[ ! -d x264-stable ]]; then
+        echo "[x264] downloading stable branch..."
+        curl -L "https://code.videolan.org/videolan/x264/-/archive/stable/x264-stable.tar.bz2" \
+            -o x264.tar.bz2
+        tar xf x264.tar.bz2
+    fi
+    cd x264-stable
+    echo "[x264] configuring..."
+    ./configure \
+        --prefix="$X264_PREFIX" \
+        --enable-static \
+        --disable-shared \
+        --disable-cli \
+        --enable-pic
+    echo "[x264] building..."
+    make -j"$(sysctl -n hw.ncpu)"
+    make install
+    cd /tmp/ufb-ffmpeg-build
+fi
+export PKG_CONFIG_PATH="$X264_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 if [[ ! -d "$SOURCE_DIR" ]]; then
     echo "[ffmpeg] downloading ffmpeg ${FFMPEG_VERSION}..."
@@ -74,7 +102,7 @@ export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 #
 # Rather than maintain two separate configure invocations, ship the
 # fuller "default ffmpeg" build (videotoolbox HW accel for free on
-# darwin, but no x264/x265 — those need GPL deps).
+# darwin, plus libx264 statically linked in for the transcode path).
 #
 # Notes:
 #   --disable-autodetect prevents configure from picking up Homebrew
@@ -88,8 +116,11 @@ export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
 #     only spawns ffmpeg + ffprobe.
 #   --enable-videotoolbox uses macOS's hardware decoder/encoder for
 #     h264/hevc when present.
-#   No --enable-libx264 / --enable-gpl — keeps the binaries shipping
-#     under the LGPL terms ffmpeg's default config produces.
+#   --enable-gpl --enable-libx264 makes the build GPL, matching the
+#     BtbN GPL build Windows ships. UFB itself is GPL-3.0-or-later,
+#     so nothing changes for the app; transcode.rs needs libx264.
+#     x264 is found via PKG_CONFIG_PATH (static prefix above) —
+#     explicit --enable-* still probes despite --disable-autodetect.
 echo "[ffmpeg] configuring..."
 ./configure \
     --prefix="$OUTPUT_DIR" \
@@ -98,6 +129,8 @@ echo "[ffmpeg] configuring..."
     --disable-autodetect \
     --disable-ffplay \
     --enable-videotoolbox \
+    --enable-gpl \
+    --enable-libx264 \
     --disable-doc \
     --disable-debug
 
