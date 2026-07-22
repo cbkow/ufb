@@ -1,6 +1,6 @@
 [package]
 name = "ufb-agent"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2021"
 description = "UFB VFS mount agent (was mediamount-agent)"
 license = "GPL-3.0-or-later"
@@ -24,6 +24,8 @@ unicode-normalization = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+# ObjC block for NetFSMountURLAsync's mount_report callback (netfs.rs)
+block2 = "0.6"
 notify = "7"  # FSEvents file watcher for NAS change detection
 rusqlite = { version = "0.32", features = ["bundled"] }
 r2d2 = "0.8"
