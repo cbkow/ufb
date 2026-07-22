@@ -189,6 +189,7 @@ Rectangle {
                     // "bookmark" as their status, always navigable.
                     unmanaged: m.unmanaged === true,
                     notice: m.notice || "",
+                    noticeFixable: m.noticeFixable === true,
                     state: m.unmanaged === true ? qsTr("bookmark") : (m.state || "(waiting)")
                 })
             }
@@ -592,6 +593,13 @@ Rectangle {
                     anchors.leftMargin: Theme.dim.padding
                     anchors.rightMargin: Theme.dim.padding + Theme.dim.scrollBarWidth
                     spacing: Theme.dim.spacingLoose
+                    // Above mtHover (the later sibling that otherwise
+                    // covers the whole row): the inline pills' own
+                    // MouseAreas must win the click. Non-interactive
+                    // children (labels, icons) don't accept mouse
+                    // events, so row clicks still fall through to
+                    // mtHover everywhere except on a pill.
+                    z: 1
 
                     Rectangle {
                         Layout.preferredWidth: 8
@@ -668,6 +676,48 @@ Rectangle {
                             id: noticeMa
                             anchors.fill: parent
                             hoverEnabled: true
+                        }
+                    }
+                    // Actionable half of the drift notice: the
+                    // expected /Volumes name is blocked by a stale
+                    // leftover folder (empty, unmounted). The pill
+                    // removes it with admin rights (one system auth
+                    // prompt) and restarts the mount so it lands on
+                    // the clean name. A live foreign volume never
+                    // sets noticeFixable — no pill, tooltip only.
+                    Rectangle {
+                        visible: model.noticeFixable === true
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredHeight: 22
+                        implicitWidth: fixDriftLabel.implicitWidth + 16
+                        radius: 11
+                        color: fixDriftHover.containsMouse
+                            ? Theme.colors.warning
+                            : Theme.colors.warningMuted || Theme.colors.warning
+                        opacity: fixDriftHover.containsMouse ? 1.0 : 0.85
+                        Label {
+                            id: fixDriftLabel
+                            anchors.centerIn: parent
+                            text: qsTr("Fix…")
+                            color: "#ffffff"
+                            font.pixelSize: Theme.font.sizeTiny
+                            font.bold: true
+                        }
+                        MouseArea {
+                            id: fixDriftHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: (mouse) => {
+                                // Eat the click so the row's own
+                                // navigate-on-click MouseArea doesn't
+                                // also fire.
+                                mouse.accepted = true
+                                console.log("[Sidebar] Fix pill clicked for", model.mountId)
+                                var err = Mount.fix_blocked_mountpoint(model.mountId)
+                                if (err && err.length > 0)
+                                    console.warn("[Sidebar] fix_blocked_mountpoint:", err)
+                            }
                         }
                     }
                     // Inline auth-recovery pill - the user's path out

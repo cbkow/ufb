@@ -171,7 +171,11 @@ pub fn apply_config(specs: Vec<LocalMountSpec>, events: MountEventsArc) {
 }
 
 fn emit(events: &MountEventsArc, spec: &LocalMountSpec, state: &str, detail: String,
-        mounted_at: Option<String>, notice: Option<String>) {
+        mounted_at: Option<String>, notice: Option<(String, bool)>) {
+    let (notice, notice_fixable) = match notice {
+        Some((text, fixable)) => (Some(text), if fixable { Some(true) } else { None }),
+        None => (None, None),
+    };
     events.state_update(&MountStateUpdateMsg {
         mount_id: spec.id.clone(),
         state: state.to_string(),
@@ -180,6 +184,7 @@ fn emit(events: &MountEventsArc, spec: &LocalMountSpec, state: &str, detail: Str
         sync_state_detail: None,
         mounted_at,
         notice,
+        notice_fixable,
     });
 }
 
@@ -216,8 +221,11 @@ mod sys {
             macos_mounts::mount_at_path_is_ours(path, nas_share_path)
         }
 
-        /// Drift notice — same semantics as the agent's `drift_notice`.
-        pub fn drift_notice(spec: &LocalMountSpec, mounted_path: &str) -> Option<String> {
+        /// Drift notice — same semantics as the agent's `drift_notice`:
+        /// Some((text, fixable)); fixable=true when a stale leftover
+        /// directory (empty, unmounted) squats the expected name, so
+        /// the row can offer the admin-privileged removal.
+        pub fn drift_notice(spec: &LocalMountSpec, mounted_path: &str) -> Option<(String, bool)> {
             let expected = spec
                 .nas_share_path
                 .trim_end_matches('\\')
@@ -233,9 +241,22 @@ mod sys {
             {
                 return None;
             }
-            Some(format!(
-                "Mounted as \"{}\" — /Volumes/{} was taken by another volume",
-                actual, expected
+            let expected_path = format!("/Volumes/{}", expected);
+            if macos_mounts::stale_dir_blocking(&expected_path) {
+                return Some((
+                    format!(
+                        "Mounted as \"{}\" — a stale leftover folder is blocking /Volumes/{}",
+                        actual, expected
+                    ),
+                    true,
+                ));
+            }
+            Some((
+                format!(
+                    "Mounted as \"{}\" — /Volumes/{} was taken by another volume",
+                    actual, expected
+                ),
+                false,
             ))
         }
 
@@ -290,15 +311,20 @@ mod sys {
 
         /// Drift = mounted at a different letter than configured
         /// (configured letter taken by a foreign mapping/volume).
-        pub fn drift_notice(spec: &LocalMountSpec, mounted_path: &str) -> Option<String> {
+        /// Never fixable — reclaiming a drive letter is a different
+        /// (and riskier) operation than removing a stale directory.
+        pub fn drift_notice(spec: &LocalMountSpec, mounted_path: &str) -> Option<(String, bool)> {
             let preferred = spec.drive_letter?.to_ascii_uppercase();
             let actual = mounted_path.chars().next()?.to_ascii_uppercase();
             if actual == preferred {
                 return None;
             }
-            Some(format!(
-                "Mounted at {}: — {}: was taken by another drive",
-                actual, preferred
+            Some((
+                format!(
+                    "Mounted at {}: — {}: was taken by another drive",
+                    actual, preferred
+                ),
+                false,
             ))
         }
 

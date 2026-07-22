@@ -89,6 +89,8 @@ libc = "0.2"
 # NetFS FFI for GUI-owned plain SMB mounting (macos_mounts.rs, F1)
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
+# ObjC block for NetFSMountURLAsync's mount_report callback (macos_mounts.rs)
+block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSURL", "NSString", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = [

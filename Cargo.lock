@@ -379,7 +379,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bindings"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "cxx",
  "cxx-qt",
@@ -3747,12 +3747,13 @@ dependencies = [
 
 [[package]]
 name = "ufb-core"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "arboard",
  "axum",
  "base64",
+ "block2",
  "chrono",
  "clipboard-win",
  "cloud-filter",

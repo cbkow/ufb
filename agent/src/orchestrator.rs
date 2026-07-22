@@ -17,14 +17,17 @@ static NEXT_NFS_PORT: AtomicU16 =
     AtomicU16::new(crate::sync::nfs_server::BASE_PORT);
 
 /// Per-mount orchestrator. Receives events, runs transitions, dispatches effects.
-/// Mount-drift notice (plans/17 slice C): Some(text) when NetFS parked
-/// the share at a dedup-suffixed name because /Volumes/<leaf> was
-/// taken by a live foreign occupant (a dead squatter would have been
+/// Mount-drift notice (plans/17 slice C): Some((text, fixable)) when
+/// NetFS parked the share at a dedup-suffixed name because
+/// /Volumes/<leaf> was occupied (a dead squatter would have been
 /// force-unmounted pre-flight). Identity resolution follows the real
 /// location either way — this is purely so the odd path isn't
-/// mysterious in the UI.
+/// mysterious in the UI. `fixable` is true when the occupant is a
+/// stale leftover directory (empty, not mounted) that the pre-flight
+/// couldn't rmdir — root-owned /Volumes — so the GUI can offer an
+/// admin-privileged removal; a live foreign volume is never fixable.
 #[cfg(target_os = "macos")]
-fn drift_notice(config: &MountConfig, mounted_path: &str) -> Option<String> {
+fn drift_notice(config: &MountConfig, mounted_path: &str) -> Option<(String, bool)> {
     let expected = config
         .nas_share_path
         .trim_end_matches('\\')
@@ -42,9 +45,22 @@ fn drift_notice(config: &MountConfig, mounted_path: &str) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
-        "Mounted as \"{}\" — /Volumes/{} was taken by another volume",
-        actual, expected
+    let expected_path = format!("/Volumes/{}", expected);
+    if crate::platform::macos::stale_dir_blocking(&expected_path) {
+        return Some((
+            format!(
+                "Mounted as \"{}\" — a stale leftover folder is blocking /Volumes/{}",
+                actual, expected
+            ),
+            true,
+        ));
+    }
+    Some((
+        format!(
+            "Mounted as \"{}\" — /Volumes/{} was taken by another volume",
+            actual, expected
+        ),
+        false,
     ))
 }
 
@@ -91,13 +107,14 @@ pub struct Orchestrator {
     /// once on first `SpawnSyncServer` and held for the orchestrator's
     /// lifetime so Stop/Start cycles don't reshuffle ports between
     /// adjacent mounts.
-    /// Human-readable mount-drift notice (plans/17 slice C): set when
-    /// the share mounted at a dedup-suffixed name because the expected
-    /// /Volumes/<share> was taken by a live foreign occupant. Rides on
-    /// MountStateUpdateMsg.notice so mount rows can annotate the odd
-    /// path instead of leaving it mysterious.
+    /// Human-readable mount-drift notice + fixable flag (plans/17
+    /// slice C): set when the share mounted at a dedup-suffixed name
+    /// because the expected /Volumes/<share> was occupied. Rides on
+    /// MountStateUpdateMsg.{notice, notice_fixable} so mount rows can
+    /// annotate the odd path — and offer the admin rmdir fix when the
+    /// occupant is a stale leftover directory.
     #[cfg(target_os = "macos")]
-    mount_notice: Option<String>,
+    mount_notice: Option<(String, bool)>,
     #[cfg(target_os = "macos")]
     nfs_port: Option<u16>,
     /// Shared NAS reachability atomic — written by the orchestrator's
@@ -1556,17 +1573,22 @@ impl Orchestrator {
             _ => None,
         };
 
-        let notice = {
+        let (notice, notice_fixable) = {
             #[cfg(target_os = "macos")]
             {
                 match &self.state {
-                    MountState::Mounted(_) => self.mount_notice.clone(),
-                    _ => None,
+                    MountState::Mounted(_) => match self.mount_notice.clone() {
+                        Some((text, fixable)) => {
+                            (Some(text), if fixable { Some(true) } else { None })
+                        }
+                        None => (None, None),
+                    },
+                    _ => (None, None),
                 }
             }
             #[cfg(not(target_os = "macos"))]
             {
-                None
+                (None, None)
             }
         };
 
@@ -1579,6 +1601,7 @@ impl Orchestrator {
             needs_elevation,
             mounted_at,
             notice,
+            notice_fixable,
         };
 
         // Stash into the shared state_cache before broadcasting so

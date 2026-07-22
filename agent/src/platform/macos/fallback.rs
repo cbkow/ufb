@@ -40,7 +40,7 @@ fn extract_share_name(nas_share_path: &str) -> String {
 /// Strategy (OS-native credentials — plans/17 slice C):
 /// 1. Reuse an existing mount if the share is already up under our
 ///    user-owned location or `/Volumes/`.
-/// 2. Mount via `NetFSMountURLSync` with NULL credentials — NetFS
+/// 2. Mount via NetFS (async, deadline-bounded) with NULL credentials — NetFS
 ///    consults the login Keychain's internet-password entries for
 ///    this server, exactly like Finder's silent Cmd-K path. UFB never
 ///    touches the secret.
@@ -132,6 +132,24 @@ pub fn macos_smb_mount(
                 );
                 if let Err(e) = macos_smb_unmount(&expected_path) {
                     log::warn!("macOS: squatter unmount failed ({}); proceeding — NetFS will dedup", e);
+                }
+            } else if stale_dir_blocking(&expected_path) {
+                // Orphaned NetFS placeholder dir. A plain rmdir only
+                // works where /Volumes permissions allow it (they
+                // usually don't — root-owned parent); on failure NetFS
+                // dedups to <leaf>-1 and the drift notice marks the
+                // squatter as fixable so the GUI can offer the
+                // admin-privileged removal.
+                match std::fs::remove_dir(&expected_path) {
+                    Ok(()) => log::info!(
+                        "macOS: removed stale mountpoint dir {}",
+                        expected_path
+                    ),
+                    Err(e) => log::warn!(
+                        "macOS: stale dir blocking {} ({}); NetFS will dedup",
+                        expected_path,
+                        e
+                    ),
                 }
             }
         }
@@ -243,6 +261,36 @@ fn path_is_mount_point(path: &str) -> bool {
     let table = String::from_utf8_lossy(&output.stdout);
     let needle = format!(" on {} (", path);
     table.lines().any(|l| l.contains(&needle))
+}
+
+/// True when `path` is an orphaned mountpoint placeholder: a directory
+/// that exists on disk, is NOT in the mount table, and is empty. NetFS
+/// creates `/Volumes/<share>` before mounting; an attempt that dies
+/// uncleanly (crash, power loss, the pre-1.0.11 NetAuthSysAgent hang)
+/// leaves the dir behind forever — `/Volumes` is root-owned, so no
+/// user-space cleanup ever runs and every later mount dedups to
+/// `<share>-1`. Distinguishes that removable case from a live foreign
+/// occupant, which must never be touched. read_dir here is safe: the
+/// path is confirmed NOT a mount, so it can't hang on a dead server.
+pub fn stale_dir_blocking(path: &str) -> bool {
+    if path_is_mount_point(path) {
+        return false;
+    }
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !md.is_dir() {
+        return false;
+    }
+    match std::fs::read_dir(path) {
+        Ok(mut d) => d.next().is_none(),
+        // NetFS creates its placeholder dirs mode 0111 (no read) — we
+        // can't prove emptiness, but "exists, unmounted, unreadable"
+        // has no other legitimate shape, and rmdir itself refuses
+        // non-empty dirs, so misclassification can't delete data.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+        Err(_) => false,
+    }
 }
 
 /// Bounded liveness probe: read_dir on a worker thread with a

@@ -51,7 +51,7 @@ fn extract_share_name(nas_share_path: &str) -> String {
 /// Strategy (OS-native credentials — plans/17 slice C):
 /// 1. Reuse an existing mount if the share is already up under our
 ///    user-owned location or `/Volumes/`.
-/// 2. Mount via `NetFSMountURLSync` with NULL credentials — NetFS
+/// 2. Mount via NetFS (async, deadline-bounded) with NULL credentials — NetFS
 ///    consults the login Keychain's internet-password entries for
 ///    this server, exactly like Finder's silent Cmd-K path. UFB never
 ///    touches the secret.
@@ -143,6 +143,24 @@ pub fn macos_smb_mount(
                 );
                 if let Err(e) = macos_smb_unmount(&expected_path) {
                     log::warn!("macOS: squatter unmount failed ({}); proceeding — NetFS will dedup", e);
+                }
+            } else if stale_dir_blocking(&expected_path) {
+                // Orphaned NetFS placeholder dir. A plain rmdir only
+                // works where /Volumes permissions allow it (they
+                // usually don't — root-owned parent); on failure NetFS
+                // dedups to <leaf>-1 and the drift notice marks the
+                // squatter as fixable so the GUI can offer the
+                // admin-privileged removal.
+                match std::fs::remove_dir(&expected_path) {
+                    Ok(()) => log::info!(
+                        "macOS: removed stale mountpoint dir {}",
+                        expected_path
+                    ),
+                    Err(e) => log::warn!(
+                        "macOS: stale dir blocking {} ({}); NetFS will dedup",
+                        expected_path,
+                        e
+                    ),
                 }
             }
         }
@@ -254,6 +272,36 @@ fn path_is_mount_point(path: &str) -> bool {
     let table = String::from_utf8_lossy(&output.stdout);
     let needle = format!(" on {} (", path);
     table.lines().any(|l| l.contains(&needle))
+}
+
+/// True when `path` is an orphaned mountpoint placeholder: a directory
+/// that exists on disk, is NOT in the mount table, and is empty. NetFS
+/// creates `/Volumes/<share>` before mounting; an attempt that dies
+/// uncleanly (crash, power loss, the pre-1.0.11 NetAuthSysAgent hang)
+/// leaves the dir behind forever — `/Volumes` is root-owned, so no
+/// user-space cleanup ever runs and every later mount dedups to
+/// `<share>-1`. Distinguishes that removable case from a live foreign
+/// occupant, which must never be touched. read_dir here is safe: the
+/// path is confirmed NOT a mount, so it can't hang on a dead server.
+pub fn stale_dir_blocking(path: &str) -> bool {
+    if path_is_mount_point(path) {
+        return false;
+    }
+    let Ok(md) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !md.is_dir() {
+        return false;
+    }
+    match std::fs::read_dir(path) {
+        Ok(mut d) => d.next().is_none(),
+        // NetFS creates its placeholder dirs mode 0111 (no read) — we
+        // can't prove emptiness, but "exists, unmounted, unreadable"
+        // has no other legitimate shape, and rmdir itself refuses
+        // non-empty dirs, so misclassification can't delete data.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => true,
+        Err(_) => false,
+    }
 }
 
 /// Bounded liveness probe: read_dir on a worker thread with a
@@ -490,29 +538,58 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::url::{CFURL, CFURLRef};
 use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
-use core_foundation_sys::base::{kCFAllocatorDefault, CFRelease};
+use core_foundation_sys::base::kCFAllocatorDefault;
 use core_foundation_sys::dictionary::CFMutableDictionaryRef;
 use core_foundation_sys::url::CFURLCreateWithString;
+use std::ffi::c_void;
+use std::sync::mpsc;
+use std::time::Duration;
+
+// Async NetFS + deadline + cancel, twinned from the agent's netfs.rs
+// (2026-07-22): every NetFS mount is brokered through the per-user
+// NetAuthSysAgent daemon with no timeout of its own — a login-time
+// mount aimed at a host behind a not-yet-connected VPN parked inside
+// `NetFSMountURLSync` for hours, and a client dying with a request in
+// flight wedges the daemon for every process on the machine. See the
+// agent's netfs.rs module docs for the full incident write-up.
 
 #[link(name = "NetFS", kind = "framework")]
 extern "C" {
-    /// `NetFSMountURLSync(url, mountpath, user, passwd, open_options,
-    ///                    mount_options, mountpoints)`
-    /// Returns 0 on success, errno-style on failure (see `<sys/errno.h>`).
-    /// Notable codes: `EAUTH` (80) — bad credentials. `ECANCELED` (89)
-    /// — user cancelled (only with UI allowed). `ETIMEDOUT` (60).
-    /// `mountpoints` (out) is a CFArray of CFString; first entry is the
-    /// path the share was actually mounted at (NetFS may pick a fallback
-    /// like `/Volumes/Share-1` if the requested path was busy).
-    fn NetFSMountURLSync(
+    /// `NetFSMountURLAsync(url, mountpath, user, passwd, open_options,
+    ///                     mount_options, requestID, queue, mount_report)`
+    /// Returns 0 when the request was accepted; the terminal status
+    /// arrives via `mount_report` (an ObjC block) on `queue`. Statuses
+    /// are errno-style (see `<sys/errno.h>`). Notable codes: `EAUTH`
+    /// (80) — bad credentials. `ECANCELED` (89) — user cancelled the
+    /// auth dialog, or the request was cancelled via
+    /// `NetFSMountURLCancel`. `ETIMEDOUT` (60). The block's
+    /// `mountpoints` CFArray of CFString (first entry = actual mount
+    /// path; NetFS may pick a fallback like `/Volumes/Share-1` if the
+    /// requested path was busy) is owned by NetFS and only valid for
+    /// the duration of the callback.
+    fn NetFSMountURLAsync(
         url: CFURLRef,
         mountpath: CFURLRef,
         user: CFStringRef,
         passwd: CFStringRef,
         open_options: CFMutableDictionaryRef,
         mount_options: CFMutableDictionaryRef,
-        mountpoints: *mut CFArrayRef,
+        request_id: *mut *mut c_void,
+        change_notification_queue: *mut c_void,
+        mount_report: *mut c_void,
     ) -> i32;
+
+    /// Cancel an in-flight `NetFSMountURLAsync` request. The
+    /// `mount_report` block still fires (with ECANCELED) — cancelling
+    /// through the API lets NetAuthSysAgent retire the request; simply
+    /// abandoning it (or dying with it in flight) wedges the daemon
+    /// for the whole login session.
+    fn NetFSMountURLCancel(request_id: *mut c_void) -> i32;
+}
+
+extern "C" {
+    /// libdispatch — global concurrent queue for the mount_report block.
+    fn dispatch_get_global_queue(identifier: isize, flags: usize) -> *mut c_void;
 }
 
 /// `kNAUIOptionKey` from `<NetFS/NetFS.h>` — the UI-policy switch in the
@@ -528,6 +605,60 @@ const NA_UI_OPTION_NO_UI: i32 = 0;
 /// are wrong or missing. Callers map this to an auth-failed mount
 /// state so the sidebar can prompt the user to fix credentials.
 pub const EAUTH: i32 = 80;
+
+/// Deadline for a silent (no-UI) mount attempt. NetFS's own SMB
+/// negotiation finishes in seconds when the host is reachable; anything
+/// past this is a hung NetAuthSysAgent request, not a slow server.
+const MOUNT_TIMEOUT_SILENT: Duration = Duration::from_secs(60);
+/// Deadline when `allow_ui` — the NetAuthAgent credentials dialog may
+/// legitimately sit open while the user types, so give it minutes, not
+/// seconds. Expiry cancels the request (and dismisses the dialog).
+const MOUNT_TIMEOUT_UI: Duration = Duration::from_secs(600);
+/// TCP connect budget for the port-445 pre-flight probe.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long to wait for the ECANCELED callback after
+/// `NetFSMountURLCancel` before giving up on a clean retirement.
+const CANCEL_GRACE: Duration = Duration::from_secs(10);
+
+/// Host component of an `smb://[user@]host[:port]/share` URL.
+fn smb_url_host(smb_url: &str) -> Option<&str> {
+    let authority = smb_url.strip_prefix("smb://")?.split('/').next()?;
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Fast reachability probe of the SMB port. Failing here (VPN not up
+/// yet, server down) returns EHOSTUNREACH without ever handing
+/// NetAuthSysAgent a request — callers' retry paths re-attempt once
+/// the route exists. An unparseable URL passes; NetFS gets to reject it.
+fn preflight_smb_reachable(smb_url: &str) -> Result<(), i32> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Some(host) = smb_url_host(smb_url) else {
+        return Ok(());
+    };
+    let addr = match (host, 445u16).to_socket_addrs().ok().and_then(|mut a| a.next()) {
+        Some(a) => a,
+        None => {
+            log::warn!("[netfs] preflight: cannot resolve {} — skipping NetFS call", host);
+            return Err(libc::EHOSTUNREACH);
+        }
+    };
+    match TcpStream::connect_timeout(&addr, PREFLIGHT_TIMEOUT) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            log::warn!(
+                "[netfs] preflight: {}:445 unreachable ({}) — skipping NetFS call",
+                host,
+                e
+            );
+            Err(libc::EHOSTUNREACH)
+        }
+    }
+}
 
 /// Mount an SMB share via NetFS. Returns the actual mount path on
 /// success (which may differ from the requested `mountpoint` if NetFS
@@ -554,6 +685,10 @@ pub const EAUTH: i32 = 80;
 /// path but eat the prompt every time, so the orchestrator passes
 /// `None` and re-points its user-facing symlinks at whatever NetFS
 /// returns.
+///
+/// Blocks the calling thread up to the mount deadline; a request that
+/// outlives it is cancelled and reported as ETIMEDOUT, which callers
+/// treat as retryable.
 pub fn netfs_smb_mount(
     smb_url: &str,
     mountpoint: Option<&Path>,
@@ -572,6 +707,8 @@ pub fn netfs_smb_mount(
         },
         allow_ui,
     );
+
+    preflight_smb_reachable(smb_url)?;
 
     let url_str = CFString::new(smb_url);
     let cf_url = unsafe {
@@ -629,7 +766,6 @@ pub fn netfs_smb_mount(
     let open_options: CFMutableDictionary<CFString, CFNumber> =
         CFMutableDictionary::new();
 
-    let mut mountpoints: CFArrayRef = std::ptr::null();
     let mountpath_ref = cf_mountpath
         .as_ref()
         .map(|u| u.as_concrete_TypeRef())
@@ -638,57 +774,109 @@ pub fn netfs_smb_mount(
         Some((u, p)) => (u.as_concrete_TypeRef(), p.as_concrete_TypeRef()),
         None => (std::ptr::null(), std::ptr::null()),
     };
-    let status = unsafe {
-        NetFSMountURLSync(
+
+    // Terminal status arrives via this block on a GCD queue thread.
+    // Args are raw-pointer-typed for block2's encoding; `mountpoints`
+    // is really a CFArrayRef, owned by NetFS and valid only inside the
+    // callback — extract the resolved path here, send it over.
+    let (tx, rx) = mpsc::channel::<(i32, Option<String>)>();
+    let report = block2::RcBlock::new(
+        move |status: i32, _request_id: *mut c_void, mountpoints: *const c_void| {
+            let resolved: Option<String> = if status == 0 && !mountpoints.is_null() {
+                let arr = mountpoints as CFArrayRef;
+                let count = unsafe { CFArrayGetCount(arr) };
+                if count > 0 {
+                    let raw_item = unsafe { CFArrayGetValueAtIndex(arr, 0) };
+                    if raw_item.is_null() {
+                        None
+                    } else {
+                        let s = unsafe {
+                            CFString::wrap_under_get_rule(raw_item as CFStringRef)
+                        };
+                        Some(s.to_string())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let _ = tx.send((status, resolved));
+        },
+    );
+
+    let mut request_id: *mut c_void = std::ptr::null_mut();
+    let start_status = unsafe {
+        NetFSMountURLAsync(
             cf_url.as_concrete_TypeRef(),
             mountpath_ref,
             user_ref,
             pass_ref,
             open_options.as_concrete_TypeRef() as CFMutableDictionaryRef,
             mount_options.as_concrete_TypeRef() as CFMutableDictionaryRef,
-            &mut mountpoints,
+            &mut request_id,
+            dispatch_get_global_queue(0, 0),
+            &*report as *const _ as *mut c_void,
         )
+    };
+    if start_status != 0 {
+        log::warn!(
+            "[netfs] NetFSMountURLAsync({}) failed to start: {}",
+            smb_url,
+            status_message(start_status)
+        );
+        return Err(start_status);
+    }
+
+    let timeout = if allow_ui { MOUNT_TIMEOUT_UI } else { MOUNT_TIMEOUT_SILENT };
+    let (status, resolved) = match rx.recv_timeout(timeout) {
+        Ok(done) => done,
+        Err(_) => {
+            log::warn!(
+                "[netfs] mount {} still pending after {}s — cancelling request",
+                smb_url,
+                timeout.as_secs()
+            );
+            let cancel_status = unsafe { NetFSMountURLCancel(request_id) };
+            match rx.recv_timeout(CANCEL_GRACE) {
+                Ok((st, _)) => log::warn!(
+                    "[netfs] cancelled mount {} retired with status={}",
+                    smb_url,
+                    st
+                ),
+                Err(_) => {
+                    log::warn!(
+                        "[netfs] cancel of {} not acknowledged (cancel_status={}) — \
+                         leaking request arguments",
+                        smb_url,
+                        cancel_status
+                    );
+                    // The unretired request may still reference these CF
+                    // objects from NetAuthSysAgent's side; leak them
+                    // rather than risk a use-after-free. Rare (requires a
+                    // wedged daemon) and small. The block itself is
+                    // refcounted by NetFS's own copy, so dropping our
+                    // RcBlock handle is safe either way.
+                    std::mem::forget(cf_url);
+                    std::mem::forget(cf_mountpath);
+                    std::mem::forget(cf_creds);
+                    std::mem::forget(open_options);
+                    std::mem::forget(mount_options);
+                }
+            }
+            return Err(libc::ETIMEDOUT);
+        }
     };
 
     log::info!(
-        "[netfs] NetFSMountURLSync({}) returned status={}",
+        "[netfs] NetFSMountURLAsync({}) completed status={}",
         smb_url,
         status,
     );
 
     if status != 0 {
-        if !mountpoints.is_null() {
-            unsafe { CFRelease(mountpoints as _) };
-        }
         return Err(status);
     }
-
-    // Out array: CFArray of CFString (per Apple's NetFS.h). Use the sys
-    // API to read index 0 by raw pointer, retain it as a CFString, then
-    // release the array. Skipping the typed `CFArray<CFString>` wrapper
-    // because mismatched-type assumptions there can throw a CF
-    // exception across the FFI boundary, which Rust treats as a
-    // foreign exception and aborts the process.
-    let resolved: Option<String> = if !mountpoints.is_null() {
-        let count = unsafe { CFArrayGetCount(mountpoints) };
-        let first = if count > 0 {
-            let raw_item = unsafe { CFArrayGetValueAtIndex(mountpoints, 0) };
-            if raw_item.is_null() {
-                None
-            } else {
-                let s = unsafe {
-                    CFString::wrap_under_get_rule(raw_item as CFStringRef)
-                };
-                Some(s.to_string())
-            }
-        } else {
-            None
-        };
-        unsafe { CFRelease(mountpoints as _) };
-        first
-    } else {
-        None
-    };
 
     Ok(resolved.unwrap_or_else(|| {
         // Should not happen on success per Apple's docs — fall back

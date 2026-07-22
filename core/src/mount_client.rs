@@ -101,6 +101,13 @@ pub struct MountStateUpdateMsg {
     /// the mount row; absence means the mount landed where expected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// True when the drift is caused by a stale leftover directory
+    /// squatting the expected mountpoint (empty, not in the mount
+    /// table) — i.e. UFB can offer a "Fix…" action that removes it
+    /// with admin rights and remounts. False/absent for a live
+    /// foreign occupant, which must never be touched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_fixable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

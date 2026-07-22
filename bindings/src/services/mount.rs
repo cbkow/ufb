@@ -718,6 +718,16 @@ pub mod qobject {
         fn stop_mount(self: Pin<&mut Mount>, mount_id: QString) -> QString;
         #[qinvokable]
         fn restart_mount(self: Pin<&mut Mount>, mount_id: QString) -> QString;
+
+        /// Remove the stale leftover directory blocking this mount's
+        /// expected /Volumes/<share> name (drift-notice rows with
+        /// noticeFixable), then restart the mount so it lands clean.
+        /// The removal runs `rmdir` with admin rights (one macOS auth
+        /// prompt) on a worker thread; the restart is queued back to
+        /// the Qt thread on success. Returns "" when the fix was
+        /// started, or an error message. macOS only.
+        #[qinvokable]
+        fn fix_blocked_mountpoint(self: Pin<&mut Mount>, mount_id: QString) -> QString;
         #[qinvokable]
         fn clear_sync_cache(self: Pin<&mut Mount>, mount_id: QString) -> QString;
         #[qinvokable]
@@ -977,6 +987,85 @@ impl qobject::Mount {
                 allow_ui: true,
             })
         })
+    }
+    fn fix_blocked_mountpoint(
+        self: core::pin::Pin<&mut qobject::Mount>,
+        mount_id: cxx_qt_lib::QString,
+    ) -> cxx_qt_lib::QString {
+        #[cfg(target_os = "macos")]
+        {
+            let id = mount_id.to_string();
+            log::info!("[mounts] fix_blocked_mountpoint({}) invoked", id);
+            let Some(cfg) = load_mount_configs().into_iter().find(|c| c.id == id)
+            else {
+                log::warn!("[mounts] fix_blocked_mountpoint: no config for {}", id);
+                return cxx_qt_lib::QString::from("mount not found");
+            };
+            use cxx_qt::Threading;
+            let expected =
+                format!("/Volumes/{}", share_name(&cfg.nas_share_path, &cfg.id));
+            let qt_handle: cxx_qt::CxxQtThread<qobject::Mount> =
+                self.as_ref().qt_thread();
+            // Worker thread: the admin auth prompt blocks until the
+            // user responds — must not freeze the Qt event loop.
+            std::thread::spawn(move || {
+                // Re-verify at fix time: only an empty, unmounted dir
+                // is ever removed — a volume that appeared under the
+                // name since the notice was computed must not be
+                // touched. rmdir refuses non-empty dirs as a second
+                // guard, and `quoted form of` handles any share name.
+                if !ufb_core::macos_mounts::stale_dir_blocking(&expected) {
+                    log::warn!(
+                        "[mounts] fix_blocked_mountpoint: {} is no longer a stale dir — skipping",
+                        expected
+                    );
+                    return;
+                }
+                let script = "on run argv\n\
+                    do shell script \"/bin/rmdir \" & quoted form of (item 1 of argv) with administrator privileges\n\
+                    end run";
+                let out = std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(script)
+                    .arg(&expected)
+                    .output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        log::info!(
+                            "[mounts] removed stale mountpoint dir {} (admin) — restarting mount",
+                            expected
+                        );
+                        let _ = qt_handle.queue(
+                            move |mount: core::pin::Pin<&mut qobject::Mount>| {
+                                let _ = mount.restart_mount(
+                                    cxx_qt_lib::QString::from(id.as_str()),
+                                );
+                            },
+                        );
+                    }
+                    Ok(o) => {
+                        let err =
+                            String::from_utf8_lossy(&o.stderr).trim().to_string();
+                        // errAEEventNotHandled -128 = user cancelled
+                        // the auth prompt — normal, stay quiet.
+                        if err.contains("-128") {
+                            log::info!(
+                                "[mounts] fix_blocked_mountpoint cancelled by user"
+                            );
+                        } else {
+                            log::warn!("[mounts] rmdir {} failed: {}", expected, err);
+                        }
+                    }
+                    Err(e) => log::warn!("[mounts] osascript spawn failed: {}", e),
+                }
+            });
+            cxx_qt_lib::QString::from("")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = mount_id;
+            cxx_qt_lib::QString::from("unsupported on this platform")
+        }
     }
     fn clear_sync_cache(
         self: core::pin::Pin<&mut qobject::Mount>,
@@ -1529,6 +1618,9 @@ fn serialize_merged(
         /// Mount-drift notice ("" when the mount landed at its
         /// expected name) — rendered as a low-key ⚠ on mount rows.
         notice: &'a str,
+        /// True when the drift is a stale leftover directory the
+        /// row can offer to remove (admin rmdir + restart).
+        notice_fixable: bool,
         /// "Fake" mount: UI-only bookmark, no agent lifecycle. Rows
         /// render without state pill / lifecycle buttons and are
         /// always navigable.
@@ -1624,6 +1716,9 @@ fn serialize_merged(
                 notice: st
                     .and_then(|s| s.notice.as_deref())
                     .unwrap_or(""),
+                notice_fixable: st
+                    .and_then(|s| s.notice_fixable)
+                    .unwrap_or(false),
                 unmanaged,
             }
         })

@@ -8,6 +8,7 @@ pub use fallback::find_existing_volume;
 pub use fallback::macos_smb_mount;
 pub use fallback::macos_smb_unmount;
 pub use fallback::mount_at_path_is_ours;
+pub use fallback::stale_dir_blocking;
 pub use fallback::MacosMountError;
 
 /// macOS App Group identifier shared by ufb-agent (this binary), the Qt
