@@ -10,6 +10,30 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.0.11</title>
+      <sparkle:version>1.0.11</sparkle:version>
+      <sparkle:shortVersionString>1.0.11</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.0.11</h2>
+<ul>
+  <li><b>Mounts no longer hang at login (macOS):</b> A mount aimed at a
+      server that isn't reachable yet (VPN still connecting after a
+      restart) could stall forever and never recover. Mount attempts now
+      probe the server first and run under a deadline — an unreachable
+      server fails fast and retries automatically until it comes back.</li>
+  <li><b>Stale mountpoint "Fix" pill (macOS):</b> When a leftover
+      <i>/Volumes</i> folder from an interrupted mount forces a share
+      onto a "-1" name, the mount row now explains exactly that and
+      offers a one-click <i>Fix…</i> that removes the leftover (one
+      admin prompt) and remounts on the clean name. A genuinely foreign
+      volume occupying the name is still left alone.</li>
+  <li><b>Sidebar pill clicks:</b> Inline action pills on mount rows
+      (<i>Sign in…</i>, <i>Fix…</i>) could silently ignore clicks —
+      fixed.</li>
+</ul>]]></description>
+      <pubDate>Wed, 22 Jul 2026 13:44:37 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.0.11/UFB-1.0.11-x64.exe" type="application/octet-stream" sparkle:edSignature="JwN+wMC4BMCOuk+4B3XltVpcr8Cl73/7VNPWtGtzawBPIlvT3DA72S69N2r2gTCEfjZAsCfgWbQz/B7vkkfQAA==" length="107495703" />
+    </item>
+    <item>
       <title>Version 1.0.9</title>
       <sparkle:version>1.0.9</sparkle:version>
       <sparkle:shortVersionString>1.0.9</sparkle:shortVersionString>
