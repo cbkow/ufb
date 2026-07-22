@@ -348,9 +348,22 @@ pub fn translate_path_to(
         // Keep a case-preserved version for slicing the remainder; the
         // lowercased copies are only for the win-source equality check.
         let (case_path, cmp_path, cmp_source) = if source_os == "win" {
-            let cp = strip_for_win(&norm_path);
             let cs = strip_for_win(&norm_source);
-            (cp.to_string(), cp.to_lowercase(), cs.to_lowercase())
+            if cs.is_empty() {
+                // The mapping is a bare drive root (e.g. `U:\`) — the
+                // drive letter is its only discriminating information.
+                // Stripping it would leave an empty prefix that matches
+                // every path, so compare with the drive letter intact.
+                let cs_full = norm_source.trim_end_matches('/');
+                (
+                    norm_path.clone(),
+                    norm_path.to_lowercase(),
+                    cs_full.to_lowercase(),
+                )
+            } else {
+                let cp = strip_for_win(&norm_path);
+                (cp.to_string(), cp.to_lowercase(), cs.to_lowercase())
+            }
         } else {
             (norm_path.clone(), norm_path.clone(), norm_source.clone())
         };
@@ -646,6 +659,40 @@ mod tests {
             translate_path_to("mac", "win", "/Volumes/X/file", &maps),
             "\\Volumes\\X\\file"
         );
+    }
+
+    // A bare-drive-root mapping (`U:\`) must only capture paths on
+    // that drive. The win-source matcher strips drive letters for
+    // comparison, which for a drive-root mapping would leave an empty
+    // prefix that matches every path — the first such mapping in the
+    // list would swallow links belonging to later, more specific
+    // mappings (e.g. a `C:\Volumes\...` LucidLink rule).
+    #[test]
+    fn bare_drive_mapping_does_not_capture_other_drives() {
+        let maps = [
+            mapping("U:\\", "/Volumes/Jobs_Live"),
+            mapping(
+                "C:\\Volumes\\union-ny-gfx\\union-jobs\\",
+                "/Volumes/union-ny-gfx/union-jobs",
+            ),
+        ];
+        // Path on C: must fall through the U:\ rule to the lucid rule.
+        let out = translate_path_to(
+            "win",
+            "win",
+            "C:/Volumes/union-ny-gfx/union-jobs/261317_x/file.mov",
+            &maps,
+        );
+        assert_eq!(
+            out,
+            "C:\\Volumes\\union-ny-gfx\\union-jobs\\261317_x\\file.mov"
+        );
+        // ...while a genuine U: path still matches the bare-drive rule.
+        let out = translate_path_to("win", "mac", "U:\\261317_x\\file.mov", &maps);
+        assert_eq!(out, "/Volumes/Jobs_Live/261317_x/file.mov");
+        // And mac->win onto the bare drive still round-trips.
+        let out = translate_path_to("mac", "win", "/Volumes/Jobs_Live/261317_x/file.mov", &maps);
+        assert_eq!(out, "U:\\261317_x\\file.mov");
     }
 
     // Legacy DB rows can lack the drive letter
