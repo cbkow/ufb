@@ -13,6 +13,8 @@ qt_add_executable(ufb
     thumbnails/ExrBackend.h
     thumbnails/HdrBackend.cpp
     thumbnails/HdrBackend.h
+    thumbnails/HeifBackend.cpp
+    thumbnails/HeifBackend.h
     thumbnails/PdfBackend.cpp
     thumbnails/PdfBackend.h
     thumbnails/VideoBackend.cpp
@@ -372,6 +374,26 @@ if(OpenEXR_FOUND)
 endif()
 if(TARGET ufb::pdfium)
     target_link_libraries(ufb PRIVATE ufb::pdfium)
+endif()
+if(libheif_FOUND AND TARGET heif)
+    # HeifBackend.cpp compiles to a null-return stub without this
+    # define, so the build stays green when vcpkg hasn't run yet.
+    target_compile_definitions(ufb PRIVATE UFB_HAVE_LIBHEIF)
+    target_link_libraries(ufb PRIVATE heif)
+    # Same Release-config forcing as OpenEXR above: we ship Release
+    # DLLs across the board, and the `debug` preset is RelWithDebInfo.
+    if(WIN32)
+        foreach(_imp_target heif de265)
+            if(TARGET ${_imp_target})
+                set_property(TARGET ${_imp_target} PROPERTY
+                    MAP_IMPORTED_CONFIG_DEBUG Release)
+                set_property(TARGET ${_imp_target} PROPERTY
+                    MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
+                set_property(TARGET ${_imp_target} PROPERTY
+                    MAP_IMPORTED_CONFIG_MINSIZEREL Release)
+            endif()
+        endforeach()
+    endif()
 endif()
 if(TARGET ufb::ffmpeg)
     target_link_libraries(ufb PRIVATE ufb::ffmpeg)
@@ -806,6 +828,23 @@ if(WIN32)
     endforeach()
     if(NOT _ufb_ffmpeg_payload)
         message(STATUS "ufb: external/ffmpeg/bin empty — run scripts/setup-external.ps1")
+    endif()
+
+    # pdfium.dll next to ufb.exe. windeployqt covers Qt and the vcpkg
+    # toolchain app-local-deploys the vcpkg DLLs (OpenEXR, libheif),
+    # but pdfium is vendored in external/ — without this sync a fresh
+    # build tree produces a ufb.exe that fails to launch.
+    set(_ufb_pdfium_dll "${CMAKE_SOURCE_DIR}/external/pdfium/bin/pdfium.dll")
+    if(EXISTS "${_ufb_pdfium_dll}")
+        add_custom_command(TARGET ufb POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_ufb_pdfium_dll}"
+                "$<TARGET_FILE_DIR:ufb>/pdfium.dll"
+            COMMENT "Sync pdfium.dll next to ufb.exe"
+        )
+    else()
+        message(STATUS "ufb: pdfium.dll missing in external/pdfium/bin — "
+                "run scripts/setup-external.ps1")
     endif()
 
     set(_ufb_exiftool "${CMAKE_SOURCE_DIR}/external/exiftool")

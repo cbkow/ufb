@@ -2,9 +2,11 @@
 #include "PsdBackend.h"
 #include "ExrBackend.h"
 #include "HdrBackend.h"
+#include "HeifBackend.h"
 #include "PdfBackend.h"
 #include "VideoBackend.h"
 
+#include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QSet>
@@ -56,6 +58,13 @@ static const QSet<QString>& pdfExts() {
     return s;
 }
 
+static const QSet<QString>& heifExts() {
+    // HEIF/HEIC stills via libheif + libde265. AVIF stays shell-only
+    // (no AV1 decoder bundled — see osThumbnailExts).
+    static const QSet<QString> s { "heic", "heif", "hif" };
+    return s;
+}
+
 static const QSet<QString>& videoExts() {
     static const QSet<QString> s {
         "mp4", "m4v", "mov", "qt",
@@ -77,14 +86,39 @@ static const QSet<QString>& osThumbnailExts() {
         "cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2", "pef", "srw",
         // Office — shell thumbnail handlers.
         "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-        // Misc shell-thumbnailed formats.
-        "heic", "heif", "avif",
+        // Misc shell-thumbnailed formats. (heic/heif moved to the
+        // libheif backend; avif stays here — no AV1 decoder bundled.)
+        "avif",
     };
     return s;
 }
 
 static QString lowerExt(const QString& path) {
     return QFileInfo(path).suffix().toLower();
+}
+
+// Content sniff for ISOBMFF HEIF containers. iPhone exports are
+// routinely renamed to .jpg/.jpeg by transfer tooling, so extension
+// dispatch alone would route them to QImageReader — which has no
+// HEVC decoder on Windows and silently yields no thumbnail. 12 bytes
+// is enough: [4-byte box size]['ftyp'][4-byte major brand]. Real
+// video files also start with 'ftyp' but carry brands (isom/qt/mp42)
+// outside this set, so they keep their extension route.
+//
+// File I/O — worker thread only (extract() already is); never called
+// from supports()/mayHaveThumbnail(), which stay pure so the QML
+// thread can gate delegates without touching disk.
+static bool sniffIsHeif(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QByteArray head = f.read(12);
+    if (head.size() < 12 || head.mid(4, 4) != "ftyp") return false;
+    static const QSet<QByteArray> kHeifBrands {
+        "heic", "heix", "hevc", "hevx",
+        "heim", "heis", "hevm", "hevs",
+        "mif1", "msf1",
+    };
+    return kHeifBrands.contains(head.mid(8, 4));
 }
 
 Thumbnailer::Thumbnailer(QObject* parent) : QObject(parent) {}
@@ -97,6 +131,7 @@ bool Thumbnailer::supports(const QString& path) const {
     if (psdExts().contains(ext)) return true;
     if (exrExts().contains(ext)) return true;
     if (hdrExts().contains(ext)) return true;
+    if (heifExts().contains(ext)) return true;
     if (pdfExts().contains(ext)) return true;
     if (videoExts().contains(ext)) return true;
     return false;
@@ -130,6 +165,16 @@ QImage Thumbnailer::extract(const QString& path, QSize requestedSize,
     auto capForBpp = [&](int bytesPerPixel) -> qint64 {
         return fullResPreview ? (kPreviewBudget / bytesPerPixel) : kThumbMaxPixels;
     };
+
+    // Content beats extension for HEIF: sniff BEFORE the qt-native
+    // branch so a renamed iPhone photo (.jpg holding HEVC) reaches
+    // libheif instead of dying in QImageReader. The sniff costs one
+    // 12-byte read on a file we're about to decode anyway.
+    if (heifExts().contains(ext) || sniffIsHeif(path)) {
+        // Decoded output is 3-4 bpp but libheif holds the YUV planes
+        // and the RGB conversion concurrently; budget at 8 bpp.
+        return ufb::decodeHeif(path, requestedSize, capForBpp(8));
+    }
 
     if (qtNativeExts().contains(ext)) {
         QImageReader reader(path);

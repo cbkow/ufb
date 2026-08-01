@@ -75,6 +75,19 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    Linkage: dynamic. OpenEXR / Imath / Iex / IlmThread DLLs ship next
             to ufb.exe. Used by the C++ EXR thumbnail backend.
 
+6a. libheif + libde265 (HEIF/HEIC decode)
+   libheif: Copyright (c) Dirk Farin and contributors
+   libde265: Copyright (c) struktur AG, Dirk Farin
+   License: LGPL-3.0-only (both)
+   File:    Libheif-LICENSE.txt
+   https://github.com/strukturag/libheif
+   https://github.com/strukturag/libde265
+   Linkage: dynamic. heif.dll + libde265.dll ship next to ufb.exe
+            (vcpkg, decode-only build — no HEVC encoder). Used by the
+            C++ HEIC thumbnail backend (app/thumbnails/HeifBackend.cpp).
+            Users have the right under LGPL-3 to replace these DLLs
+            with binary-compatible builds of their own.
+
 7. psd_sdk (Photoshop file format reader)
    Copyright 2011-2020 Molecular Matters GmbH
    License: BSD-2-Clause

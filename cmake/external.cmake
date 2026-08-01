@@ -181,3 +181,17 @@ if(OpenEXR_FOUND)
 else()
     message(STATUS "ufb: OpenEXR NOT found - run `vcpkg install` first")
 endif()
+
+# ---- libheif (vcpkg) ---------------------------------------------
+# HEIC/HEIF stills — iPhone photos, which reach job folders both as
+# .heic and renamed to .jpg (Thumbnailer content-sniffs for the
+# latter). Decode-only: the port's unconditional libde265 dependency
+# is the HEVC decoder; vcpkg.json disables default features so the
+# x265 *encoder* isn't built. Exported target is plain `heif`.
+find_package(libheif CONFIG QUIET)
+if(libheif_FOUND)
+    message(STATUS "ufb: libheif ${libheif_VERSION} found")
+else()
+    message(STATUS "ufb: libheif NOT found - run `vcpkg install` first "
+            "(HEIC thumbnails disabled)")
+endif()

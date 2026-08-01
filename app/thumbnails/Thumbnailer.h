@@ -41,7 +41,7 @@ public:
 
     // Broader QML-callable gate for the grid delegate's Loader.active.
     // Superset of supports(): also true for types the OS shell can
-    // thumbnail even though UFB has no backend (RAW, Office, HEIC).
+    // thumbnail even though UFB has no backend (RAW, Office, AVIF).
     // Pure extension check, no I/O — keeps the Loader from
     // instantiating an Image (and its delegate-recycle binding
     // storm) for files nothing can preview.
