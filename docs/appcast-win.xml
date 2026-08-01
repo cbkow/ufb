@@ -10,6 +10,24 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.0.12</title>
+      <sparkle:version>1.0.12</sparkle:version>
+      <sparkle:shortVersionString>1.0.12</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.0.12</h2>
+<ul>
+  <li><b>HEIC photos get real thumbnails:</b> iPhone photos (.heic/.heif)
+      now render thumbnails and full lightbox previews on both Windows
+      and macOS, decoded natively via libheif. Multi-tile iPhone captures
+      and EXIF rotation are handled correctly.</li>
+  <li><b>Renamed iPhone photos too:</b> photos that transfer tooling
+      renamed to .jpg (while leaving HEVC data inside) previously showed
+      no thumbnail at all. UFB now detects the real format from the file
+      contents and previews them regardless of extension.</li>
+</ul>]]></description>
+      <pubDate>Sat, 01 Aug 2026 17:49:35 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.0.12/UFB-1.0.12-x64.exe" type="application/octet-stream" sparkle:edSignature="C3fsmVDVj7INCypfxkyHL9CZZWjLtTNrt+Zs0gkJmdufQ8JLP4sZi5e1DgrnNSUXK0rjRtFMM0muU0rPks7pAg==" length="107966760" />
+    </item>
+    <item>
       <title>Version 1.0.11</title>
       <sparkle:version>1.0.11</sparkle:version>
       <sparkle:shortVersionString>1.0.11</sparkle:shortVersionString>
