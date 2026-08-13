@@ -21,7 +21,7 @@
 name: UFBHelpers
 options:
   deploymentTarget:
-    macOS: "13.0"
+    macOS: "14.0"
   bundleIdPrefix: dev.ufb
   xcodeVersion: "15.0"
   generateEmptyDirectories: true
@@ -29,7 +29,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
     DEVELOPMENT_TEAM: 5Z4S9VHV56
     CODE_SIGN_STYLE: Automatic
     # Keep Swift output usable from Xcode + xcodebuild on dev machines

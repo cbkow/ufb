@@ -9,8 +9,25 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND DEFINED ENV{VCPKG_ROOT})
         CACHE STRING "vcpkg toolchain file")
 endif()
 
+# Minimum supported macOS. Must be set before project() or the
+# compiler/linker default to the *host* OS version — every Mach-O then
+# gets stamped minos=<host> and dyld refuses to load the app on any
+# older system (found the hard way: 1.0.x binaries built on macOS 26
+# were 26.0-only while Info.plist claimed 13.0). Ignored on Windows.
+# LSMinimumSystemVersion in app/Info.plist.in and the vcpkg overlay
+# triplets in cmake/vcpkg-triplets/ derive from / mirror this value.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+
+# Pin vcpkg's OSX deployment target too, for the toolchain-file path
+# (classic `vcpkg install` runs pass --overlay-triplets explicitly —
+# see scripts/release-mac.sh). Same-name overlays win over builtins.
+if(CMAKE_HOST_APPLE)
+    set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vcpkg-triplets"
+        CACHE PATH "vcpkg overlay triplets (pins VCPKG_OSX_DEPLOYMENT_TARGET)")
+endif()
+
 project(UFB
-    VERSION 1.0.12
+    VERSION 1.0.13
     DESCRIPTION "Union File Browser (Qt edition)"
     LANGUAGES C CXX
 )
@@ -113,7 +130,16 @@ corrosion_import_crate(
 # this, cxx-qt-build panics with "Could not find Qt installation".
 get_target_property(_qt_qmake_loc Qt6::qmake IMPORTED_LOCATION)
 if(_qt_qmake_loc)
-    corrosion_set_env_vars(bindings "QMAKE=${_qt_qmake_loc}")
+    # On macOS also forward the deployment target: rustc pins its own
+    # floor, but cc-rs-compiled C/C++ inside cargo deps reads the
+    # MACOSX_DEPLOYMENT_TARGET env var and otherwise targets the host.
+    if(APPLE)
+        corrosion_set_env_vars(bindings
+            "QMAKE=${_qt_qmake_loc}"
+            "MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    else()
+        corrosion_set_env_vars(bindings "QMAKE=${_qt_qmake_loc}")
+    endif()
     message(STATUS "Set QMAKE for cxx-qt: ${_qt_qmake_loc}")
 endif()
 

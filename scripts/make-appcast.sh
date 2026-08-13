@@ -94,7 +94,7 @@ MAC_ITEM="    <item>
       <title>Version $VERSION</title>
       <sparkle:version>$VERSION</sparkle:version>
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
       <!-- Informational: no enclosure. Empty informationalUpdate ->
            applies to all installed versions. The button opens link. -->
       <sparkle:informationalUpdate></sparkle:informationalUpdate>

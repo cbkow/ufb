@@ -27,7 +27,7 @@
     <key>CFBundleIconName</key>
     <string>ufbmacOS</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>NSHighResolutionCapable</key>

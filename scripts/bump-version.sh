@@ -53,6 +53,7 @@ FILES=(
     agent/macos/Info.plist
     macos-helpers/UFBTray/Info.plist
     macos-helpers/UFBFinderSync/Info.plist
+    vcpkg.json
 )
 
 for f in "${FILES[@]}"; do
