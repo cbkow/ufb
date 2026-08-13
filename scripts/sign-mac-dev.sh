@@ -68,6 +68,7 @@ embed_icon() {
 
 UFB_ENTITLEMENTS="$REPO_ROOT/app/UFB.entitlements"
 AGENT_ENTITLEMENTS="$REPO_ROOT/agent/ufb-agent.entitlements"
+WEBENGINE_ENTITLEMENTS="$REPO_ROOT/app/QtWebEngineProcess.entitlements"
 
 ONLY=""
 case "${1:-}" in
@@ -225,6 +226,21 @@ if [ -z "$ONLY" ] || [ "$ONLY" = "app" ]; then
                 --timestamp --options runtime "$u"
         done < <(find "$SPARKLE_FW"/Versions/* -maxdepth 1 \
                       -name "Autoupdate" -type f -print0 2>/dev/null)
+    fi
+
+    # QtWebEngineProcess.app — Chromium's renderer/GPU helper nested in
+    # QtWebEngineCore.framework (ships since the 1.1.0 rendered-HTML
+    # preview; absent when the optional WebEngine module isn't
+    # installed). Notarization requires the helper to carry the JIT
+    # entitlements under the hardened runtime, and it must be sealed
+    # BEFORE the framework-unit pass below signs over the framework.
+    WEBENGINE_HELPER="$UFB_APP/Contents/Frameworks/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app"
+    if [ -d "$WEBENGINE_HELPER" ]; then
+        codesign --force --sign "$SIGNING_IDENTITY" \
+            --timestamp --options runtime \
+            --entitlements "$WEBENGINE_ENTITLEMENTS" \
+            "$WEBENGINE_HELPER"
+        echo "    QtWebEngineProcess.app (JIT entitlements)"
     fi
 
     # Each *.framework directory gets its own pass — codesign

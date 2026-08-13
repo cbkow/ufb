@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Chromium renderer/GPU helper (QtWebEngineProcess.app inside
+     QtWebEngineCore.framework). V8 JIT-compiles under the hardened
+     runtime only with MAP_JIT (allow-jit); allow-unsigned-executable-
+     memory covers the pre-MAP_JIT Chromium allocation path. Standard
+     pair for notarized Chromium helpers; the main UFB app does NOT
+     get these (browser process never JITs). -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>
