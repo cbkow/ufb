@@ -71,9 +71,20 @@ Item {
     // page pixels (a 100px+ "hole" beside the page). Defer the
     // WebEngineView until the container has real, settled geometry so
     // Chromium initializes at final size.
+    // Letterboxed like a document viewer: minNotes exports (and our
+    // .mndb render) use a left-anchored ~808px measure (760 + padding)
+    // on a full-bleed dark canvas, so an edge-to-edge view leaves a
+    // huge empty slab on the right that reads as a rendering hole. Cap
+    // the view CLOSE to the measure — a loose cap just re-creates the
+    // margin at every window width — and center it so the scrim frames
+    // the page evenly. 940 = measure + minNotes' block-number rail +
+    // scrollbar, with a slim breathing edge.
     Loader {
         id: webLoader
-        anchors.fill: parent
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: Math.min(root.width, 940)
         active: root.width > 1 && root.height > 1
         sourceComponent: webComp
     }

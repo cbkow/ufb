@@ -36,6 +36,13 @@ Item {
     // approximation (TextInfo.isText also returns true for them).
     readonly property bool _isHtml: (_ext === "html" || _ext === "htm")
         && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
+    // minNotes documents: MndbDoc reads the SQLite block list and emits
+    // a temp HTML render; "" (unreadable/corrupt) falls through to the
+    // file icon. WebEngine-only route, like _isHtml.
+    readonly property string _mndbHtml: (_ext === "mndb"
+        && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
+        && currentPath.length > 0) ? MndbDoc.htmlPreviewPath(currentPath) : ""
+    readonly property bool _isMndb: _mndbHtml.length > 0
     // Text routing lives in C++ (TextInfo.isText): known text/code exts,
     // plus a bounded content sniff so extensionless files (README,
     // .gitignore, renamed logs) preview instead of icon-ing. The guards
@@ -163,6 +170,7 @@ Item {
                          : root._isAudio ? audioComp
                          : root._isPdf  ? pdfComp
                          : root._isHtml ? htmlComp
+                         : root._isMndb ? mndbComp
                          : root._isText ? textComp
                                         : stillComp
     }
@@ -198,6 +206,11 @@ Item {
     Component {
         id: htmlComp
         HtmlPreview { source: root.currentPath }
+    }
+
+    Component {
+        id: mndbComp
+        HtmlPreview { source: root._mndbHtml }
     }
 
     Component {

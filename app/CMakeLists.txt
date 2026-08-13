@@ -80,6 +80,8 @@ qt_add_qml_module(ufb
         ExrInfo.h
         TextInfo.cpp
         TextInfo.h
+        MndbDoc.cpp
+        MndbDoc.h
     QML_FILES
         qml/Ufb/App/Main.qml
         qml/Ufb/App/Theme.qml
