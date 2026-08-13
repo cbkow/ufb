@@ -151,6 +151,10 @@ Source: "{#ReleaseDir}\translations\*";     DestDir: "{app}\translations";     F
 ; above). Both skipifsourcedoesntexist: a WebEngine-less build ships
 ; fine and HTML previews fall back to rich text.
 Source: "{#ReleaseDir}\QtWebEngineProcess.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+; qt.conf pins Qt's prefix to {app} so WebEngine resolves its locales at
+; translations\qtwebengine_locales and resources at resources\ on machines
+; with no Qt SDK — without it those paths point at the BUILD box's C:\Qt.
+Source: "{#ReleaseDir}\qt.conf";            DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\resources\*";        DestDir: "{app}\resources";        Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 
 ; Project templates (used by NewJobDialog)

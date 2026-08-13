@@ -862,6 +862,16 @@ if(WIN32)
                 "run scripts/setup-external.ps1")
     endif()
 
+    # qt.conf next to ufb.exe — pins Qt's prefix to the exe dir so
+    # WebEngine finds translations/qtwebengine_locales and resources/ on
+    # machines without a Qt SDK installed (see installer/qt.conf).
+    add_custom_command(TARGET ufb POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/installer/qt.conf"
+            "$<TARGET_FILE_DIR:ufb>/qt.conf"
+        COMMENT "Sync qt.conf next to ufb.exe"
+    )
+
     set(_ufb_exiftool "${CMAKE_SOURCE_DIR}/external/exiftool")
     if(EXISTS "${_ufb_exiftool}/exiftool.exe")
         add_custom_command(TARGET ufb POST_BUILD
