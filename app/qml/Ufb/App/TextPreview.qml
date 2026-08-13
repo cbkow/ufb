@@ -7,12 +7,21 @@
 
 import QtQuick
 import QtQuick.Controls
+import Ufb.Backend 1.0
 
 Flickable {
     id: root
 
     property string source: ""
     property string _text: ""
+
+    // Directory of the previewed file WITH its trailing separator —
+    // baseUrl needs the slash kept or relative hrefs resolve against
+    // the parent. Split on both separators for Windows paths.
+    readonly property string _sourceDir: {
+        var i = Math.max(source.lastIndexOf("/"), source.lastIndexOf("\\"))
+        return i >= 0 ? source.substring(0, i + 1) : ""
+    }
 
     readonly property string _ext: {
         var i = source.lastIndexOf(".")
@@ -63,8 +72,11 @@ Flickable {
         // Resolve relative <img src>/<a href> against the document's own
         // folder, not this QML file's qrc: URL (the default), so HTML
         // exports that ship an assets/ dir next to them show their images.
-        baseUrl: root.source.length > 0
-                 ? "file://" + encodeURI(root.source.substring(0, root.source.lastIndexOf("/") + 1))
+        // FileOps.to_file_url, not "file://" + path: a hand-built URL
+        // parses the Windows drive letter as the URL host, so relative
+        // images silently dropped on Windows.
+        baseUrl: root._sourceDir.length > 0
+                 ? FileOps.to_file_url(root._sourceDir)
                  : ""
         textFormat: root._isMarkdown ? TextEdit.MarkdownText
                   : root._isHtml     ? TextEdit.RichText

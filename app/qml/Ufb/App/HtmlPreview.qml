@@ -16,11 +16,18 @@
 import QtQuick
 import QtQuick.Controls
 import QtWebEngine
+import Ufb.Backend 1.0
 
 Item {
     id: root
 
     property string source: ""
+
+    // file:// URL via the shared sanitizer (drive letters, UNC, POSIX).
+    // Hand-building "file://" + path breaks on Windows: the drive
+    // letter parses as the URL host. "" = no safe URL form.
+    readonly property string _fileUrl:
+        source.length > 0 ? FileOps.to_file_url(source) : ""
 
     // canGoBack/backToGrid deliberately absent — Esc closes (lightbox
     // checks for those before treating Esc as close).
@@ -97,9 +104,14 @@ Item {
             // painted (initial frames) shows the lightbox scrim behind
             // instead of flashing black.
             backgroundColor: "transparent"
-            url: root.source.length > 0
-                 ? "file://" + encodeURI(root.source)
-                 : ""
+            url: root._fileUrl
+
+            // Own QUrl copy of _fileUrl so the navigation guard can
+            // compare toString()-to-toString() — both sides then get
+            // QUrl's normalization (percent-decoding, case) instead of
+            // comparing against a hand-encoded string that never
+            // matches for paths with spaces or non-ASCII.
+            property url _selfUrl: root._fileUrl
 
             // Scrollbar skin. Injected via runJavaScript at load-finish
             // rather than userScripts — assigning plain JS objects to
@@ -108,6 +120,11 @@ Item {
             // brief default-scrollbar flash before LoadSucceeded is
             // invisible in practice for local files.
             onLoadingChanged: (info) => {
+                // A failed load must never be silent — the blank-panel
+                // symptom is undebuggable without this line.
+                if (info.status === WebEngineView.LoadFailedStatus)
+                    console.warn("HtmlPreview: load failed for", info.url,
+                                 "-", info.errorString)
                 if (info.status !== WebEngineView.LoadSucceededStatus)
                     return
                 runJavaScript("(function(){"
@@ -127,9 +144,8 @@ Item {
             onNavigationRequested: (request) => {
                 // First load of the previewed file is fine; anything after
                 // that (link clicks, redirects) leaves the app instead.
-                var target = request.url.toString()
-                var self = "file://" + encodeURI(root.source)
-                if (target !== self && request.navigationType
+                if (request.url.toString() !== _selfUrl.toString()
+                        && request.navigationType
                         !== WebEngineNavigationRequest.ReloadNavigation) {
                     request.reject()
                     Qt.openUrlExternally(request.url)

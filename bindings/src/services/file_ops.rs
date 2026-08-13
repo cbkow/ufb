@@ -180,6 +180,15 @@ pub mod qobject {
         #[qinvokable]
         fn build_union_uri(self: &FileOps, path: QString) -> QString;
 
+        /// Convert a native path to a `file://` URL (drive-letter,
+        /// UNC, and POSIX forms all handled). Returns "" for a path
+        /// with no safe URL form (e.g. drive-less Windows paths).
+        /// Single-path face of the same sanitizer behind to_uri_list —
+        /// use this instead of hand-building "file://" + path in QML,
+        /// which breaks on Windows (drive letter parses as URL host).
+        #[qinvokable]
+        fn to_file_url(self: &FileOps, path: QString) -> QString;
+
         /// Resolve a `ufb://` / `union://` URI (or a plain native
         /// path) to a path local to this OS, applying the user's
         /// settings.json `pathMappings`. Used both for clicking
@@ -587,6 +596,12 @@ impl qobject::FileOps {
 
     fn build_union_uri(self: &qobject::FileOps, path: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
         cxx_qt_lib::QString::from(&ufb_core::utils::build_union_uri(&path.to_string()))
+    }
+
+    fn to_file_url(self: &qobject::FileOps, path: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        cxx_qt_lib::QString::from(
+            &ufb_core::utils::path_to_file_url(&path.to_string()).unwrap_or_default(),
+        )
     }
 
     fn resolve_ufb_uri(
