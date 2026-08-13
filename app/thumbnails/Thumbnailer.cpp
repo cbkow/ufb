@@ -11,6 +11,12 @@
 #include <QImageReader>
 #include <QSet>
 
+#if defined(Q_OS_MACOS)
+#include <sys/sysctl.h>
+#elif defined(Q_OS_WIN)
+#include <windows.h>
+#endif
+
 // Backend roster.
 //
 // `kQtNativeExts` covers everything QImageReader can decode with
@@ -160,13 +166,31 @@ QImage Thumbnailer::extract(const QString& path, QSize requestedSize,
     if (path.isEmpty()) return QImage();
     const QString ext = lowerExt(path);
 
-    // Decode-size ceiling. Thumbnails cap uniformly at 64 MP. The full-res
-    // lightbox preview raises the cap via a ~1.5 GB decoded-buffer budget,
-    // converted to a pixel count per backend's worst-case bytes/pixel, so a
-    // large EXR/PSB/TIFF still previews while a truly enormous file declines
-    // gracefully (→ shell thumbnail / file icon) instead of OOM-ing.
-    constexpr qint64 kThumbMaxPixels = 64LL * 1024 * 1024;
-    constexpr qint64 kPreviewBudget  = 1536LL * 1024 * 1024;  // ~1.5 GB
+    // Decode-size ceiling. Thumbnails cap uniformly at 256 MP (decode is
+    // async on the pool; a matte-painting PSB/TIFF at 16k×16k still gets a
+    // grid thumb). The full-res lightbox preview raises the cap via a
+    // decoded-buffer budget scaled to PHYSICAL RAM — an eighth of it,
+    // clamped to [2 GB, 8 GB] — converted to a pixel count per backend's
+    // worst-case bytes/pixel, so gfx workstations (64-128 GB) preview
+    // gigapixel PSBs while small machines keep a safe ceiling. Truly
+    // enormous files still decline gracefully (→ shell thumbnail / file
+    // icon) instead of OOM-ing.
+    constexpr qint64 kThumbMaxPixels = 256LL * 1024 * 1024;
+    static const qint64 kPreviewBudget = [] {
+        qint64 phys = 0;
+#if defined(Q_OS_MACOS)
+        size_t len = sizeof(phys);
+        sysctlbyname("hw.memsize", &phys, &len, nullptr, 0);
+#elif defined(Q_OS_WIN)
+        MEMORYSTATUSEX st{};
+        st.dwLength = sizeof(st);
+        if (GlobalMemoryStatusEx(&st))
+            phys = qint64(st.ullTotalPhys);
+#endif
+        const qint64 lo = 2LL * 1024 * 1024 * 1024;
+        const qint64 hi = 8LL * 1024 * 1024 * 1024;
+        return phys > 0 ? qBound(lo, phys / 8, hi) : lo;
+    }();
     auto capForBpp = [&](int bytesPerPixel) -> qint64 {
         return fullResPreview ? (kPreviewBudget / bytesPerPixel) : kThumbMaxPixels;
     };
@@ -205,14 +229,21 @@ QImage Thumbnailer::extract(const QString& path, QSize requestedSize,
                      (long long)(maxQtNativePixels / (1024 * 1024)));
             return QImage();
         }
+        // Qt 6's global QImageReader allocation limit defaults to 256 MB
+        // and silently nulls any decode past it — a hidden ceiling UNDER
+        // our pixel caps (a 15k×15k TIFF passed the cap gate but decoded
+        // to null until this). Align it with the active budget; our own
+        // pixel/file-size guards above remain the real bounds.
+        QImageReader::setAllocationLimit(
+            int(maxQtNativePixels * 8 / (1024 * 1024)));
         // Belt-and-suspenders: if the plugin couldn't report a size
         // (unsupported variant, header parse failure), check on-disk file
         // size — a giant uncompressed pixel dump with unknown dims would OOM.
-        // ~256 MB for thumbnails; raised for the full-res preview.
+        // 1 GB for thumbnails; the RAM-scaled budget for the full-res preview.
         if (!src.isValid()) {
             const qint64 fileBytes = QFileInfo(path).size();
-            const qint64 fileCap = fullResPreview ? 1536LL * 1024 * 1024
-                                                  : 256LL * 1024 * 1024;
+            const qint64 fileCap = fullResPreview ? kPreviewBudget
+                                                  : 1024LL * 1024 * 1024;
             if (fileBytes > fileCap) {
                 qWarning("Thumbnailer: %s has unknown dims and is %lld bytes (over cap), skipping",
                          qPrintable(path), (long long)fileBytes);
