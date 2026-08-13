@@ -30,7 +30,32 @@ QString escapeHtml(QString s) {
     s.replace(QLatin1Char('&'), QStringLiteral("&amp;"));
     s.replace(QLatin1Char('<'), QStringLiteral("&lt;"));
     s.replace(QLatin1Char('>'), QStringLiteral("&gt;"));
+    // Quotes too — escaped values land inside double-quoted attributes
+    // (href/style/alt), where an unescaped quote breaks out of the
+    // attribute and doc data becomes markup.
+    s.replace(QLatin1Char('"'), QStringLiteral("&quot;"));
+    s.replace(QLatin1Char('\''), QStringLiteral("&#39;"));
     return s;
+}
+
+// Hrefs come straight from doc data, and the preview runs with JS on in
+// a file:// origin — a javascript:/data: href is script execution.
+// Scheme-sniff a control-stripped copy (Chromium strips those chars
+// before resolving, so "java\nscript:" would slip a naive check).
+bool hrefSchemeOk(const QString& u) {
+    QString probe = u;
+    static const QRegularExpression ctl(QStringLiteral("[\\x00-\\x20]"));
+    probe.remove(ctl);
+    const QString scheme = QUrl(probe).scheme().toLower();
+    return scheme.isEmpty()
+        || scheme == QLatin1String("http")
+        || scheme == QLatin1String("https")
+        || scheme == QLatin1String("mailto")
+        || scheme == QLatin1String("file");
+}
+
+QString safeHrefAttr(const QString& u) {
+    return hrefSchemeOk(u) ? escapeHtml(u) : QStringLiteral("#");
 }
 
 // Conservative inline-markdown pass over ALREADY-ESCAPED text: `code`,
@@ -44,7 +69,26 @@ QString inlineMd(QString s) {
     s.replace(code, QStringLiteral("<code>\\1</code>"));
     s.replace(bold, QStringLiteral("<b>\\1</b>"));
     s.replace(italic, QStringLiteral("<i>\\1</i>"));
-    s.replace(link, QStringLiteral("<a href=\"\\2\">\\1</a>"));
+    // Linkify per-match (not a blind replace) so scriptable schemes
+    // stay plain text. The url is already entity-escaped; scheme
+    // characters are untouched by escaping, so the check still works.
+    {
+        QString rebuilt;
+        qsizetype last = 0;
+        auto it = link.globalMatch(s);
+        while (it.hasNext()) {
+            const auto m = it.next();
+            rebuilt += s.mid(last, m.capturedStart() - last);
+            if (hrefSchemeOk(m.captured(2)))
+                rebuilt += QStringLiteral("<a href=\"%1\">%2</a>")
+                               .arg(m.captured(2), m.captured(1));
+            else
+                rebuilt += m.captured(0);
+            last = m.capturedEnd();
+        }
+        rebuilt += s.mid(last);
+        s = rebuilt;
+    }
     s.replace(QStringLiteral("\n"), QStringLiteral("<br>"));
     return s;
 }
@@ -125,6 +169,10 @@ QString spansHtml(const QString& text, const QJsonArray& spans, CommentCtx& cc) 
         runs.push_back(std::move(r));
     }
     if (runs.empty()) return inlineHtml(text);
+    // The walk below is O(spans × boundaries); cap it so a corrupt or
+    // hostile block can't hang the GUI thread (whole render is
+    // synchronous in a QML binding). Real docs are nowhere close.
+    if (runs.size() > 2000) runs.resize(2000);
 
     std::set<int> bounds{0, len};
     for (const Run& r : runs) { bounds.insert(r.s); bounds.insert(r.e); }
@@ -133,12 +181,22 @@ QString spansHtml(const QString& text, const QJsonArray& spans, CommentCtx& cc) 
         if (r.k == QLatin1String("comment"))
             return QStringLiteral("<span class=\"cmt\">");
         if (r.k == QLatin1String("link"))
-            return QStringLiteral("<a href=\"%1\">").arg(escapeHtml(r.u));
-        if (r.k == QLatin1String("color"))
-            return QStringLiteral("<span style=\"color:%1\">").arg(escapeHtml(r.u));
-        if (r.k == QLatin1String("highlight"))
+            return QStringLiteral("<a href=\"%1\">").arg(safeHrefAttr(r.u));
+        // Colors go through QColor, not string interpolation — a raw
+        // value could smuggle extra CSS declarations into the style
+        // attribute ("red;background:url(...)"). Invalid → unstyled
+        // span, keeping open/close tags balanced.
+        if (r.k == QLatin1String("color")) {
+            const QColor c(r.u);
+            if (!c.isValid()) return QStringLiteral("<span>");
+            return QStringLiteral("<span style=\"color:%1\">").arg(c.name());
+        }
+        if (r.k == QLatin1String("highlight")) {
+            const QColor c(r.u);
+            if (!c.isValid()) return QStringLiteral("<span>");
             return QStringLiteral("<span style=\"background:%1;color:%2;padding:1px 2px\">")
-                .arg(escapeHtml(r.u), contrastOn(r.u));
+                .arg(c.name(), contrastOn(r.u));
+        }
         if (r.k == QLatin1String("bold"))      return QStringLiteral("<strong>");
         if (r.k == QLatin1String("italic"))    return QStringLiteral("<em>");
         if (r.k == QLatin1String("strike"))    return QStringLiteral("<s>");
@@ -386,9 +444,10 @@ bool parseInk(const QString& json, InkAnchor& out) {
 QImage renderSketch(const QJsonObject& o, const QString& docDir) {
     const int w = o.value(QStringLiteral("w")).toInt(480);
     const int h = o.value(QStringLiteral("h")).toInt(480);
-    if (w <= 0 || h <= 0) return {};
+    // Bounds-check BEFORE doubling — w near INT_MAX makes w * 2 signed
+    // overflow. 4096 source px keeps the 2x canvas within 8192.
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return {};
     const int W = w * 2, H = h * 2;
-    if (W > 8192 || H > 8192) return {};
     QImage img(W, H, QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
@@ -415,8 +474,9 @@ QImage renderSketch(const QJsonObject& o, const QString& docDir) {
 // Frame-space ink → transparent PNG at the media's intrinsic size (points
 // are display-frame fractions; stroke_width is already intrinsic px).
 QImage renderFrameInk(const InkAnchor& a, int mediaW, int mediaH) {
-    if (!a.frame || a.strokes.isEmpty() || mediaW <= 0 || mediaH <= 0)
-        return {};
+    if (!a.frame || a.strokes.isEmpty() || mediaW <= 0 || mediaH <= 0
+        || mediaW > 8192 || mediaH > 8192)   // descriptor-controlled —
+        return {};                           // clamp like the other rasters
     QImage img(mediaW, mediaH, QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
@@ -442,9 +502,13 @@ TextInk renderTextInk(const InkAnchor& a) {
         b.adjust(-pad, -pad, pad, pad);
         box = box.isNull() ? b : box.united(b);
     }
-    const int W = int(std::ceil(box.width() * 2.0));
-    const int H = int(std::ceil(box.height() * 2.0));
-    if (W <= 0 || H <= 0 || W > 8192 || H > 8192) return out;
+    // Range-check in double space: stroke coords are unclamped JSON
+    // doubles, and double→int of an out-of-int-range value is UB (and
+    // lands differently on arm64 vs x86). NaN fails the > 0 tests.
+    const double Wd = std::ceil(box.width() * 2.0);
+    const double Hd = std::ceil(box.height() * 2.0);
+    if (!(Wd > 0.0) || !(Hd > 0.0) || Wd > 8192.0 || Hd > 8192.0) return out;
+    const int W = int(Wd), H = int(Hd);
     QImage img(W, H, QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
