@@ -10,6 +10,28 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.1.1</title>
+      <sparkle:version>1.1.1</sparkle:version>
+      <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.1.1</h2>
+<ul>
+  <li><b>Metadata safety:</b> removing a job from your sidebar no longer
+      clears that job's shared metadata for every machine on the mesh.
+      Re-subscribing to a job also restores metadata that older versions
+      had hidden this way.</li>
+  <li><b>Backups:</b> metadata backups of volume-mapped jobs were
+      silently empty — snapshots now capture all columns and items.</li>
+  <li><b>minNotes previews:</b> Space previews of .mndb documents now
+      render margin ink, sketches, and comment threads, plus text
+      formatting — bold, italic, links, colors, and highlights.</li>
+  <li><b>Windows previews:</b> html, minNotes, and Markdown previews
+      now render correctly (they could come up blank or open in the
+      browser instead).</li>
+</ul>]]></description>
+      <pubDate>Thu, 13 Aug 2026 18:55:05 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.1.1/UFB-1.1.1-x64.exe" type="application/octet-stream" sparkle:edSignature="olx7mCXFrhEIWObInV/0TieVEi2p8Xcc7E26G62gbHVx4miwBzQ8WtfYBDw5MHxAV01JIC37cIfI1spbXZbdAA==" length="183583920" />
+    </item>
+    <item>
       <title>Version 1.1.0</title>
       <sparkle:version>1.1.0</sparkle:version>
       <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
