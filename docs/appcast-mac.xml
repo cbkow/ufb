@@ -10,6 +10,41 @@
          a button that opens the DMG link on GitHub Releases. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.1.0</title>
+      <sparkle:version>1.1.0</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <!-- Informational: no enclosure. Empty informationalUpdate ->
+           applies to all installed versions. The button opens link. -->
+      <sparkle:informationalUpdate></sparkle:informationalUpdate>
+      <link>https://github.com/cbkow/ufb/releases/download/v1.1.0/UFB-1.1.0-arm64.dmg</link>
+      <description><![CDATA[<h2>UFB 1.1.0</h2>
+<ul>
+  <li><b>Rendered HTML previews:</b> Spacebar previews of .html files
+      now render with full CSS and embedded images (Chromium-based) —
+      minNotes exports look like the real thing, complete with the
+      app-styled scrollbar. Links open in your browser.</li>
+  <li><b>minNotes documents:</b> Space a .mndb file to read it right in
+      the browser — headings, lists, tasks, code, tables, and images
+      render in the minNotes look without opening the app.</li>
+  <li><b>Audio previews:</b> wav, mp3, aiff, flac, m4a and friends now
+      play in the lightbox with full transport (K/J/L shuttle, seek
+      bar, loop, volume) — same keys as video.</li>
+  <li><b>Text, code, and logs:</b> Space previews plain text, Markdown,
+      config files, scripts, and code — including extensionless files
+      like README and dotfiles. Huge logs open instantly (first 1 MB
+      shown).</li>
+  <li><b>More formats:</b> DPX and Cineon frames get thumbnails and
+      full-res previews; svgz joins the image set.</li>
+  <li><b>Bigger files:</b> thumbnails now up to 256 MP sources; full-res
+      previews scale their memory budget to the machine — gigapixel
+      PSB/TIFF mattes preview on workstation RAM.</li>
+  <li><b>Requirements:</b> macOS 14 or newer (and builds are now
+      correctly stamped for it).</li>
+</ul>]]></description>
+      <pubDate>Thu, 13 Aug 2026 15:14:37 -0400</pubDate>
+    </item>
+    <item>
       <title>Version 1.0.12</title>
       <sparkle:version>1.0.12</sparkle:version>
       <sparkle:shortVersionString>1.0.12</sparkle:shortVersionString>
