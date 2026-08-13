@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
+#include <vector>
 
 namespace {
 
@@ -48,6 +50,153 @@ QString inlineMd(QString s) {
 }
 
 QString inlineHtml(const QString& raw) { return inlineMd(escapeHtml(raw)); }
+
+// ── Span-based inline formatting — ported from minNotes ────────────────
+// (Exporter.cpp emitInlineHtml). v1+ docs store CLEAN text plus
+// attrs.spans [{s,e,k,u}] with string kinds; the markdown pass above is
+// only the fallback for span-less blocks. The walk splits the text at
+// every span boundary and keeps a tag stack ordered by rank, so
+// overlapping spans nest deterministically.
+
+// Highlight text needs contrast against the user's swatch, chosen by luma.
+QString contrastOn(const QString& hex) {
+    const QColor c(hex);
+    if (!c.isValid()) return QStringLiteral("#f0f0f0");
+    const double luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue();
+    return luma > 140.0 ? QStringLiteral("#111111") : QStringLiteral("#f0f0f0");
+}
+
+int spanRank(const QString& k) {
+    if (k == QLatin1String("comment"))   return 0;   // outermost
+    if (k == QLatin1String("link"))      return 1;
+    if (k == QLatin1String("color"))     return 2;
+    if (k == QLatin1String("highlight")) return 3;
+    if (k == QLatin1String("bold"))      return 4;
+    if (k == QLatin1String("italic"))    return 5;
+    if (k == QLatin1String("strike"))    return 6;
+    if (k == QLatin1String("underline")) return 7;
+    if (k == QLatin1String("code"))      return 8;
+    return 9;                                        // unknown → dropped
+}
+
+// Comment bookkeeping shared between the span walk (anchors + hover
+// cards) and the trailing comments section.
+struct CommentCtx {
+    QHash<QString, int> num;              // thread id → 1-based number
+    QStringList order;                    // numbering order
+    QHash<QString, QString> sectionMsgs;  // div-wrapped, for the section
+    QHash<QString, QString> cardMsgs;     // span-wrapped, for hover cards
+    QHash<QString, bool> resolved;
+    bool known(const QString& tid) const {
+        return resolved.contains(tid) || sectionMsgs.contains(tid);
+    }
+    int numberFor(const QString& tid) {
+        auto it = num.find(tid);
+        if (it != num.end()) return *it;
+        num.insert(tid, num.size() + 1);
+        order.append(tid);
+        return num.size();
+    }
+};
+
+QString spansHtml(const QString& text, const QJsonArray& spans, CommentCtx& cc) {
+    const int len = int(text.size());
+
+    struct Run {
+        int s, e, rank; QString k, u; int note = 0;
+        bool operator==(const Run& o) const {
+            return k == o.k && u == o.u && s == o.s && e == o.e;
+        }
+    };
+    std::vector<Run> runs;
+    for (const QJsonValue& v : spans) {
+        const QJsonObject sp = v.toObject();
+        const QString k = sp.value(QStringLiteral("k")).toString();
+        const int rank = spanRank(k);
+        if (rank > 8) continue;
+        const int s = std::clamp(sp.value(QStringLiteral("s")).toInt(), 0, len);
+        const int e = std::clamp(sp.value(QStringLiteral("e")).toInt(), 0, len);
+        if (s >= e) continue;
+        Run r{s, e, rank, k, sp.value(QStringLiteral("u")).toString(), 0};
+        if (k == QLatin1String("comment")) {
+            if (!cc.known(r.u)) continue;   // orphaned anchor → plain text
+            r.note = cc.numberFor(r.u);
+        }
+        runs.push_back(std::move(r));
+    }
+    if (runs.empty()) return inlineHtml(text);
+
+    std::set<int> bounds{0, len};
+    for (const Run& r : runs) { bounds.insert(r.s); bounds.insert(r.e); }
+
+    auto openTag = [](const Run& r) -> QString {
+        if (r.k == QLatin1String("comment"))
+            return QStringLiteral("<span class=\"cmt\">");
+        if (r.k == QLatin1String("link"))
+            return QStringLiteral("<a href=\"%1\">").arg(escapeHtml(r.u));
+        if (r.k == QLatin1String("color"))
+            return QStringLiteral("<span style=\"color:%1\">").arg(escapeHtml(r.u));
+        if (r.k == QLatin1String("highlight"))
+            return QStringLiteral("<span style=\"background:%1;color:%2;padding:1px 2px\">")
+                .arg(escapeHtml(r.u), contrastOn(r.u));
+        if (r.k == QLatin1String("bold"))      return QStringLiteral("<strong>");
+        if (r.k == QLatin1String("italic"))    return QStringLiteral("<em>");
+        if (r.k == QLatin1String("strike"))    return QStringLiteral("<s>");
+        if (r.k == QLatin1String("underline")) return QStringLiteral("<u>");
+        if (r.k == QLatin1String("code"))      return QStringLiteral("<code>");
+        return {};
+    };
+    auto closeTag = [&cc](const Run& r) -> QString {
+        if (r.k == QLatin1String("comment")) {
+            // Thread rides inside the tinted range as a hover card (spans
+            // only — a div inside <p> would trip the HTML parser), plus a
+            // superscript link into the trailing section.
+            return QStringLiteral("<span class=\"cmtcard\">%1</span></span>"
+                                  "<sup class=\"cref\"><a href=\"#c%2\">%2</a></sup>")
+                .arg(cc.cardMsgs.value(r.u))
+                .arg(r.note);
+        }
+        if (r.k == QLatin1String("link"))      return QStringLiteral("</a>");
+        if (r.k == QLatin1String("color")
+            || r.k == QLatin1String("highlight")) return QStringLiteral("</span>");
+        if (r.k == QLatin1String("bold"))      return QStringLiteral("</strong>");
+        if (r.k == QLatin1String("italic"))    return QStringLiteral("</em>");
+        if (r.k == QLatin1String("strike"))    return QStringLiteral("</s>");
+        if (r.k == QLatin1String("underline")) return QStringLiteral("</u>");
+        if (r.k == QLatin1String("code"))      return QStringLiteral("</code>");
+        return {};
+    };
+
+    QString out;
+    std::vector<Run> stack;
+    auto it = bounds.begin();
+    int prev = *it;
+    for (++it; it != bounds.end(); ++it) {
+        const int a = prev, b = *it;
+        prev = *it;
+        if (a >= b) continue;
+        std::vector<Run> desired;
+        for (const Run& r : runs)
+            if (r.s <= a && r.e >= b) desired.push_back(r);
+        std::sort(desired.begin(), desired.end(), [](const Run& x, const Run& y) {
+            if (x.rank != y.rank) return x.rank < y.rank;
+            if (x.s != y.s) return x.s < y.s;
+            return x.u < y.u;
+        });
+        size_t common = 0;
+        while (common < stack.size() && common < desired.size()
+               && stack[common] == desired[common]) ++common;
+        while (stack.size() > common) { out += closeTag(stack.back()); stack.pop_back(); }
+        for (size_t i = common; i < desired.size(); ++i) {
+            out += openTag(desired[i]);
+            stack.push_back(desired[i]);
+        }
+        out += escapeHtml(text.mid(a, b - a));
+    }
+    while (!stack.empty()) { out += closeTag(stack.back()); stack.pop_back(); }
+    out.replace(QStringLiteral("\n"), QStringLiteral("<br>"));
+    return out;
+}
 
 // Media descriptor "src" → absolute local path ("" when unresolvable,
 // e.g. the portable {vol,rel} object form we don't map in v1).
@@ -436,6 +585,14 @@ const char* kCss =
     ".inkwrap .ink{position:absolute;inset:0;width:100%;z-index:1;background:transparent}"
     ".inkhost{position:relative}"
     ".cref{font-size:.72em;color:#0189f1;vertical-align:super}"
+    // Comment ranges: tinted anchor + hover thread card (spans styled as
+    // blocks — a real <p> inside a span would trip the parser).
+    ".cmt{background:rgba(1,137,241,.13);position:relative}"
+    ".cmt .cmtcard{display:none;position:absolute;left:0;top:1.6em;z-index:30;"
+    "width:300px;background:#202020;border:1px solid #2a2a2a;padding:10px 12px;"
+    "font-size:13px;font-style:normal;font-weight:400;line-height:1.5;color:#e4e3e2}"
+    ".cmt:hover .cmtcard{display:block}"
+    ".cmtcard .cmsg{display:block;margin-bottom:6px}"
     ".comments{margin-top:32px;border-top:1px solid #333;padding-top:12px}"
     ".comments h3{color:#f0f0f0;font-size:15px}"
     ".cthread{margin:10px 0}"
@@ -479,29 +636,32 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
 
             // Comment threads + messages (also v2-only). Numbered in block
             // order at anchor time; orphaned threads simply never surface.
-            QHash<QString, bool> threadResolved;
-            QHash<QString, QString> threadMsgs;
+            // Messages are pre-built twice: div-wrapped for the trailing
+            // section, span-wrapped for the in-text hover cards (a div
+            // inside <p> would trip the HTML parser).
+            CommentCtx cc;
             QSqlQuery thQ(db);
             if (thQ.exec(QStringLiteral("SELECT id, resolved FROM comment_threads")))
                 while (thQ.next())
-                    threadResolved.insert(thQ.value(0).toString(),
-                                          thQ.value(1).toInt() != 0);
+                    cc.resolved.insert(thQ.value(0).toString(),
+                                       thQ.value(1).toInt() != 0);
             QSqlQuery msgQ(db);
             if (msgQ.exec(QStringLiteral(
                     "SELECT thread_id, body, created FROM comment_messages "
                     "ORDER BY created")))
                 while (msgQ.next()) {
+                    const QString tid = msgQ.value(0).toString();
                     const QString stamp = commentStamp(msgQ.value(2).toLongLong());
-                    QString m = QStringLiteral("<div class=\"cmsg\">%1")
-                        .arg(inlineHtml(msgQ.value(1).toString()));
-                    if (!stamp.isEmpty())
-                        m += QStringLiteral("<span class=\"stamp\">%1</span>")
-                                 .arg(stamp);
-                    m += QStringLiteral("</div>");
-                    threadMsgs[msgQ.value(0).toString()] += m;
+                    QString body = escapeHtml(msgQ.value(1).toString());
+                    body.replace(QStringLiteral("\n"), QStringLiteral("<br>"));
+                    const QString stampHtml = stamp.isEmpty()
+                        ? QString()
+                        : QStringLiteral("<span class=\"stamp\">%1</span>").arg(stamp);
+                    cc.sectionMsgs[tid] += QStringLiteral("<div class=\"cmsg\">%1%2</div>")
+                        .arg(body, stampHtml);
+                    cc.cardMsgs[tid] += QStringLiteral("<span class=\"cmsg\">%1%2</span>")
+                        .arg(body, stampHtml);
                 }
-            QHash<QString, int> threadNum;
-            QStringList threadOrder;
 
             QSqlQuery q(db);
             if (q.exec(QStringLiteral(
@@ -521,13 +681,23 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                     InkAnchor ink;
                     parseInk(inkByBlock.value(blockId), ink);
 
+                    // Span formatting when the block carries spans (v1+
+                    // clean-text convention); markdown-ish fallback keeps
+                    // literal-markdown docs readable.
+                    const QJsonArray spans =
+                        attrs.value(QStringLiteral("spans")).toArray();
+                    const auto inl = [&](const QString& t) {
+                        return spans.isEmpty() ? inlineHtml(t)
+                                               : spansHtml(t, spans, cc);
+                    };
+
                     double indent = 0.0;    // block's own left offset in page px
                     QString blk;
                     if (type == QLatin1String("heading")) {
                         const int lv = qBound(1, attrs.value(QStringLiteral("level")).toInt(1), 6);
-                        blk = QStringLiteral("<h%1>%2</h%1>").arg(lv).arg(inlineHtml(content));
+                        blk = QStringLiteral("<h%1>%2</h%1>").arg(lv).arg(inl(content));
                     } else if (type == QLatin1String("quote")) {
-                        blk = QStringLiteral("<blockquote>%1</blockquote>").arg(inlineHtml(content));
+                        blk = QStringLiteral("<blockquote>%1</blockquote>").arg(inl(content));
                     } else if (type == QLatin1String("code")) {
                         blk = QStringLiteral("<pre><code>%1</code></pre>").arg(escapeHtml(content));
                     } else if (type == QLatin1String("divider")) {
@@ -551,30 +721,14 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                         indent = qBound(0, depth, 8) * 22;
                         blk = QStringLiteral(
                             "<div class=\"li\" style=\"margin-left:%1px\">%2 %3</div>")
-                            .arg(indent).arg(bullet, inlineHtml(content));
+                            .arg(indent).arg(bullet, inl(content));
                     } else {  // paragraph + unknown future types degrade to text
                         blk = content.isEmpty()
                             ? QStringLiteral("<p>&nbsp;</p>")
-                            : QStringLiteral("<p>%1</p>").arg(inlineHtml(content));
+                            : QStringLiteral("<p>%1</p>").arg(inl(content));
                     }
-
-                    // Comment anchors ride spans (k:"comment", u = thread id):
-                    // a numbered superscript on the block, thread body below.
-                    for (const QJsonValue& sv : attrs.value(QStringLiteral("spans")).toArray()) {
-                        const QJsonObject sp = sv.toObject();
-                        if (sp.value(QStringLiteral("k")).toString() != QLatin1String("comment"))
-                            continue;
-                        const QString tid = sp.value(QStringLiteral("u")).toString();
-                        if (!threadResolved.contains(tid) && !threadMsgs.contains(tid))
-                            continue;
-                        if (!threadNum.contains(tid)) {
-                            threadNum.insert(tid, threadNum.size() + 1);
-                            threadOrder.append(tid);
-                        }
-                        blk = insertBeforeClose(blk,
-                            QStringLiteral("<sup class=\"cref\"><a href=\"#c%1\">%1</a></sup>")
-                                .arg(threadNum.value(tid)));
-                    }
+                    // (Comment anchors are emitted by the span walk itself:
+                    // tinted range + hover card + superscript link.)
 
                     // Text-anchored margin ink: absolutely positioned inside a
                     // relative host, X from the page center (380 in the 760
@@ -597,17 +751,17 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                 }
             }
 
-            if (!threadOrder.isEmpty()) {
+            if (!cc.order.isEmpty()) {
                 commentsHtml = QStringLiteral(
                     "<section class=\"comments\"><h3>Comments</h3>");
-                for (const QString& tid : threadOrder) {
+                for (const QString& tid : cc.order) {
                     commentsHtml += QStringLiteral(
                         "<div class=\"cthread\" id=\"c%1\"><b>%1.</b>%2%3</div>")
-                        .arg(threadNum.value(tid))
-                        .arg(threadResolved.value(tid)
+                        .arg(cc.num.value(tid))
+                        .arg(cc.resolved.value(tid)
                                  ? QStringLiteral(" <span class=\"resolved\">(resolved)</span>")
                                  : QString(),
-                             threadMsgs.value(tid,
+                             cc.sectionMsgs.value(tid,
                                  QStringLiteral("<div class=\"cmsg\">(no messages)</div>")));
                 }
                 commentsHtml += QStringLiteral("</section>");
