@@ -107,6 +107,16 @@ impl SubscriptionManager {
                          deleted_at = NULL",
                     rusqlite::params![job_path, job_name, now],
                 )?;
+                // Recovery path: builds ≤1.1.0 tombstoned the job's whole
+                // item_metadata on unsubscribe with no undo. Nothing else
+                // writes item tombstones, so clearing them here only ever
+                // resurrects that damage. Stamp modified_time so the
+                // un-delete wins the LWW merge against the old tombstones.
+                conn.execute(
+                    "UPDATE item_metadata SET deleted_at = NULL, modified_time = ?1
+                     WHERE job_path = ?2 AND deleted_at IS NOT NULL",
+                    rusqlite::params![now, job_path],
+                )?;
                 let sub = conn.query_row(
                     "SELECT id, job_path, job_name, is_active, subscribed_time,
                             last_sync_time, sync_status, shot_count, modified_time
@@ -137,12 +147,12 @@ impl SubscriptionManager {
         let now = chrono::Utc::now().timestamp_millis();
         self.db
             .with_conn(|conn| {
+                // Sidebar-only: item_metadata is deliberately untouched.
+                // Unsubscribe used to blanket-tombstone the job's metadata
+                // mesh-wide (with no undo on resubscribe) — one node removing
+                // a job it couldn't even access erased everyone's metadata.
                 conn.execute(
                     "UPDATE subscriptions SET modified_time = ?1, deleted_at = ?1 WHERE job_path = ?2",
-                    rusqlite::params![now, job_path],
-                )?;
-                conn.execute(
-                    "UPDATE item_metadata SET modified_time = ?1, deleted_at = ?1 WHERE job_path = ?2",
                     rusqlite::params![now, job_path],
                 )?;
                 Ok(())

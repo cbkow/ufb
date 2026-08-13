@@ -120,8 +120,16 @@ impl qobject::Backup {
         // doesn't expose an "all columns for job" call directly, so
         // we walk the DB by listing every distinct (job_path, folder)
         // pair represented in column_definitions and aggregate.
-        let columns = collect_columns_for_job(&job_s);
-        let items = collect_items_for_job(&job_s);
+        //
+        // DB rows are keyed by tagged identity (`vol:…`), not the native
+        // path QML hands us — querying with the raw path silently
+        // matches nothing and writes an empty backup.
+        let job_id = {
+            let mappings = ufb_core::settings::AppSettings::load().path_mappings;
+            ufb_core::utils::to_identity_storage(&job_s, &mappings)
+        };
+        let columns = collect_columns_for_job(&job_id);
+        let items = collect_items_for_job(&job_id);
 
         let snapshot = serde_json::json!({
             "version": 1,

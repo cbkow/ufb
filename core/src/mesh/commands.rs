@@ -322,6 +322,15 @@ pub fn apply_table_change(db: &Arc<Database>, change_json: &str) -> Result<(), S
                          deleted_at = NULL",
                     rusqlite::params![job_path, job_name, ts],
                 )?;
+                // Mirror of subscribe_to_job's recovery pass: heal item
+                // tombstones left by ≤1.1.0 unsubscribes, using the
+                // sender's ts so the un-delete is timestamped consistently
+                // mesh-wide and wins LWW against the old tombstones.
+                conn.execute(
+                    "UPDATE item_metadata SET deleted_at = NULL, modified_time = ?1
+                     WHERE job_path = ?2 AND deleted_at IS NOT NULL",
+                    rusqlite::params![ts, job_path],
+                )?;
                 Ok(())
             }).map_err(|e| e.to_string())
         }
@@ -347,12 +356,11 @@ pub fn apply_table_change(db: &Arc<Database>, change_json: &str) -> Result<(), S
                         return Ok(());
                     }
                 }
+                // Sidebar-only, matching unsubscribe_from_job: never touch
+                // item_metadata here — a sub_remove from any peer must not
+                // erase the job's metadata mesh-wide.
                 conn.execute(
                     "UPDATE subscriptions SET modified_time = ?1, deleted_at = ?2 WHERE job_path = ?3",
-                    rusqlite::params![ts, deleted_ts, job_path],
-                )?;
-                conn.execute(
-                    "UPDATE item_metadata SET modified_time = ?1, deleted_at = ?2 WHERE job_path = ?3",
                     rusqlite::params![ts, deleted_ts, job_path],
                 )?;
                 Ok(())
