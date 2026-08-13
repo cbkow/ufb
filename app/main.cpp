@@ -42,6 +42,10 @@
 #endif
 #include "AppController.h"
 #include "UfbApplication.h"
+
+#ifdef UFB_HAVE_WEBENGINE
+#include <QtWebEngineQuick/qtwebenginequickglobal.h>
+#endif
 #include "updater/Updater.h"
 #ifdef Q_OS_MACOS
 #  include "MacAccent.h"
@@ -201,6 +205,30 @@ int main(int argc, char *argv[])
         fmt.setColorSpace(QColorSpace::SRgb);
         QSurfaceFormat::setDefaultFormat(fmt);
     }
+#endif
+
+#ifdef UFB_HAVE_WEBENGINE
+    // WebEngine (rendered HTML lightbox preview) must initialize before
+    // the QGuiApplication exists — it configures context sharing for
+    // Chromium's compositor. No-op cost when no HTML is ever previewed;
+    // the renderer processes only spawn when a WebEngineView is created.
+    //
+    // --disable-gpu-compositing: on macOS/Metal (Qt 6.11.1, DPR 2)
+    // Chromium's GPU compositor hands Qt frames sized past the item's
+    // bounds — a 60-100px band of uninitialized (black, then
+    // transparent) texture beside/below the page. Reproduced standalone
+    // with a bare WebEngineView; software compositing renders correctly
+    // and costs nothing measurable for static document previews (video
+    // never goes through WebEngine). Revisit on Qt upgrades.
+    {
+        QByteArray flags = qgetenv("QTWEBENGINE_CHROMIUM_FLAGS");
+        if (!flags.contains("disable-gpu-compositing")) {
+            if (!flags.isEmpty()) flags += ' ';
+            flags += "--disable-gpu-compositing";
+            qputenv("QTWEBENGINE_CHROMIUM_FLAGS", flags);
+        }
+    }
+    QtWebEngineQuick::initialize();
 #endif
 
     // UfbApplication overrides QGuiApplication::event() to catch
@@ -382,6 +410,16 @@ int main(int argc, char *argv[])
     // via FileOps.resolve_ufb_uri so we don't need to drag the
     // bindings into main.cpp.
     engine.rootContext()->setContextProperty("_launchPath", launchPath);
+
+    // Rendered-HTML preview availability. PreviewLightbox routes html/htm
+    // to the WebEngine-based HtmlPreview only when true; otherwise they
+    // stay on the QTextDocument TextPreview (builds without the optional
+    // WebEngine module, e.g. Windows until it's installed there).
+#ifdef UFB_HAVE_WEBENGINE
+    engine.rootContext()->setContextProperty("_webEngineAvailable", true);
+#else
+    engine.rootContext()->setContextProperty("_webEngineAvailable", false);
+#endif
 
     // One-app mode (plans/17 slice E): the GUI hosts the tray icon and
     // stays resident when the last window closes — closing the window

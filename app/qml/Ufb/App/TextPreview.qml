@@ -1,7 +1,9 @@
-// Plain-text / Markdown preview for the lightbox. Reads the file via a
-// file:// XMLHttpRequest (no new C++) and renders it with Qt's native
-// Markdown/plain text. Size-capped. RTF/rich docs are v2. See
-// devdocs/lightbox-preview-plan.md.
+// Plain-text / Markdown / HTML preview for the lightbox. Content comes
+// from TextInfo.readHead — a capped read (1 MB) so a multi-GB render log
+// never materialises in RAM (the old file:// XMLHttpRequest read the
+// whole file before truncating). Routing (which files land here,
+// including the content-sniff for extensionless text) lives in
+// TextInfo.isText; see devdocs/lightbox-preview-plan.md.
 
 import QtQuick
 import QtQuick.Controls
@@ -11,30 +13,35 @@ Flickable {
 
     property string source: ""
     property string _text: ""
-    readonly property bool _isMarkdown: source.toLowerCase().endsWith(".md")
-                                        || source.toLowerCase().endsWith(".markdown")
+
+    readonly property string _ext: {
+        var i = source.lastIndexOf(".")
+        var s = i >= 0 ? source.substring(i + 1).toLowerCase() : ""
+        return s.indexOf("/") >= 0 ? "" : s   // dot in a dir name, not an ext
+    }
+    readonly property bool _isMarkdown: _ext === "md" || _ext === "markdown"
+    // Rendered, not source — Qt's rich text engine handles the HTML subset
+    // typical of notes/exports; full web pages degrade to readable text.
+    readonly property bool _isHtml: _ext === "html" || _ext === "htm"
 
     contentWidth: width
     contentHeight: txt.implicitHeight + 40
     clip: true
     ScrollBar.vertical: UfbScrollBar { policy: ScrollBar.AlwaysOn }
 
-    onSourceChanged: _load()
-    function _load() {
-        _text = ""
-        if (source.length === 0) return
-        var xhr = new XMLHttpRequest()
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState === XMLHttpRequest.DONE) {
-                var t = xhr.responseText || ""
-                if (t.length > 1000000)   // ~1 MB cap for preview
-                    t = t.substring(0, 1000000) + "\n\n… (truncated)"
-                root._text = t
-            }
-        }
-        xhr.open("GET", "file://" + source)
-        xhr.send()
+    // Read caps. Logs/code want a tight cap (first MB is plenty and keeps
+    // the TextArea snappy); HTML is a *document* — note exports (minNotes)
+    // routinely embed screenshots as multi-MB base64 data: URIs, and a
+    // 1 MB cut lands mid-image and beheads the file. 32 MB renders those
+    // whole while still declining pathological giants.
+    readonly property int _readCap: _isHtml ? 32000000 : 1000000
+
+    onSourceChanged: {
+        contentY = 0
+        _text = source.length > 0 ? TextInfo.readHead(source, _readCap) : ""
     }
+    Component.onCompleted: if (source.length > 0 && _text.length === 0)
+        _text = TextInfo.readHead(source, _readCap)
 
     // Lightbox scroll-key API (same shape as PdfReader).
     function scrollStep(dy) {
@@ -53,10 +60,19 @@ Flickable {
         readOnly: true
         selectByMouse: true
         wrapMode: TextEdit.Wrap
-        textFormat: root._isMarkdown ? TextEdit.MarkdownText : TextEdit.PlainText
+        // Resolve relative <img src>/<a href> against the document's own
+        // folder, not this QML file's qrc: URL (the default), so HTML
+        // exports that ship an assets/ dir next to them show their images.
+        baseUrl: root.source.length > 0
+                 ? "file://" + encodeURI(root.source.substring(0, root.source.lastIndexOf("/") + 1))
+                 : ""
+        textFormat: root._isMarkdown ? TextEdit.MarkdownText
+                  : root._isHtml     ? TextEdit.RichText
+                                     : TextEdit.PlainText
         color: "#e2e2e2"
         font.pixelSize: 14
-        font.family: root._isMarkdown ? font.family : "Menlo"
+        font.family: (root._isMarkdown || root._isHtml) ? font.family
+                                                        : Theme.font.mono
         text: root._text
         background: null
     }

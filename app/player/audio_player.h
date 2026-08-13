@@ -83,8 +83,9 @@ public:
     // from AudioDecoder, which pulls from the FFmpeg container's
     // duration field at open() time. Authoritative for audio-only
     // files where VideoDecoder reports 0 (no video stream → no
-    // fps × frameCount duration).
-    double duration() const;
+    // fps × frameCount duration). Q_INVOKABLE for AudioPreview.qml,
+    // which drives this player standalone (no VideoDecoder).
+    Q_INVOKABLE double duration() const;
 
     Q_INVOKABLE void setVolume(float v);
     Q_INVOKABLE void setMuted(bool m);

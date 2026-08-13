@@ -91,6 +91,19 @@ find_package(Qt6 6.11 REQUIRED COMPONENTS
 
 qt_standard_project_setup(REQUIRES 6.11)
 
+# Qt WebEngine — OPTIONAL. Drives the lightbox's rendered HTML preview
+# (HtmlPreview.qml); without it the build stays green and HTML falls
+# back to the QTextDocument-based TextPreview. It's an add-on module
+# (Qt MaintenanceTool: extensions.qtwebengine.<ver>.clang_64 / win64),
+# installed on the mac build machine 2026-08-13; install on the
+# Windows box to get rendered HTML there too.
+find_package(Qt6 6.11 QUIET COMPONENTS WebEngineQuick)
+if(TARGET Qt6::WebEngineQuick)
+    message(STATUS "ufb: Qt WebEngineQuick found — rendered HTML preview enabled")
+else()
+    message(STATUS "ufb: Qt WebEngineQuick NOT found — HTML preview falls back to rich text")
+endif()
+
 # -----------------------------------------------------------------------------
 # Corrosion: bridge Cargo to CMake
 # -----------------------------------------------------------------------------

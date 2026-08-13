@@ -20,13 +20,28 @@ Item {
         var i = currentPath.lastIndexOf(".")
         return i >= 0 ? currentPath.substring(i + 1).toLowerCase() : ""
     }
+    // dpx/cin are Thumbnailer videoExts (single-frame ffmpeg stills) but
+    // deliberately NOT here — they preview as stills, not in the player.
     readonly property var _videoExts: ["mp4", "m4v", "mov", "qt", "mkv",
         "webm", "ogv", "avi", "wmv", "mpg", "mpeg", "ts", "m2ts", "mts",
         "mxf", "flv", "3gp", "3g2"]
+    readonly property var _audioExts: ["wav", "wave", "bwf", "mp3", "aiff",
+        "aif", "aifc", "flac", "m4a", "aac", "ogg", "oga", "opus", "wma",
+        "caf"]
     readonly property bool _isVideo: _videoExts.indexOf(_ext) >= 0
+    readonly property bool _isAudio: _audioExts.indexOf(_ext) >= 0
     readonly property bool _isPdf: _ext === "pdf" || _ext === "ai"
-    readonly property bool _isText: ["txt", "md", "markdown", "log", "json",
-        "xml", "csv", "ini", "cfg", "yaml", "yml", "srt"].indexOf(_ext) >= 0
+    // Rendered HTML needs the optional WebEngine module; without it,
+    // html/htm fall through to _isText → TextPreview's rich-text
+    // approximation (TextInfo.isText also returns true for them).
+    readonly property bool _isHtml: (_ext === "html" || _ext === "htm")
+        && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
+    // Text routing lives in C++ (TextInfo.isText): known text/code exts,
+    // plus a bounded content sniff so extensionless files (README,
+    // .gitignore, renamed logs) preview instead of icon-ing. The guards
+    // short-circuit so media paths never pay the sniff's 4 KB read.
+    readonly property bool _isText: !_isVideo && !_isAudio && !_isPdf
+        && currentPath.length > 0 && TextInfo.isText(currentPath)
 
     function open(path) {
         root.currentPath = path
@@ -74,8 +89,9 @@ Item {
             if (Window.window && Window.window.previewStep)
                 Window.window.previewStep(1)
             event.accepted = true
-        } else if (root._isVideo && content.item && content.item.togglePlayback) {
-            // Video transport (ported from QCView). Q/E step a frame; A·J /
+        } else if ((root._isVideo || root._isAudio)
+                   && content.item && content.item.togglePlayback) {
+            // Video/audio transport (ported from QCView). Q/E step a frame; A·J /
             // D·L relative-seek (auto-repeat = continuous); K play/pause; M
             // mute; Up/Down volume; V loop; Home/End jump to ends.
             var v = content.item
@@ -108,7 +124,8 @@ Item {
     // releases (those are part of the hold, not the real key-up).
     Keys.onReleased: (event) => {
         if (event.isAutoRepeat) return
-        if (root._isVideo && content.item && content.item.stopFastSeek
+        if ((root._isVideo || root._isAudio)
+            && content.item && content.item.stopFastSeek
             && (event.key === Qt.Key_A || event.key === Qt.Key_J
                 || event.key === Qt.Key_D || event.key === Qt.Key_L)) {
             content.item.stopFastSeek()
@@ -143,7 +160,9 @@ Item {
         active: root.visible && root.currentPath.length > 0
         asynchronous: true
         sourceComponent: root._isVideo ? videoComp
+                         : root._isAudio ? audioComp
                          : root._isPdf  ? pdfComp
+                         : root._isHtml ? htmlComp
                          : root._isText ? textComp
                                         : stillComp
     }
@@ -169,6 +188,16 @@ Item {
     Component {
         id: videoComp
         VideoPreview { source: root.currentPath }
+    }
+
+    Component {
+        id: audioComp
+        AudioPreview { source: root.currentPath }
+    }
+
+    Component {
+        id: htmlComp
+        HtmlPreview { source: root.currentPath }
     }
 
     Component {

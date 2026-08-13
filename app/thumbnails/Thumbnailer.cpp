@@ -29,7 +29,7 @@ static const QSet<QString>& qtNativeExts() {
     static const QSet<QString> s {
         "jpg", "jpeg", "jpe", "jfif",
         "png", "gif", "bmp", "ico", "icns",
-        "svg",
+        "svg", "svgz",
         "webp", "tiff", "tif",
         "tga", "wbmp",
     };
@@ -72,6 +72,11 @@ static const QSet<QString>& videoExts() {
         "avi", "wmv",
         "mpg", "mpeg", "ts", "m2ts", "mts",
         "mxf", "flv", "3gp", "3g2",
+        // Single-frame film/scan stills FFmpeg decodes like one-frame
+        // video (the 0.5s seek is ignored on failure and the first
+        // decodable frame wins). The lightbox routes these to the
+        // still ImagePreview, not the video player.
+        "dpx", "cin",
     };
     return s;
 }

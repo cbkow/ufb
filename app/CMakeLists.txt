@@ -78,6 +78,8 @@ qt_add_qml_module(ufb
         PdfDoc.h
         ExrInfo.cpp
         ExrInfo.h
+        TextInfo.cpp
+        TextInfo.h
     QML_FILES
         qml/Ufb/App/Main.qml
         qml/Ufb/App/Theme.qml
@@ -109,6 +111,8 @@ qt_add_qml_module(ufb
         qml/Ufb/App/UfbScrollBar.qml
         qml/Ufb/App/PreviewLightbox.qml
         qml/Ufb/App/VideoPreview.qml
+        qml/Ufb/App/AudioPreview.qml
+        qml/Ufb/App/HtmlPreview.qml
         qml/Ufb/App/ImagePreview.qml
         qml/Ufb/App/PdfReader.qml
         qml/Ufb/App/TextPreview.qml
@@ -324,6 +328,15 @@ target_link_libraries(ufb PRIVATE
     Qt6::Sql
     bindings
 )
+
+# Optional rendered-HTML preview (see root CMakeLists). main.cpp keys
+# QtWebEngineQuick::initialize() + the _webEngineAvailable context
+# property off this define; PreviewLightbox.qml gates the WebEngine
+# route on that property, so absence degrades to TextPreview cleanly.
+if(TARGET Qt6::WebEngineQuick)
+    target_link_libraries(ufb PRIVATE Qt6::WebEngineQuick)
+    target_compile_definitions(ufb PRIVATE UFB_HAVE_WEBENGINE)
+endif()
 
 # CredentialPrompt deleted (plans/17 slice B): credentials are
 # OS-owned (Keychain via NetFS on macOS, Credential Manager via the
