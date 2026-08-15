@@ -10,6 +10,36 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.1.2</title>
+      <sparkle:version>1.1.2</sparkle:version>
+      <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.1.2</h2>
+<ul>
+  <li><b>Job subscriptions are now personal:</b> subscribing or
+      unsubscribing a job only changes <i>your</i> sidebar and tracker —
+      it no longer adds or removes the job for everyone on the network.
+      Unsubscribe is fully reversible: the job's data keeps syncing to
+      your machine, and resubscribing restores the view instantly.</li>
+  <li><b>Unsubscribe confirmation:</b> a mis-click can't clear a job
+      from your sidebar anymore — unsubscribing now asks first.</li>
+  <li><b>Tracker data everywhere:</b> browsing a job you aren't
+      subscribed to now shows its tracked stars and metadata columns —
+      shared tracker data is visible wherever you browse. The All
+      Tracker view stays scoped to your subscribed jobs.</li>
+  <li><b>Smarter links:</b> opening a ufb:// link into a job you aren't
+      subscribed to now adds it to your sidebar (just for you) and opens
+      the proper job tab, instead of falling back to a plain folder
+      view.</li>
+  <li><b>Fixes:</b> tracked stars no longer bleed between two open jobs
+      that share a folder name (e.g. two jobs both containing
+      "Shots").</li>
+  <li><b>Note for fresh installs:</b> the sidebar now starts empty —
+      subscribe to your jobs by browsing to them ("Sync as Job").</li>
+</ul>]]></description>
+      <pubDate>Sat, 15 Aug 2026 18:10:51 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.1.2/UFB-1.1.2-x64.exe" type="application/octet-stream" sparkle:edSignature="sXRNJr1jxXhFVKZp4HqfHkSBwwEBXXASv6DmnohAmT05tUj7vEHKJR12SYM10ZnnchFL2LvftrgnZ5B4MUqNDg==" length="183562624" />
+    </item>
+    <item>
       <title>Version 1.1.1</title>
       <sparkle:version>1.1.1</sparkle:version>
       <sparkle:shortVersionString>1.1.1</sparkle:shortVersionString>
