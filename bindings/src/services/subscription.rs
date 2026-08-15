@@ -1,9 +1,10 @@
 //! `Subscription` QObject — wraps `core::subscription::SubscriptionManager`.
 //!
-//! Subscribe / unsubscribe / per-item metadata. Every mutation also
-//! fires a mesh broadcast via `super::mesh::broadcast_*` so peers see
-//! the change (and the leader marks the snapshot dirty so the next
-//! 30-second tick rewrites the NAS snapshot).
+//! Subscribe / unsubscribe / per-item metadata. Item-metadata mutations
+//! fire a mesh broadcast via `super::mesh::broadcast_metadata_edit` so
+//! peers see the change (and the leader marks the snapshot dirty so the
+//! next 30-second tick rewrites the NAS snapshot). Subscribe/unsubscribe
+//! do NOT broadcast — subscriptions are per-user local state (1.1.1+).
 //!
 //! Singleton; uses `bindings::db::shared_db()` so it shares one
 //! connection with Bookmarks.
@@ -31,6 +32,111 @@ fn translate_subscriptions_for_native(subs: &mut Vec<Subscription>) {
     for s in subs.iter_mut() {
         s.job_path = from_canonical_path(&s.job_path, &settings.path_mappings);
     }
+}
+
+/// Resolve the job root containing `native_path`: the first path
+/// component beneath a flagged jobs-folder root (mount-config
+/// `is_jobs_folder` volumes, or bookmarks flagged `is_project_folder`).
+/// Matching happens in canonical identity space, ASCII-case-insensitive
+/// with separators normalised — the same tolerance `is_shared_folder`
+/// uses in columns.rs. Returns the NATIVE job-root path, preserving the
+/// input path's own casing.
+fn job_root_for_native_path(native_path: &str) -> Option<String> {
+    let trimmed = native_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mappings = {
+        let settings_arc = crate::services::settings::shared_settings();
+        let settings = settings_arc.read().unwrap();
+        settings.path_mappings.clone()
+    };
+    let input_id = ufb_core::utils::to_identity_storage(trimmed, &mappings).replace('\\', "/");
+
+    // Candidate jobs-folder roots, canonical identity form.
+    let mut roots: Vec<String> = super::mount::jobs_folder_volume_paths()
+        .iter()
+        .map(|r| ufb_core::utils::to_identity_storage(r, &mappings))
+        .collect();
+    if let Some(db) = shared_db() {
+        let bookmarked: Result<Vec<String>, _> = db.with_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT path FROM bookmarks WHERE is_project_folder = 1")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect()
+        });
+        match bookmarked {
+            Ok(paths) => roots.extend(
+                paths
+                    .iter()
+                    .map(|r| ufb_core::utils::to_identity_storage(r, &mappings)),
+            ),
+            Err(e) => log::warn!("subscription: job_root bookmarks query failed: {}", e),
+        }
+    }
+
+    // LONGEST matching root wins: with nested roots (a bookmarked
+    // project folder inside a jobs-folder mount, or a year-folder
+    // layout) first-match would resolve the link to the container
+    // folder and subscribe the user to a non-job.
+    let mut best: Option<String> = None;
+    let mut best_len = 0usize;
+    for root in &roots {
+        let root_norm = root.replace('\\', "/");
+        let root_norm = root_norm.trim_end_matches('/');
+        if root_norm.is_empty()
+            || root_norm.len() <= best_len
+            || input_id.len() <= root_norm.len()
+            || !input_id.is_char_boundary(root_norm.len())
+        {
+            continue;
+        }
+        let (head, tail) = input_id.split_at(root_norm.len());
+        if !head.eq_ignore_ascii_case(root_norm) || !tail.starts_with('/') {
+            continue;
+        }
+        let first = tail
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .unwrap_or("");
+        if first.is_empty() {
+            continue;
+        }
+        // `head` carries the input's own casing.
+        best = Some(format!("{}/{}", head, first));
+        best_len = root_norm.len();
+    }
+    let job_id = best?;
+
+    // Never auto-subscribe over an existing ACTIVE subscription: the
+    // caller only reaches here when its QML-side lookup missed, and a
+    // miss can be spelling drift on an already-subscribed job — the
+    // subscribe upsert would silently reset the user's custom job name.
+    if let Some(db) = shared_db() {
+        let active: Vec<String> = db
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT job_path FROM subscriptions WHERE deleted_at IS NULL")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect()
+            })
+            .unwrap_or_default();
+        for row in &active {
+            let row_id = ufb_core::utils::to_identity_storage(row, &mappings).replace('\\', "/");
+            if row_id.eq_ignore_ascii_case(&job_id) {
+                return None;
+            }
+        }
+    }
+
+    // Only real directories qualify — a link to a loose file sitting
+    // directly under a jobs root must not create a file "job".
+    let native = to_native(&job_id);
+    if !std::path::Path::new(&native).is_dir() {
+        return None;
+    }
+    Some(native)
 }
 
 #[cxx_qt::bridge]
@@ -177,6 +283,15 @@ pub mod qobject {
             items_json: QString,
             tracked: bool,
         );
+
+        /// Resolve the job-root folder containing `path`: the first
+        /// component under a jobs-folder root (mount config flag or a
+        /// bookmark flagged is_project_folder). Returns the NATIVE
+        /// job-root path, or "" when `path` isn't inside any flagged
+        /// root. Used by the ufb:// deep-link handler to local-auto-
+        /// subscribe before routing into a job tab.
+        #[qinvokable]
+        fn job_root_for_path(self: &Subscription, path: QString) -> QString;
     }
 }
 
@@ -251,24 +366,16 @@ impl qobject::Subscription {
         } else {
             name_s
         };
-        let sub = match mgr.subscribe_to_job(&native_path, &display) {
+        // Subscriptions are per-user state — never broadcast to the mesh.
+        match mgr.subscribe_to_job(&native_path, &display) {
             Ok(sub) => {
                 log::info!("subscription: subscribed to {} ({})", sub.job_path, sub.job_name);
-                sub
             }
             Err(e) => {
                 log::warn!("subscription: subscribe failed: {}", e);
                 return;
             }
-        };
-        let change = serde_json::json!({
-            "action": "sub_add",
-            "job_path": sub.job_path,
-            "job_name": sub.job_name,
-            "modified_time": sub.modified_time,
-        })
-        .to_string();
-        super::mesh::broadcast_table_change(change);
+        }
         self.refresh();
     }
 
@@ -282,21 +389,7 @@ impl qobject::Subscription {
             return;
         }
         log::info!("subscription: unsubscribed {}", native_path);
-        // Mirror the timestamp the core just wrote (UPDATE … SET
-        // modified_time = ?1, deleted_at = ?1). Re-fetching to get the
-        // exact value would race with other writers; UTC now() is the
-        // same clock the core used a microsecond ago.
-        let now = ufb_core::utils::current_time_ms();
-        // Receiver auto-canonicalises path to its local form on
-        // apply_table_change, so it doesn't matter which OS form we send.
-        let change = serde_json::json!({
-            "action": "sub_remove",
-            "job_path": native_path,
-            "modified_time": now,
-            "deleted_at": now,
-        })
-        .to_string();
-        super::mesh::broadcast_table_change(change);
+        // Subscriptions are per-user state — never broadcast to the mesh.
         self.refresh();
     }
 
@@ -478,6 +571,15 @@ impl qobject::Subscription {
                 cxx_qt_lib::QString::from("[]")
             }
         }
+    }
+
+    fn job_root_for_path(
+        self: &qobject::Subscription,
+        path: cxx_qt_lib::QString,
+    ) -> cxx_qt_lib::QString {
+        cxx_qt_lib::QString::from(
+            &job_root_for_native_path(&path.to_string()).unwrap_or_default(),
+        )
     }
 
     fn set_item_metadata_field(

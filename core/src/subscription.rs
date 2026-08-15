@@ -107,16 +107,15 @@ impl SubscriptionManager {
                          deleted_at = NULL",
                     rusqlite::params![job_path, job_name, now],
                 )?;
-                // Recovery path: builds ≤1.1.0 tombstoned the job's whole
-                // item_metadata on unsubscribe with no undo. Nothing else
-                // writes item tombstones, so clearing them here only ever
-                // resurrects that damage. Stamp modified_time so the
-                // un-delete wins the LWW merge against the old tombstones.
-                conn.execute(
-                    "UPDATE item_metadata SET deleted_at = NULL, modified_time = ?1
-                     WHERE job_path = ?2 AND deleted_at IS NOT NULL",
-                    rusqlite::params![now, job_path],
-                )?;
+                // NOTE: the ≤1.1.0 blanket-tombstone heal that used to run
+                // here was removed with per-user subscriptions (1.1.2).
+                // Subscribing is personal presentation and must not mutate
+                // shared item_metadata: on a leader the un-delete would
+                // propagate mesh-wide via snapshot LWW and resurrect
+                // deliberately deleted rows (delete_item_metadata writes
+                // tombstones too). Residual ≤1.1.0 damage is recovered by
+                // re-tracking/editing the item — a deliberate action that
+                // broadcasts.
                 let sub = conn.query_row(
                     "SELECT id, job_path, job_name, is_active, subscribed_time,
                             last_sync_time, sync_status, shot_count, modified_time
@@ -310,12 +309,20 @@ impl SubscriptionManager {
     pub fn get_all_tracked_items(&self) -> Result<Vec<TrackedItemRecord>, String> {
         self.db
             .with_conn(|conn| {
+                // LEFT JOIN: subscriptions are per-user (1.1.1+), but tracked
+                // metadata is shared truth — every tracked row flows to QML
+                // regardless of local subscription state. The aggregated
+                // All Tracker applies its personal-scope filter in QML; the
+                // per-job Tracker always shows its job's rows. job_name
+                // falls back to '' for unsubscribed jobs (QML substitutes
+                // the path basename).
                 let mut stmt = conn.prepare_cached(
-                    "SELECT im.item_path, im.job_path, s.job_name, im.folder_name, im.metadata_json, im.modified_time
+                    "SELECT im.item_path, im.job_path, COALESCE(s.job_name, ''), im.folder_name, im.metadata_json, im.modified_time
                      FROM item_metadata im
-                     JOIN subscriptions s ON im.job_path = s.job_path
+                     LEFT JOIN subscriptions s
+                       ON im.job_path = s.job_path AND s.deleted_at IS NULL
                      WHERE im.is_tracked = 1
-                       AND im.deleted_at IS NULL AND s.deleted_at IS NULL",
+                       AND im.deleted_at IS NULL",
                 )?;
                 let items = stmt
                     .query_map([], |row| {

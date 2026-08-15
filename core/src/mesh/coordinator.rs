@@ -931,11 +931,30 @@ impl MeshSyncManager {
         }
         match std::fs::read_to_string(&path) {
             Ok(json) => match serde_json::from_str::<Vec<TableChangeQueueEntry>>(&json) {
-                Ok(entries) => {
+                Ok(mut entries) => {
+                    // Subscriptions became per-user (never synced) after
+                    // 1.1.1. A queue persisted by an older build can hold
+                    // stale sub_add/sub_remove entries; flushing those
+                    // would replay a days-old (un)subscribe to the whole
+                    // fleet with a fresh epoch stamp. Drop them here so
+                    // the next save persists the cleaned list.
+                    let before = entries.len();
+                    entries.retain(|e| !is_subscription_change(&e.change_json));
+                    let dropped = before - entries.len();
+                    if dropped > 0 {
+                        log::info!(
+                            "Table change queue: dropped {} legacy subscription entr{} (per-user since 1.1.1)",
+                            dropped,
+                            if dropped == 1 { "y" } else { "ies" }
+                        );
+                    }
                     let count = entries.len();
                     *self.table_change_queue.lock().await = entries;
                     if count > 0 {
                         log::info!("Loaded {} entries from table change queue", count);
+                    }
+                    if dropped > 0 {
+                        self.save_table_change_queue().await;
                     }
                 }
                 Err(e) => log::warn!("Failed to parse table change queue: {}", e),
@@ -1460,6 +1479,18 @@ async fn try_post_table_change_to_leader(
     }
 }
 
+/// True when a table-change payload is a `sub_add`/`sub_remove`.
+/// Subscriptions are per-user local state since 1.1.1 and must never be
+/// posted or queued; this also fences out entries persisted by older
+/// builds (see `load_table_change_queue`). Unparseable payloads return
+/// false — they fail loudly later in `apply_table_change` instead.
+fn is_subscription_change(change_json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(change_json)
+        .ok()
+        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_owned))
+        .is_some_and(|a| a == "sub_add" || a == "sub_remove")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_table_change(
     client: &reqwest::Client,
@@ -1470,6 +1501,14 @@ async fn handle_table_change(
     peer_outboxes: &Arc<tokio::sync::Mutex<PeerOutboxes>>,
     change_json: &str,
 ) {
+    // Belt-and-braces: bindings no longer emit sub_* changes, but never
+    // let one reach the wire or the retry queue regardless. (Inbound
+    // legacy sub_* from old peers rides BroadcastTableChange, not this
+    // path, so the mixed-fleet leader relay is unaffected.)
+    if is_subscription_change(change_json) {
+        log::info!("Sync: dropping local subscription table change (per-user since 1.1.1)");
+        return;
+    }
     if is_leader.load(Ordering::Relaxed) {
         peer_outboxes.lock().await.broadcast(OutboundMsg::TableChange {
             change_json: change_json.to_string(),
@@ -1538,4 +1577,33 @@ async fn flush_table_change_queue(
     let new_arrivals = std::mem::take(&mut *q);
     still_pending.extend(new_arrivals);
     *q = still_pending;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_changes_are_detected_and_filterable() {
+        let sub_remove = r#"{"action":"sub_remove","job_path":"vol:abc/job","modified_time":1,"deleted_at":1}"#;
+        let sub_add = r#"{"action":"sub_add","job_path":"vol:abc/job","job_name":"job","modified_time":1}"#;
+        let col_update = r#"{"action":"col_update","def":"{}","modified_time":2}"#;
+        assert!(is_subscription_change(sub_remove));
+        assert!(is_subscription_change(sub_add));
+        assert!(!is_subscription_change(col_update));
+        assert!(!is_subscription_change("not json"));
+
+        // The load-time filter: only the col_update survives.
+        let mut entries: Vec<TableChangeQueueEntry> = [sub_remove, col_update, sub_add]
+            .iter()
+            .map(|j| TableChangeQueueEntry {
+                change_json: j.to_string(),
+                queued_time: 0,
+                retry_count: 0,
+            })
+            .collect();
+        entries.retain(|e| !is_subscription_change(&e.change_json));
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].change_json.contains("col_update"));
+    }
 }

@@ -277,7 +277,6 @@ fn find_col_row(
 }
 
 pub fn apply_table_change(db: &Arc<Database>, change_json: &str) -> Result<(), String> {
-    use rusqlite::OptionalExtension;
     let change: serde_json::Value = serde_json::from_str(change_json)
         .map_err(|e| format!("Invalid table change JSON: {}", e))?;
 
@@ -291,80 +290,18 @@ pub fn apply_table_change(db: &Arc<Database>, change_json: &str) -> Result<(), S
     let incoming_deleted: Option<i64> = change.get("deleted_at").and_then(|v| v.as_i64());
 
     match action {
-        "sub_add" => {
-            let job_path = change.get("job_path").and_then(|v| v.as_str()).unwrap_or("");
-            let job_name = change.get("job_name").and_then(|v| v.as_str()).unwrap_or("");
-            if job_path.is_empty() {
-                return Err("sub_add: missing job_path".to_string());
-            }
-            let job_path = &to_identity(job_path);
-            let ts = if incoming_mod > 0 { incoming_mod } else { chrono::Utc::now().timestamp_millis() };
-            db.with_conn(|conn| {
-                let local_mod: Option<i64> = conn
-                    .query_row(
-                        "SELECT modified_time FROM subscriptions WHERE job_path = ?1",
-                        [job_path],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if let Some(local) = local_mod {
-                    if ts <= local {
-                        log::info!("Sync: sub_add stale (incoming={}, local={}), ignoring", ts, local);
-                        return Ok(());
-                    }
-                }
-                conn.execute(
-                    "INSERT INTO subscriptions (job_path, job_name, subscribed_time, modified_time, deleted_at)
-                     VALUES (?1, ?2, ?3, ?3, NULL)
-                     ON CONFLICT(job_path) DO UPDATE SET
-                         job_name = excluded.job_name,
-                         modified_time = excluded.modified_time,
-                         deleted_at = NULL",
-                    rusqlite::params![job_path, job_name, ts],
-                )?;
-                // Mirror of subscribe_to_job's recovery pass: heal item
-                // tombstones left by ≤1.1.0 unsubscribes, using the
-                // sender's ts so the un-delete is timestamped consistently
-                // mesh-wide and wins LWW against the old tombstones.
-                conn.execute(
-                    "UPDATE item_metadata SET deleted_at = NULL, modified_time = ?1
-                     WHERE job_path = ?2 AND deleted_at IS NOT NULL",
-                    rusqlite::params![ts, job_path],
-                )?;
-                Ok(())
-            }).map_err(|e| e.to_string())
-        }
-        "sub_remove" => {
-            let job_path = change.get("job_path").and_then(|v| v.as_str()).unwrap_or("");
-            if job_path.is_empty() {
-                return Err("sub_remove: missing job_path".to_string());
-            }
-            let job_path = &to_identity(job_path);
-            let ts = if incoming_mod > 0 { incoming_mod } else { chrono::Utc::now().timestamp_millis() };
-            let deleted_ts = incoming_deleted.unwrap_or(ts);
-            db.with_conn(|conn| {
-                let local_mod: Option<i64> = conn
-                    .query_row(
-                        "SELECT modified_time FROM subscriptions WHERE job_path = ?1",
-                        [job_path],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if let Some(local) = local_mod {
-                    if ts <= local {
-                        log::info!("Sync: sub_remove stale (incoming={}, local={}), ignoring", ts, local);
-                        return Ok(());
-                    }
-                }
-                // Sidebar-only, matching unsubscribe_from_job: never touch
-                // item_metadata here — a sub_remove from any peer must not
-                // erase the job's metadata mesh-wide.
-                conn.execute(
-                    "UPDATE subscriptions SET modified_time = ?1, deleted_at = ?2 WHERE job_path = ?3",
-                    rusqlite::params![ts, deleted_ts, job_path],
-                )?;
-                Ok(())
-            }).map_err(|e| e.to_string())
+        // Subscriptions became per-user state (never synced) after 1.1.1.
+        // Peers running older builds still emit these — log + drop so they
+        // get a 200 back (an Err here becomes HTTP 500, which sends the old
+        // peer into its 10-deep retry loop). The leader still re-broadcasts
+        // the raw payload downstream, so old↔old propagation through a
+        // new-build leader keeps working during the mixed-fleet window.
+        "sub_add" | "sub_remove" => {
+            log::info!(
+                "Sync: ignoring legacy `{}` table change — subscriptions are per-user local state",
+                action
+            );
+            Ok(())
         }
         "col_add" => {
             let def_str = change.get("def").and_then(|v| v.as_str()).unwrap_or("");

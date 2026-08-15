@@ -242,12 +242,14 @@ impl SnapshotWorker {
 }
 
 fn take_snapshot(conn: &mut Connection, farm_path: &str, node_id: &str) -> Result<(), String> {
+    // subscriptions deliberately excluded: they're per-user local state and
+    // no longer snapshotted, so a node with subs but no metadata must NOT
+    // publish an empty-metadata snapshot over a good one on the NAS.
     let total: i64 = conn
         .query_row(
             "SELECT
                (SELECT COUNT(*) FROM main.item_metadata)
-             + (SELECT COUNT(*) FROM main.column_definitions)
-             + (SELECT COUNT(*) FROM main.subscriptions);",
+             + (SELECT COUNT(*) FROM main.column_definitions);",
             [],
             |row| row.get(0),
         )
@@ -406,14 +408,18 @@ fn take_snapshot(conn: &mut Connection, farm_path: &str, node_id: &str) -> Resul
     // (`native:`) rows out of the shared snapshot — only volume-backed
     // identities are synced. The snapshot carries tagged identities
     // verbatim (this is a v4-epoch snapshot, read only by new builds).
+    // subscriptions copy removed — per-user local state since 1.1.1. The
+    // snap.subscriptions CREATE above is kept ON PURPOSE: the resulting
+    // empty table makes old builds hit their clean `snap_count == 0`
+    // per-table skip in restore instead of a WARN ("no such table") on
+    // every ~30s restore. The DELETE keeps a snapshot staged from an
+    // older build's file from re-publishing stale rows. Outside the
+    // copy loop so it can't count toward `any_copied`.
+    if let Err(e) = conn.execute_batch("DELETE FROM snap.subscriptions;") {
+        log::warn!("Snapshot: failed to clear snap.subscriptions: {}", e);
+    }
+
     let copy_tables: &[(&str, &str)] = &[
-        (
-            "subscriptions",
-            "DELETE FROM snap.subscriptions;
-              INSERT OR REPLACE INTO snap.subscriptions (id, job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count, modified_time, deleted_at)
-                  SELECT id, job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count, modified_time, deleted_at
-                  FROM main.subscriptions WHERE job_path LIKE 'vol:%';",
-        ),
         (
             "column_definitions",
             "DELETE FROM snap.column_definitions;
@@ -589,7 +595,8 @@ fn restore_snapshot(
     // snap.* tables — same coverage as `Database::normalize_job_paths`
     // for the main DB, but inlined here because we operate on the
     // ATTACH'd `snap.` schema prefix. Tables: column_definitions,
-    // item_metadata (job_path + item_path), subscriptions, bookmarks.
+    // item_metadata (job_path + item_path), bookmarks. (subscriptions
+    // dropped from both normalisation and merge — per-user since 1.1.1.)
     {
         let settings = crate::settings::AppSettings::load();
         let mappings = &settings.path_mappings;
@@ -692,38 +699,10 @@ fn restore_snapshot(
             }
         }
 
-        // subscriptions.job_path (UNIQUE; on collision, drop our row —
-        // main-DB merge will reconcile by mtime later)
-        let sub_updates = gather_id_path(
-            conn,
-            "SELECT id, job_path FROM snap.subscriptions",
-            &canonicalize,
-        );
-        let mut subs_done = 0usize;
-        for (id, c) in &sub_updates {
-            let exists: bool = conn
-                .query_row(
-                    "SELECT 1 FROM snap.subscriptions WHERE job_path = ?1 AND id != ?2",
-                    rusqlite::params![c, id],
-                    |_| Ok(true),
-                )
-                .unwrap_or(false);
-            if exists {
-                let _ = conn.execute(
-                    "DELETE FROM snap.subscriptions WHERE id = ?1",
-                    rusqlite::params![id],
-                );
-            } else if conn
-                .execute(
-                    "UPDATE snap.subscriptions SET job_path = ?1 WHERE id = ?2",
-                    rusqlite::params![c, id],
-                )
-                .unwrap_or(0)
-                > 0
-            {
-                subs_done += 1;
-            }
-        }
+        // subscriptions normalization removed — subscriptions are per-user
+        // local state since 1.1.1 and are no longer merged from snapshots
+        // (an old-build leader's snapshot may still carry rows; we must
+        // not import other users' sub state).
 
         // bookmarks.path (UNIQUE; same drop-on-collision pattern)
         let bookmark_updates = gather_id_path(
@@ -760,39 +739,21 @@ fn restore_snapshot(
         if !col_updates.is_empty()
             || !meta_job_updates.is_empty()
             || meta_item_done > 0
-            || subs_done > 0
             || bookmarks_done > 0
         {
             log::info!(
-                "Snapshot pre-merge: normalised paths — column_defs={} meta_job={} meta_item={} subs={} bookmarks={}",
-                col_updates.len(), meta_job_updates.len(), meta_item_done, subs_done, bookmarks_done
+                "Snapshot pre-merge: normalised paths — column_defs={} meta_job={} meta_item={} bookmarks={}",
+                col_updates.len(), meta_job_updates.len(), meta_item_done, bookmarks_done
             );
         }
     }
 
     // Granular merge — see plan 11 for the full rationale.
+    // subscriptions merge removed — per-user local state since 1.1.1. An
+    // old-build leader's snapshot may still carry subscription rows;
+    // skipping the merge (rather than gating on emptiness) guarantees we
+    // never import another user's subscribe/unsubscribe state.
     let tables: &[(&str, &str)] = &[
-        (
-            "subscriptions",
-            "INSERT INTO main.subscriptions (job_path, job_name, is_active, subscribed_time, last_sync_time, sync_status, shot_count, modified_time, deleted_at)
-             SELECT s.job_path, s.job_name, s.is_active, s.subscribed_time, s.last_sync_time, s.sync_status, s.shot_count, s.modified_time, s.deleted_at
-             FROM snap.subscriptions s
-             WHERE NOT EXISTS (SELECT 1 FROM main.subscriptions m WHERE m.job_path = s.job_path);
-
-             UPDATE main.subscriptions
-             SET job_name = snap_row.job_name,
-                 is_active = snap_row.is_active,
-                 last_sync_time = snap_row.last_sync_time,
-                 sync_status = snap_row.sync_status,
-                 shot_count = snap_row.shot_count,
-                 modified_time = snap_row.modified_time,
-                 deleted_at = snap_row.deleted_at
-             FROM (SELECT * FROM snap.subscriptions) AS snap_row
-             WHERE main.subscriptions.job_path = snap_row.job_path
-               AND snap_row.modified_time IS NOT NULL
-               AND (main.subscriptions.modified_time IS NULL
-                    OR snap_row.modified_time > main.subscriptions.modified_time);",
-        ),
         (
             "column_definitions",
             // 0.9.97: snap copy + restore now carry template_hash and

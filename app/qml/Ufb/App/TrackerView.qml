@@ -268,21 +268,50 @@ Rectangle {
         _refreshColumns()
     }
 
+    // Personal-scope set for the aggregated All Tracker: tracked_items_json
+    // carries EVERY tracked row mesh-wide (subscriptions are per-user, the
+    // core query LEFT JOINs), so the "" instance filters to the user's own
+    // subscribed jobs here. Per-job instances filter by jobPath and show
+    // their rows regardless of subscription. Lowercased native paths; both
+    // JSONs come from the same canonical→native translation, so they agree
+    // on separators.
+    // Same normalization Main.qml's _findSubscriptionForPath uses —
+    // separator- and case-insensitive, trailing separators stripped —
+    // so spelling drift between the two JSONs can't drop a job's rows.
+    function _normJobPath(p) {
+        return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase()
+    }
+    function _subscribedJobSet() {
+        var set = ({})
+        try {
+            var subs = JSON.parse(Subscription.subscriptions_json)
+            for (var i = 0; i < subs.length; ++i) {
+                if (subs[i].jobPath) set[_normJobPath(subs[i].jobPath)] = true
+            }
+        } catch (e) {
+            console.warn("TrackerView: subscriptions parse failed:", e)
+        }
+        return set
+    }
+
     function refresh() {
         trackedModel.clear()
         if (Subscription.tracked_items_json) {
             try {
                 var arr = JSON.parse(Subscription.tracked_items_json)
+                var aggregated = root.jobPath.length === 0
+                var subSet = aggregated ? _subscribedJobSet() : null
                 var rows = []
                 for (var i = 0; i < arr.length; ++i) {
                     var t = arr[i]
-                    if (root.jobPath.length > 0 && t.jobPath !== root.jobPath) continue
+                    if (!aggregated && t.jobPath !== root.jobPath) continue
+                    if (aggregated && !subSet[_normJobPath(t.jobPath || "")]) continue
                     rows.push({
                         itemPath: t.itemPath || "",
                         name: _basename(t.itemPath || ""),
                         folderName: t.folderName || "",
                         jobPathStr: t.jobPath || "",
-                        jobNameStr: t.jobName || "",
+                        jobNameStr: t.jobName || _basename(t.jobPath || ""),
                         metadataJsonStr: t.metadataJson || "{}",
                         modified: typeof t.modifiedTime === "number" ? t.modifiedTime : 0
                     })
@@ -494,6 +523,11 @@ Rectangle {
         function onMetadata_revChanged() {
             Subscription.refresh_tracked()
             root.refresh()
+        }
+        // Subscriptions are per-user scope for the aggregated view —
+        // re-filter when the user (un)subscribes.
+        function onSubscriptions_jsonChanged() {
+            if (root.jobPath.length === 0) root.refresh()
         }
     }
     Connections {

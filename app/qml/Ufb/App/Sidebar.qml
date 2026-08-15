@@ -458,7 +458,14 @@ Rectangle {
                     MenuItem { text: qsTr("Copy ufb:// Link"); onTriggered: FileOps.clipboard_copy_text(FileOps.build_ufb_uri(subRow.sJobPath)) }
                     MenuItem { text: qsTr("Copy Path"); onTriggered: FileOps.clipboard_copy_text(subRow.sJobPath) }
                     MenuSeparator {}
-                    MenuItem { text: qsTr("Unsubscribe"); onTriggered: Subscription.unsubscribe(subRow.sJobPath) }
+                    MenuItem {
+                        text: qsTr("Unsubscribe")
+                        onTriggered: {
+                            unsubscribeConfirm.pendingPath = subRow.sJobPath
+                            unsubscribeConfirm.pendingName = subRow.sJobName
+                            unsubscribeConfirm.open()
+                        }
+                    }
                 }
             }
 
@@ -1049,6 +1056,43 @@ Rectangle {
                 .arg(mountDrainConfirm.pendingName.length > 0
                     ? mountDrainConfirm.pendingName
                     : qsTr("this mount"))
+            color: Theme.colors.text
+            font.pixelSize: Theme.font.sizeBody
+            wrapMode: Text.Wrap
+        }
+    }
+
+    // Unsubscribe confirm (plans/12). Same root-level Overlay pattern as
+    // mountDrainConfirm so it survives the per-row delegate closing.
+    // Subscriptions are per-user (1.1.1+), so this only affects THIS
+    // user's sidebar + All Tracker scope — the job's metadata keeps
+    // syncing and resubscribing restores the view.
+    Dialog {
+        id: unsubscribeConfirm
+        title: qsTr("Unsubscribe from job?")
+        modal: true
+        parent: Overlay.overlay
+        x: (parent ? (parent.width  - width)  / 2 : 0)
+        y: (parent ? (parent.height - height) / 2 : 0)
+        standardButtons: Dialog.Yes | Dialog.Cancel
+        property string pendingPath: ""
+        property string pendingName: ""
+        onAccepted: {
+            if (pendingPath.length > 0) {
+                Subscription.unsubscribe(pendingPath)
+            }
+            pendingPath = ""
+            pendingName = ""
+        }
+        onRejected: {
+            pendingPath = ""
+            pendingName = ""
+        }
+        contentItem: Label {
+            text: qsTr("Remove \"%1\" from your sidebar and tracker? This only affects you — the job's data stays shared, and resubscribing restores it.")
+                .arg(unsubscribeConfirm.pendingName.length > 0
+                    ? unsubscribeConfirm.pendingName
+                    : qsTr("this job"))
             color: Theme.colors.text
             font.pixelSize: Theme.font.sizeBody
             wrapMode: Text.Wrap

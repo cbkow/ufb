@@ -512,7 +512,7 @@ ApplicationWindow {
             // to select the file after the listing loads.
             // Subscription-aware: a link under a subscribed job opens in
             // that project's tab + panel; otherwise the browser navigates.
-            window._routeResolvedPath(resolved, window._lastActiveFilesTabIndex)
+            window._routeResolvedPath(resolved, window._lastActiveFilesTabIndex, true)
         }
     }
 
@@ -875,7 +875,7 @@ ApplicationWindow {
             }
             // Subscription-aware routing (project tab) with browser
             // fallback to the first Files tab at cold start.
-            window._routeResolvedPath(resolved, 0)
+            window._routeResolvedPath(resolved, 0, true)
         }
     }
 
@@ -1058,8 +1058,26 @@ ApplicationWindow {
     /// Route a resolved ufb:// path: into the owning project tab when it's
     /// under a subscription, else navigate the browser (fallbackTabIdx is
     /// the Files tab to use — last-active for deep links, 0 at cold start).
-    function _routeResolvedPath(resolved, fallbackTabIdx) {
+    /// autoSubscribe (deep-link flows only — NOT the tray volume-open):
+    /// when the path lands inside a job the user isn't subscribed to,
+    /// subscribe locally first so the link opens in a proper job tab.
+    function _routeResolvedPath(resolved, fallbackTabIdx, autoSubscribe) {
         var m = window._findSubscriptionForPath(resolved)
+        if (autoSubscribe === true && m.jobPath.length === 0) {
+            // Subscriptions are per-user (1.1.1+): a link into a job this
+            // user never subscribed to is a clear signal of intent, so
+            // auto-subscribe LOCALLY (nothing broadcasts) and route into
+            // the proper job tab instead of the generic Files fallback.
+            var jobRoot = Subscription.job_root_for_path(resolved)
+            if (jobRoot.length > 0) {
+                console.log("Main: deep link into unsubscribed job — auto-subscribing", jobRoot)
+                // Empty name → auto-named from the folder basename.
+                // subscribe_to_job refreshes subscriptions_json
+                // synchronously, so the re-lookup below sees the new row.
+                Subscription.subscribe_to_job(jobRoot, "")
+                m = window._findSubscriptionForPath(resolved)
+            }
+        }
         if (m.jobPath.length > 0) {
             if (m.folderName.length > 0 && m.itemPath.length > 0)
                 window.goToTrackedItem(m.jobPath, m.jobName, m.folderName,

@@ -69,37 +69,22 @@ Rectangle {
     property real _dragGuideX: -1
 
     /// Set of item paths (within this folder) that are currently
-    /// tracked. Recomputed whenever Subscription.tracked_items_json
-    /// changes or folderPath changes. Used for the row star + the
-    /// menu item label flip.
+    /// tracked. Built inside _refreshMetadataAndColumns from the same
+    /// folder_item_metadata pull that feeds the cells (per-(job,folder)
+    /// query, no subscriptions dependency — tracked stars show for ANY
+    /// browsed job, subscribed or not, and two jobs sharing a folder
+    /// name can no longer cross-contaminate). Used for the row star +
+    /// the menu item label flip.
     property var _trackedSet: ({})
-    function _recomputeTracked() {
-        var set = ({})
-        if (!Subscription.tracked_items_json) {
-            _trackedSet = set
-            return
-        }
-        var folderName = _basename(folderPath)
-        try {
-            var arr = JSON.parse(Subscription.tracked_items_json)
-            for (var i = 0; i < arr.length; ++i) {
-                var t = arr[i]
-                if (t.folderName === folderName) {
-                    set[t.itemPath] = true
-                }
-            }
-        } catch (e) {}
-        _trackedSet = set
-    }
     function _isTracked(path) { return _trackedSet[path] === true }
     Connections {
         target: Subscription
         function onTracked_items_jsonChanged() {
-            root._recomputeTracked()
             // tracked_items_json fires whenever set_item_tracked
-            // runs; re-pull our metadata cache so cells redraw with
-            // the new values. (Untracked-item metadata edits go
-            // through set_item_metadata_field which doesn't fire
+            // runs; re-pull our metadata cache (which also rebuilds
+            // _trackedSet) so cells redraw with the new values.
+            // (Untracked-item metadata edits go through
+            // set_item_metadata_field which doesn't fire
             // tracked_items_json — those rely on the explicit refresh
             // call from the cell's onCommit handler + metadata_rev.)
             root._refreshMetadataAndColumns()
@@ -214,8 +199,10 @@ Rectangle {
     function _refreshMetadataAndColumns() {
         console.log("[ItemListPanel] _refreshMetadataAndColumns fired job="
             + jobPath + " folder=" + folderPath)
-        // Load all items' metadata for this folder in one go.
+        // Load all items' metadata for this folder in one go. The same
+        // records carry isTracked, so the star set rebuilds here too.
         _metadataByPath = ({})
+        _trackedSet = ({})
         if (jobPath.length > 0 && folderPath.length > 0) {
             var folderName = _basename(folderPath)
             var arr = []
@@ -223,6 +210,7 @@ Rectangle {
                 arr = JSON.parse(Subscription.folder_item_metadata(jobPath, folderName))
             } catch (e) { arr = [] }
             var byPath = {}
+            var trackedSet = {}
             for (var i = 0; i < arr.length; ++i) {
                 var rec = arr[i]
                 if (!rec.itemPath) continue
@@ -231,8 +219,10 @@ Rectangle {
                 } catch (e) {
                     byPath[rec.itemPath] = {}
                 }
+                if (rec.isTracked) trackedSet[rec.itemPath] = true
             }
             _metadataByPath = byPath
+            _trackedSet = trackedSet
         }
         _refreshColumns()
         // If the active sort is by a metadata column, the new
@@ -424,7 +414,6 @@ Rectangle {
     /// `entries_json` change → `refresh()` rebuilds the row model.
     function refreshAll() {
         if (folderPath.length > 0) itemsProbe.refresh()
-        _recomputeTracked()
         _refreshMetadataAndColumns()
     }
 
@@ -434,14 +423,12 @@ Rectangle {
         } else {
             itemsModel.clear()
         }
-        _recomputeTracked()
         _refreshMetadataAndColumns()
         _restoreNameColWidth()
     }
     onJobPathChanged: _refreshMetadataAndColumns()
     Component.onCompleted: {
         if (folderPath.length > 0) itemsProbe.navigate_to(folderPath)
-        _recomputeTracked()
         _refreshMetadataAndColumns()
         _restoreNameColWidth()
     }
