@@ -25,7 +25,7 @@
 ; already cleaned that debris, and upgrades come from 1.0.6.
 
 #define MyAppName "Union File Browser"
-#define MyAppVersion "1.1.1"
+#define MyAppVersion "1.1.2"
 #define MyAppPublisher "cbkow"
 #define MyAppURL "https://github.com/cbkow/ufb"
 #define MyAppExeName "ufb.exe"
