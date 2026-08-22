@@ -282,10 +282,11 @@ QString spansHtml(const QString& text, const QJsonArray& spans, CommentCtx& cc) 
             // Thread rides inside the tinted range as a hover card (spans
             // only — a div inside <p> would trip the HTML parser), plus a
             // superscript link into the trailing section.
+            // One multi-arg call: a chained .arg would rescan the inserted
+            // message text for %N markers.
             return QStringLiteral("<span class=\"cmtcard\">%1</span></span>"
                                   "<sup class=\"cref\"><a href=\"#c%2\">%2</a></sup>")
-                .arg(cc.cardMsgs.value(r.u))
-                .arg(r.note);
+                .arg(cc.cardMsgs.value(r.u), QString::number(r.note));
         }
         if (r.k == QLatin1String("link"))      return QStringLiteral("</a>");
         if (r.k == QLatin1String("color")
@@ -692,11 +693,19 @@ FrameInk renderFrameInk(const InkAnchor& a, int mediaW, int mediaH) {
         const QRectF r = chipRectSrc(t, mw, mh);   // intrinsic px
         box = box.united(QRectF(r.x() / mw, r.y() / mh, r.width() / mw, r.height() / mh));
     }
-    // Range-check in double space: coords are unclamped JSON doubles and
-    // double→int of an out-of-range value is UB. NaN fails the > 0 tests.
-    const double Wd = std::ceil(box.width() * mw);
-    const double Hd = std::ceil(box.height() * mh);
-    if (!(Wd > 0.0) || !(Hd > 0.0) || Wd > 8192.0 || Hd > 8192.0) return out;
+    // Overshoot is bounded to one frame on every side (NaN/huge coords
+    // collapse to the frame); if even that raster would exceed 8192 px,
+    // draw clipped to the frame rather than dropping the whole overlay —
+    // one stray stroke must not erase the rest.
+    box = box.intersected(QRectF(-1, -1, 3, 3));
+    if (box.isEmpty() || !std::isfinite(box.width()) || !std::isfinite(box.height()))
+        box = QRectF(0, 0, 1, 1);
+    double Wd = std::ceil(box.width() * mw);
+    double Hd = std::ceil(box.height() * mh);
+    if (!(Wd > 0.0) || !(Hd > 0.0) || Wd > 8192.0 || Hd > 8192.0) {
+        box = QRectF(0, 0, 1, 1);
+        Wd = mw; Hd = mh;
+    }
     QImage img(int(Wd), int(Hd), QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
     QPainter p(&img);
@@ -813,8 +822,12 @@ QString referenceFigure(const QJsonObject& o, const QString& kind,
         if (w > 0 && h > 0) meta << QStringLiteral("%1×%2").arg(w).arg(h);
         const double fps = o.value(QStringLiteral("fps")).toDouble(0);
         if (fps > 0) meta << QStringLiteral("%1 fps").arg(fps, 0, 'g', 4);
-        const QString dur = humanDuration(qint64(o.value(QStringLiteral("durMs")).toDouble(0)));
-        if (!dur.isEmpty()) meta << dur;
+        // Range-check in double space before the cast (doc-controlled value).
+        const double durMs = o.value(QStringLiteral("durMs")).toDouble(0);
+        if (std::isfinite(durMs) && durMs > 0 && durMs < 1e12) {
+            const QString dur = humanDuration(qint64(durMs));
+            if (!dur.isEmpty()) meta << dur;
+        }
         const int frames = o.value(QStringLiteral("frames")).toInt(0);
         if (frames > 0) meta << QStringLiteral("%1 frames").arg(frames);
     } else if (kind == QLatin1String("pdf")) {
@@ -851,7 +864,7 @@ QString mediaHtml(const QString& content, const QString& docDir,
             return QStringLiteral(
                 "<figure><img class=\"sketch\" src=\"%1\" alt=\"Sketch\" "
                 "style=\"width:%2px\"></figure>")
-                .arg(src).arg(shown);
+                .arg(src, QString::number(shown));
         }
         return QStringLiteral("<div class=\"mchip\">&#9998; (empty sketch)</div>");
     }
@@ -1079,8 +1092,8 @@ QString tableHtml(const QString& gridJson, const QString& docDir,
                         shown = std::min(shown, cap);
                         inner += QStringLiteral("<img class=\"cellimg\" src=\"%1\" alt=\"\" "
                                                 "style=\"width:%2px\">")
-                            .arg(QUrl::fromLocalFile(abs).toString(QUrl::FullyEncoded))
-                            .arg(shown);
+                            .arg(QUrl::fromLocalFile(abs).toString(QUrl::FullyEncoded),
+                                 QString::number(shown));
                     } else {
                         inner += QStringLiteral("<span class=\"mchip\">&#128444; %1</span>")
                             .arg(escapeHtml(QFileInfo(describeSrc(mo.value(QStringLiteral("src")))).fileName()));
@@ -1151,6 +1164,20 @@ QString stagePackage(const QString& pkgPath) {
               .arg(QString::fromLatin1(QCryptographicHash::hash(
                   pkgPath.toUtf8(), QCryptographicHash::Sha1).toHex().left(16)));
     const QString dbOut = dir + QStringLiteral("/document.mndb");
+    // Reap stale stages (other packages, moved/deleted ones): anything
+    // whose stamp is older than a week goes — the temp dir is otherwise
+    // never purged on Windows.
+    {
+        const QDir tmp(QStandardPaths::writableLocation(QStandardPaths::TempLocation));
+        const QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(-7);
+        for (const QFileInfo& d : tmp.entryInfoList({QStringLiteral("ufb-mnpkg-*")},
+                                                     QDir::Dirs | QDir::NoDotAndDotDot)) {
+            if (d.absoluteFilePath() == dir) continue;
+            const QFileInfo st(d.absoluteFilePath() + QStringLiteral("/.stamp"));
+            if (!st.exists() || st.lastModified() < cutoff)
+                QDir(d.absoluteFilePath()).removeRecursively();
+        }
+    }
     {
         QFile st(dir + QStringLiteral("/.stamp"));
         if (st.open(QIODevice::ReadOnly)
@@ -1166,9 +1193,12 @@ QString stagePackage(const QString& pkgPath) {
     if (!mz_zip_reader_init_file(&zip, pkgPath.toUtf8().constData(), 0)) return {};
     auto fail = [&] { mz_zip_reader_end(&zip); QDir(dir).removeRecursively(); return QString(); };
 
-    // Pass 1: the document itself.
+    // Pass 1: the document itself (size-gated: a DEFLATE bomb posing as
+    // the db must not inflate into the temp volume).
     const int dbIdx = mz_zip_reader_locate_file(&zip, "document.mndb", nullptr, 0);
-    if (dbIdx < 0
+    mz_zip_archive_file_stat dbSt;
+    if (dbIdx < 0 || !mz_zip_reader_file_stat(&zip, mz_uint(dbIdx), &dbSt)
+        || dbSt.m_uncomp_size > 256ULL * 1024 * 1024
         || !mz_zip_reader_extract_to_file(&zip, mz_uint(dbIdx), dbOut.toUtf8().constData(), 0))
         return fail();
 
@@ -1198,8 +1228,14 @@ QString stagePackage(const QString& pkgPath) {
         QSqlDatabase::removeDatabase(conn);
     }
 
-    // Pass 2: referenced, showable media only.
+    // Pass 2: referenced, showable media only, under a total budget
+    // (count + bytes) so one package can't monopolise the GUI thread or
+    // the temp volume. A failed/partial extraction leaves the stage
+    // UNSTAMPED so the next open retries instead of caching the gap.
     const mz_uint n = mz_zip_reader_get_num_files(&zip);
+    bool complete = true;
+    int extracted = 0;
+    qint64 budget = 512LL * 1024 * 1024;
     for (mz_uint i = 0; i < n && !wanted.isEmpty(); ++i) {
         mz_zip_archive_file_stat fs;
         if (!mz_zip_reader_file_stat(&zip, i, &fs) || fs.m_is_directory) continue;
@@ -1207,15 +1243,24 @@ QString stagePackage(const QString& pkgPath) {
         if (!name.startsWith(QLatin1String("media/")) || packageEntryEscapes(name)) continue;
         const QString rel = name.mid(6);
         if (!wanted.contains(rel) || !packageEntryWanted(rel, qint64(fs.m_uncomp_size))) continue;
+        if (extracted >= 200 || qint64(fs.m_uncomp_size) > budget) { complete = false; break; }
         const QString out = dir + QStringLiteral("/.minnotes/") + rel;
         // Belt and braces: the resolved path must stay inside the stage.
         if (!QDir::cleanPath(out).startsWith(dir + QLatin1Char('/'))) continue;
         QDir().mkpath(QFileInfo(out).absolutePath());
-        mz_zip_reader_extract_to_file(&zip, i, out.toUtf8().constData(), 0);
+        if (mz_zip_reader_extract_to_file(&zip, i, out.toUtf8().constData(), 0)) {
+            ++extracted;
+            budget -= qint64(fs.m_uncomp_size);
+        } else {
+            QFile::remove(out);
+            complete = false;
+        }
     }
     mz_zip_reader_end(&zip);
-    QFile st(dir + QStringLiteral("/.stamp"));
-    if (st.open(QIODevice::WriteOnly | QIODevice::Truncate)) st.write(stamp.toUtf8());
+    if (complete) {
+        QFile st(dir + QStringLiteral("/.stamp"));
+        if (st.open(QIODevice::WriteOnly | QIODevice::Truncate)) st.write(stamp.toUtf8());
+    }
     return dir;
 }
 
@@ -1239,7 +1284,7 @@ const char* kCss =
     "--chipbg:#1d2733;--chiptext:#4aa8ff;--codetext:#d4d4e8;--quote:#3a5e86;--surface:#121211}"
     "body{background:var(--bg);color:var(--text);margin:0;"
     "font:15px/1.65 -apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif}"
-    "main{max-width:%1px;margin:0 auto;padding:40px 24px 96px}"
+    "main{width:%1px;margin:0 auto;padding:40px 24px 96px}"
     "header.doctitle{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"
     "color:var(--muted);padding-bottom:10px;margin-bottom:24px;border-bottom:1px solid var(--divider)}"
     "h1,h2,h3,h4,h5,h6{color:var(--bright);line-height:1.25;margin:1.1em 0 .45em}"
@@ -1465,6 +1510,7 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                         needsWrap = true;
                     } else if (type == QLatin1String("table")) {
                         blk = tableHtml(content, docDir, cc, pageWidth);
+                        needsWrap = true;   // .tablewrap scrolls (clips) — host ink outside it
                     } else if (type == QLatin1String("media")) {
                         blk = mediaHtml(content, docDir, ink, pageWidth);
                     } else if (isList) {

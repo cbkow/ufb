@@ -20,6 +20,9 @@ import Ufb.Backend 1.0
 
 Item {
     id: root
+    // View width cap (see the letterbox note below). Routes whose page is
+    // centered on its own canvas (the .mndb render) may raise it.
+    property int maxViewWidth: 940
 
     property string source: ""
 
@@ -91,7 +94,7 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: Math.min(root.width, 940)
+        width: Math.min(root.width, root.maxViewWidth)
         active: root.width > 1 && root.height > 1
         sourceComponent: webComp
     }

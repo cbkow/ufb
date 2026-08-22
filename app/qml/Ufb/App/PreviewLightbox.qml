@@ -211,7 +211,10 @@ Item {
 
     Component {
         id: mndbComp
-        HtmlPreview { source: root._mndbHtml }
+        // The .mndb render centers its page (doc_meta.page_width, up to
+        // 1600) on a full-bleed canvas, so a wider view shows canvas, not
+        // a hole — let it breathe past the 940 export-letterbox cap.
+        HtmlPreview { source: root._mndbHtml; maxViewWidth: 1440 }
     }
 
     Component {
