@@ -41,6 +41,9 @@ scripts/macos-uninstall-tauri.sh
 # agent builds on other machines silently use a stale copy.
 /external/*
 !/external/nfsserve/
+# EXCEPTION: external/miniz is the vendored single-file zip reader (3 files,
+# MIT) behind the .mnpkg preview — source, tracked like nfsserve.
+!/external/miniz/
 
 # vcpkg manifest-mode install dir (regenerated from vcpkg.json).
 /vcpkg_installed/

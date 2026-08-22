@@ -112,6 +112,17 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    https://www.sqlite.org
    Linkage: static (compiled into bindings.lib and ufb-agent.exe).
 
+10. miniz 3.0.2
+   Copyright 2013-2014 RAD Game Tools and Valve Software
+   Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+   License: MIT
+   File:    Miniz-LICENSE.txt
+   https://github.com/richgel999/miniz
+   Linkage: static (single-file amalgamation vendored at external/miniz,
+            compiled into ufb). Read-only zip backend that stages
+            minNotes .mnpkg packages for the lightbox preview
+            (app/MndbDoc.cpp).
+
 ===============================================================================
 Indirect dependencies — Qt runtime libraries
 ===============================================================================

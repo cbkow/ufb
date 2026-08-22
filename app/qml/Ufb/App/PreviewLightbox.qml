@@ -38,8 +38,9 @@ Item {
         && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
     // minNotes documents: MndbDoc reads the SQLite block list and emits
     // a temp HTML render; "" (unreadable/corrupt) falls through to the
-    // file icon. WebEngine-only route, like _isHtml.
-    readonly property string _mndbHtml: (_ext === "mndb"
+    // file icon. WebEngine-only route, like _isHtml. .mnpkg packages
+    // (zip: document.mndb + media/) are staged to a temp dir first.
+    readonly property string _mndbHtml: ((_ext === "mndb" || _ext === "mnpkg")
         && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
         && currentPath.length > 0) ? MndbDoc.htmlPreviewPath(currentPath) : ""
     readonly property bool _isMndb: _mndbHtml.length > 0

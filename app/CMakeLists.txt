@@ -82,6 +82,9 @@ qt_add_qml_module(ufb
         TextInfo.h
         MndbDoc.cpp
         MndbDoc.h
+        # miniz: zip reader for .mnpkg packages (MndbDoc staging); vendored
+        # single-file amalgamation, same copy minNotes ships (external/miniz).
+        ${CMAKE_SOURCE_DIR}/external/miniz/miniz.c
     QML_FILES
         qml/Ufb/App/Main.qml
         qml/Ufb/App/Theme.qml
@@ -135,6 +138,7 @@ qt_add_qml_module(ufb
 # benefit from the same line.
 target_include_directories(ufb PRIVATE thumbnails)
 target_include_directories(ufb PRIVATE player)
+target_include_directories(ufb PRIVATE "${CMAKE_SOURCE_DIR}/external/miniz")
 
 # Compile the video YUV->RGB + passthrough GLSL to .qsb bundles, embedded
 # under :/ufb/player/shaders/. VideoSurfaceItem loads them at runtime.
