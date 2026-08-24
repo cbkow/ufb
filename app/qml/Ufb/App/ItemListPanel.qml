@@ -515,7 +515,7 @@ Rectangle {
                     }
                     tooltip: qsTr("Sort items")
                     onClicked: itemSortMenu.popup(0, height)
-                    Menu {
+                    UfbMenu {
                         id: itemSortMenu
                         y: parent.height
                         MenuItem {
@@ -1022,7 +1022,7 @@ Rectangle {
     }
 
     // ── Right-click context menu ─────────────────────────────────────
-    Menu {
+    UfbMenu {
         id: itemMenu
         MenuItem {
             text: root._menuItem && root._isTracked(root._menuItem.path)

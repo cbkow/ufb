@@ -1075,42 +1075,11 @@ Rectangle {
         onTriggered: root._beginPathEdit()
     }
 
-    Menu {
+    // UfbMenu, not Menu: this menu is long enough to need clamping
+    // mid-screen, which is exactly the case that hung the app — see
+    // UfbMenu.qml for the mechanism.
+    UfbMenu {
         id: fileMenu
-        // HANG FIX (Windows, Qt 6.11, 2026-08-24). This is the
-        // FluentWinUI3 style's own contentItem verbatim, plus
-        // `cacheBuffer`, which instantiates every delegate up front.
-        //
-        // ListView.contentHeight is otherwise an *estimate* extrapolated
-        // from whichever delegates happen to be instantiated, and our
-        // menus have hidden items with height 0, so the estimate depends
-        // on which subset is loaded. When the menu can't fit above or
-        // below the cursor (long menu, cursor mid-screen on a 1080p
-        // display), Qt's popup positioner clamps the height -> fewer
-        // delegates -> different estimate -> implicitHeight changes ->
-        // the style's `height: __heightScale * implicitHeight` binding
-        // fires -> positioner clamps again -> ... The GUI thread never
-        // leaves that polish pass and Windows reports the app as not
-        // responding (looked like a 30%-of-right-clicks "crash").
-        // Confirmed from three minidumps of a hung 1.1.3: identical
-        // stack, constant depth, all inside
-        // QQuickPopupPositioner::reposition <- QQuickPopup::setHeight
-        // <- ListView contentHeight binding. With every delegate
-        // instantiated contentHeight is exact and the loop can't start.
-        // Native menus (macOS) never go through this path. bgMenu gets
-        // the same treatment.
-        contentItem: ListView {
-            implicitHeight: contentHeight
-            model: fileMenu.contentModel
-            interactive: Window.window
-                         ? contentHeight + fileMenu.topPadding + fileMenu.bottomPadding > fileMenu.height
-                         : false
-            currentIndex: fileMenu.currentIndex
-            spacing: 4
-            clip: true
-            cacheBuffer: 1000000
-            ScrollIndicator.vertical: ScrollIndicator {}
-        }
         // `_clipboardHasPaths()` reads from a non-reactive invokable,
         // so binding `enabled:` directly to it would latch at Menu
         // creation time and never refresh — leaving Paste greyed out
@@ -1182,21 +1151,8 @@ Rectangle {
         MenuItem { action: showShellMenuAction }
     }
 
-    Menu {
+    UfbMenu {
         id: bgMenu
-        // Same hang-proofing as fileMenu — see the comment there.
-        contentItem: ListView {
-            implicitHeight: contentHeight
-            model: bgMenu.contentModel
-            interactive: Window.window
-                         ? contentHeight + bgMenu.topPadding + bgMenu.bottomPadding > bgMenu.height
-                         : false
-            currentIndex: bgMenu.currentIndex
-            spacing: 4
-            clip: true
-            cacheBuffer: 1000000
-            ScrollIndicator.vertical: ScrollIndicator {}
-        }
         // Same Paste-availability story as fileMenu — see comment there.
         property bool _pasteAvailable: false
         onAboutToShow: _pasteAvailable = root._clipboardHasPaths()
@@ -2360,7 +2316,7 @@ Rectangle {
                 }
                 tooltip: qsTr("Sort entries (folders always first)")
                 onClicked: sortMenu.popup(0, sortButton.height)
-                Menu {
+                UfbMenu {
                     id: sortMenu
                     MenuItem {
                         text: qsTr("Name") + (root._sortKey === "name"

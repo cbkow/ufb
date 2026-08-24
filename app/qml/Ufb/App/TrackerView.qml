@@ -619,7 +619,7 @@ Rectangle {
                     }
                     tooltip: qsTr("Sort tracked items")
                     onClicked: trackerSortMenu.popup(0, height)
-                    Menu {
+                    UfbMenu {
                         id: trackerSortMenu
                         y: parent.height
                         MenuItem {
@@ -1325,7 +1325,7 @@ Rectangle {
     // When more than one row is selected, the single-row entries are
     // hidden and the bulk submenus take over. Per-column submenus are
     // built dynamically from visibleColumns via Instantiator.
-    Menu {
+    UfbMenu {
         id: rowMenu
         property string itemPath: ""
         property string jobPath: ""
@@ -1392,7 +1392,7 @@ Rectangle {
             model: root._bulkEditableColumns()
             onObjectAdded: (idx, obj) => rowMenu.insertMenu(rowMenu.count - 2, obj)
             onObjectRemoved: (idx, obj) => rowMenu.removeMenu(obj)
-            delegate: Menu {
+            delegate: UfbMenu {
                 required property var modelData
                 title: modelData
                     ? qsTr("Set %1").arg(modelData.columnName)

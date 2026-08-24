@@ -344,7 +344,7 @@ Rectangle {
                         else root.navigateRequested(bmRow.bmPath)
                     }
                 }
-                Menu {
+                UfbMenu {
                     id: bmMenu
                     MenuItem { text: qsTr("Open"); onTriggered: root.navigateRequested(bmRow.bmPath) }
                     MenuItem { text: qsTr("Open in New Tab"); onTriggered: root.openInNewTabRequested(bmRow.bmPath) }
@@ -448,7 +448,7 @@ Rectangle {
                         else root.openJobRequested(subRow.sJobPath, subRow.sJobName)
                     }
                 }
-                Menu {
+                UfbMenu {
                     id: subMenu
                     MenuItem { text: qsTr("Open Job"); onTriggered: root.openJobRequested(subRow.sJobPath, subRow.sJobName) }
                     MenuSeparator {}
@@ -789,7 +789,7 @@ Rectangle {
                 // Right-click menu. Available even when the mount
                 // isn't yet mounted (mountPath empty) so the user can
                 // start it / open logs to diagnose.
-                Menu {
+                UfbMenu {
                     id: mountMenu
                     MenuItem {
                         text: qsTr("Open")

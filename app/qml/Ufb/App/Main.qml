@@ -1997,7 +1997,7 @@ ApplicationWindow {
     // Right-click context menu for tab pills. `targetTabIdx` is set by the
     // pill that opened it; "Close Other Tabs" keeps the first Files tab and
     // that pill, closing the rest.
-    Menu {
+    UfbMenu {
         id: tabContextMenu
         property int targetTabIdx: -1
         MenuItem {

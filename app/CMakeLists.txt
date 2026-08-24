@@ -113,6 +113,7 @@ qt_add_qml_module(ufb
         qml/Ufb/App/CellEditor.qml
         qml/Ufb/App/FileBrowser.qml
         qml/Ufb/App/Sidebar.qml
+        qml/Ufb/App/UfbMenu.qml
         qml/Ufb/App/UfbScrollBar.qml
         qml/Ufb/App/PreviewLightbox.qml
         qml/Ufb/App/VideoPreview.qml
