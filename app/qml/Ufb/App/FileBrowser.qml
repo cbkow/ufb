@@ -799,11 +799,15 @@ Rectangle {
         var sep = parent.indexOf("\\") >= 0 ? "\\" : "/"
         return parent + sep + name
     }
+    /// Menu-enablement probe only. Must stay cheap and non-blocking:
+    /// it runs on every context-menu open, on the GUI thread. Do NOT
+    /// switch this back to clipboard_paste_intent() — that renders
+    /// clipboard data, which on Windows waits synchronously on the
+    /// clipboard-owning process and hung the app when that process
+    /// (Explorer / Office / Adobe) was busy. The real paste still uses
+    /// clipboard_paste_intent().
     function _clipboardHasPaths() {
-        try {
-            var intent = JSON.parse(FileOps.clipboard_paste_intent())
-            return intent && intent.paths && intent.paths.length > 0
-        } catch (e) { return false }
+        return FileOps.clipboard_has_paths()
     }
     function _formatYYMMDD(d) {
         var y = String(d.getFullYear() % 100).padStart(2, "0")

@@ -132,6 +132,14 @@ pub mod qobject {
         #[qinvokable]
         fn clipboard_paste_intent(self: &FileOps) -> QString;
 
+        /// Non-blocking "is there anything Paste could act on?" probe
+        /// for enabling menu items. Unlike `clipboard_paste_intent` this
+        /// never renders clipboard data (no cross-process wait on the
+        /// clipboard owner), so it's safe to call on every menu open.
+        /// May return true for text that turns out not to be paths.
+        #[qinvokable]
+        fn clipboard_has_paths(self: &FileOps) -> bool;
+
         /// Put a plain-text string on the system clipboard. Used by
         /// "Copy Path" / "Copy Filename" menu actions.
         #[qinvokable]
@@ -139,8 +147,9 @@ pub mod qobject {
 
         /// Pop the OS-native shell context menu (Windows IContextMenu
         /// / macOS Finder menu) at the current cursor position for
-        /// `path`. Sync from the QML thread — the underlying Rust
-        /// helper handles STA-thread setup internally on Windows.
+        /// `path`. Returns immediately: on Windows the menu runs on
+        /// its own STA thread so the GUI thread keeps pumping while
+        /// the menu is open.
         #[qinvokable]
         fn show_shell_menu(self: &FileOps, path: QString);
 
@@ -542,6 +551,10 @@ impl qobject::FileOps {
                 cxx_qt_lib::QString::from(r#"{"paths":[],"effect":"copy"}"#)
             }
         }
+    }
+
+    fn clipboard_has_paths(self: &qobject::FileOps) -> bool {
+        file_ops::clipboard_has_paths()
     }
 
     fn clipboard_copy_text(self: &qobject::FileOps, text: cxx_qt_lib::QString) -> bool {

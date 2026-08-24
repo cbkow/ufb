@@ -1,14 +1,38 @@
 //! Show the native Windows Explorer context menu for a file or folder.
 //! Uses the IContextMenu COM interface on Windows; AppleScript on macOS.
 
+/// True while a shell menu thread is alive. Guards against stacking a
+/// second `TrackPopupMenuEx` loop on top of the first if the user
+/// triggers the action again before dismissing the menu.
+#[cfg(windows)]
+static SHELL_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`SHELL_MENU_OPEN`] when dropped — including on unwind, so a
+/// panic inside the menu thread can't leave the action wedged shut.
+#[cfg(windows)]
+struct ShellMenuOpenGuard;
+
+#[cfg(windows)]
+impl Drop for ShellMenuOpenGuard {
+    fn drop(&mut self) {
+        SHELL_MENU_OPEN.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 #[cfg(windows)]
 pub fn show_shell_context_menu(path: &str) -> Result<(), String> {
     use std::path::Path;
+    use std::sync::atomic::Ordering;
 
     let p = Path::new(path);
     if !p.exists() {
         return Err(format!("Path does not exist: {}", path));
     }
+
+    if SHELL_MENU_OPEN.swap(true, Ordering::AcqRel) {
+        return Err("shell context menu is already open".to_string());
+    }
+    let guard = ShellMenuOpenGuard;
 
     log::info!("show_shell_context_menu: {}", path);
 
@@ -21,13 +45,25 @@ pub fn show_shell_context_menu(path: &str) -> Result<(), String> {
         (pt.x, pt.y)
     };
 
-    // Run on a dedicated STA thread. TrackPopupMenuEx blocks (pumps its own
-    // message loop) so we must not call it on the async runtime.
+    // Run on a dedicated STA thread. TrackPopupMenuEx blocks (pumps its
+    // own message loop) so we must not call it on the async runtime —
+    // and we must NOT join it from the caller either: this is invoked
+    // from the QML/GUI thread, and joining froze the main window for as
+    // long as the shell menu stayed open. Windows flags the app as "not
+    // responding" after 5 s of that, and any shell extension that
+    // SendMessage()s back to the main window deadlocks outright. So the
+    // thread is fire-and-forget; its outcome only goes to the log.
     let path_owned = path.to_string();
-    let handle = std::thread::spawn(move || show_menu_blocking(&path_owned, cursor_x, cursor_y));
-    handle
-        .join()
-        .map_err(|_| "Shell context menu thread panicked".to_string())?
+    std::thread::Builder::new()
+        .name("ufb-shell-ctxmenu".to_string())
+        .spawn(move || {
+            let _guard = guard;
+            if let Err(e) = show_menu_blocking(&path_owned, cursor_x, cursor_y) {
+                log::warn!("show_shell_context_menu({}): {}", path_owned, e);
+            }
+        })
+        .map_err(|e| format!("failed to spawn shell context menu thread: {}", e))?;
+    Ok(())
 }
 
 #[cfg(windows)]

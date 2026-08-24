@@ -550,6 +550,43 @@ pub fn clipboard_paste_intent() -> Result<PasteIntent, String> {
     })
 }
 
+/// Cheap, non-blocking "could Paste do anything?" probe for menu
+/// enablement. Runs on the GUI thread every time a context menu opens,
+/// so it must never wait on another process.
+///
+/// On Windows this deliberately does NOT call `GetClipboardData` (which
+/// is what `clipboard_paste_intent` does): when the clipboard owner used
+/// delayed rendering — Explorer, Office, browsers and the Adobe apps all
+/// do — `GetClipboardData` is a synchronous `WM_RENDERFORMAT` round-trip
+/// to that owner, and a busy or wedged owner stalls *our* GUI thread
+/// until Windows flags UFB as "not responding".
+/// `IsClipboardFormatAvailable` only inspects the format list and
+/// returns immediately. The actual paste still goes through
+/// `clipboard_paste_intent` and reads the data for real.
+///
+/// `CF_UNICODETEXT` counts as "maybe" because the paste path accepts
+/// path-looking text; we can't tell without rendering it, so Paste is
+/// enabled and becomes a no-op if the text turns out not to be paths.
+pub fn clipboard_has_paths() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        // Standard clipboard format ids (winuser.h).
+        const CF_UNICODETEXT: u32 = 13;
+        const CF_HDROP: u32 = 15;
+        unsafe {
+            IsClipboardFormatAvailable(CF_HDROP).is_ok()
+                || IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok()
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        clipboard_paste_intent()
+            .map(|intent| !intent.paths.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn clipboard_paste_intent_windows() -> Result<PasteIntent, String> {
     use clipboard_win::{raw, Clipboard};
