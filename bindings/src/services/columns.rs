@@ -1699,6 +1699,17 @@ fn auto_promote_on_update(
                         );
                         mirror_to_local_cache(&dir);
                     }
+                    Err(ufb_core::templates::TemplateError::RevisionMismatch { found, .. }) => {
+                        // The file is back (transient share error, or a
+                        // peer restored it first) — restore is create-
+                        // only and touched nothing. Same outcome as the
+                        // ordinary CAS conflict below: local SQL row
+                        // stays correct, template untouched.
+                        log::info!(
+                            "columns: template {} reappeared at rev {} — restore skipped",
+                            hash, found
+                        );
+                    }
                     Err(e) => log::warn!(
                         "columns: auto-promote restore of missing template {} failed: {}",
                         hash, e

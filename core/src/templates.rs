@@ -705,6 +705,7 @@ pub mod v2 {
             return Ok(());
         }
         let mut copied = 0usize;
+        let mut failed = 0usize;
         for entry in fs::read_dir(&legacy)? {
             let Ok(entry) = entry else { continue };
             let src = entry.path();
@@ -720,12 +721,15 @@ pub mod v2 {
             if dst.exists() {
                 continue;
             }
-            match fs::copy(&src, &dst) {
-                Ok(_) => copied += 1,
-                Err(e) => log::warn!(
-                    "templates v2: epoch migration copy failed for {}: {}",
-                    name, e
-                ),
+            match copy_file_atomic(&src, &dst) {
+                Ok(()) => copied += 1,
+                Err(e) => {
+                    failed += 1;
+                    log::warn!(
+                        "templates v2: epoch migration copy failed for {}: {}",
+                        name, e
+                    );
+                }
             }
         }
         if copied > 0 {
@@ -736,7 +740,52 @@ pub mod v2 {
                 dir.display()
             );
         }
+        if failed > 0 {
+            // Don't let the once-per-process latch swallow a partial
+            // migration — the next resolve retries the stragglers.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{} template file(s) failed to copy forward", failed),
+            ));
+        }
         Ok(())
+    }
+
+    /// Copy `src` to `dst` through a private uuid temp in `dst`'s dir
+    /// plus rename, so a crash or share drop mid-copy leaves only
+    /// `.tmp` debris (filtered by every listing) and a reader never
+    /// sees a truncated `<hash>.json` — which would parse-fail forever
+    /// (not NotFound, so the self-heal wouldn't fire either). Two
+    /// migrators racing the same file both rename a COMPLETE copy;
+    /// whichever lands last wins, harmlessly.
+    fn copy_file_atomic(src: &Path, dst: &Path) -> Result<()> {
+        let tmp = dst.with_extension(format!(
+            "json.tmp.migrate.{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let staged = (|| -> Result<()> {
+            let bytes = fs::read(src)?;
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            Ok(())
+        })()
+        .and_then(|_| replace_file(&tmp, dst));
+        if staged.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        staged
+    }
+
+    /// The stranded pre-derivation templates dir for the farm that
+    /// `dir` (`<farm>/<epoch>/templates`) lives in, or `None` when the
+    /// current epoch IS the legacy location.
+    fn legacy_dir_for(dir: &Path) -> Option<PathBuf> {
+        if templates_subdir() == LEGACY_TEMPLATES_SUBDIR {
+            return None;
+        }
+        let root = dir.parent()?.parent()?;
+        Some(root.join(LEGACY_TEMPLATES_SUBDIR))
     }
 
     /// Local cache mirror of the remote v2 templates dir, located at
@@ -760,13 +809,22 @@ pub mod v2 {
         dir.join(MANIFEST_NAME)
     }
 
-    /// Read a template by its hash.
+    /// Read a template by its hash. `NotFound` ONLY when the file is
+    /// genuinely absent — any other I/O failure (stale SMB handle,
+    /// EACCES, VPN reconnect blip) surfaces as `Io`, so callers that
+    /// react to NotFound by re-creating the file (`restore_template`)
+    /// never mistake a transient share error for a lost template.
+    /// (`Path::exists()` reports `false` on ANY metadata error, which
+    /// is why it is not used here.)
     pub fn read_template(dir: &Path, template_hash: &str) -> Result<TemplateV2> {
         let path = template_path(dir, template_hash);
-        if !path.exists() {
-            return Err(TemplateError::NotFound(template_hash.into()));
-        }
-        let raw = fs::read_to_string(&path)?;
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TemplateError::NotFound(template_hash.into()));
+            }
+            Err(e) => return Err(e.into()),
+        };
         let parsed: TemplateV2 = serde_json::from_str(&raw)
             .map_err(|e| TemplateError::ParseError(format!("{}: {}", path.display(), e)))?;
         Ok(parsed)
@@ -792,7 +850,20 @@ pub mod v2 {
             return Ok(t);
         }
         if let Some(remote) = remote_dir {
-            let t = read_template(remote, template_hash)?;
+            let t = match read_template(remote, template_hash) {
+                Ok(t) => t,
+                // Mixed-fleet window: a pre-derivation peer minted this
+                // template straight into the stranded legacy dir, which
+                // the once-per-process copy-forward has already passed.
+                // Read it from there (read-only) instead of letting the
+                // caller NULL the column's hash — that NULL is sticky
+                // until the column is next edited.
+                Err(TemplateError::NotFound(_)) => match legacy_dir_for(remote) {
+                    Some(legacy) => read_template(&legacy, template_hash)?,
+                    None => return Err(TemplateError::NotFound(template_hash.into())),
+                },
+                Err(e) => return Err(e),
+            };
             // Best-effort cache warm. Failure to mirror just means the
             // next fetch goes back to the remote — non-fatal.
             if let Err(e) = write_template_atomic(cache_dir, &t) {
@@ -969,24 +1040,33 @@ pub mod v2 {
         next: &TemplateV2,
         expected_revision: u32,
     ) -> Result<()> {
-        let path = template_path(dir, &next.template_hash);
-        if path.exists() {
-            let current = read_template(dir, &next.template_hash)?;
-            if current.revision != expected_revision {
-                return Err(TemplateError::RevisionMismatch {
-                    expected: expected_revision,
-                    found: current.revision,
-                });
+        match read_template(dir, &next.template_hash) {
+            Ok(current) => {
+                if current.revision != expected_revision {
+                    return Err(TemplateError::RevisionMismatch {
+                        expected: expected_revision,
+                        found: current.revision,
+                    });
+                }
             }
-        } else if expected_revision != 0 {
             // Caller expected an existing template at revision N but
             // the file is gone (deleted by another peer, or never
             // existed). Surface as a conflict — the caller should
             // re-evaluate (likely by switching to a fresh create).
-            return Err(TemplateError::RevisionMismatch {
-                expected: expected_revision,
-                found: 0,
-            });
+            // `expected_revision == 0` is the create-only case: files
+            // on disk always carry revision >= 1, so any existing file
+            // mismatches above.
+            Err(TemplateError::NotFound(_)) => {
+                if expected_revision != 0 {
+                    return Err(TemplateError::RevisionMismatch {
+                        expected: expected_revision,
+                        found: 0,
+                    });
+                }
+            }
+            // Transient read failure (share blip, EACCES): never write
+            // blind over a file we couldn't inspect.
+            Err(e) => return Err(e),
         }
         write_template_atomic(dir, next)
     }
@@ -1319,14 +1399,29 @@ pub mod v2 {
     /// line stays ahead of peers' caches and `pull_to_local_cache`'s
     /// revision diff still advances; otherwise a reconstruction from
     /// the column row (revision 0). Keeps `template_hash` STABLE —
-    /// peers reference it — bumps revision + updated_at, writes the
-    /// file, and folds the entry back into the manifest (CAS-retried,
-    /// recreating the manifest too when it is also missing).
+    /// peers reference it — seeds the revision from the surviving
+    /// manifest entry when that is ahead (so peers whose caches are
+    /// newer than `base` still re-pull), bumps revision + updated_at,
+    /// writes the file, and folds the entry back into the manifest
+    /// (CAS-retried, recreating the manifest too when it is also
+    /// missing).
+    ///
+    /// CREATE-ONLY: the write goes through `cas_save_template` with
+    /// expected revision 0, so if the file is back on the share by the
+    /// time we get here (the "missing" was a transient share error, or
+    /// a peer restored it first) this returns `RevisionMismatch` and
+    /// touches nothing — a restore must never replace a live, possibly
+    /// newer template with a stale cache copy.
     pub fn restore_template(dir: &Path, base: TemplateV2, now: i64) -> Result<TemplateV2> {
         let mut t = base;
+        if let Ok(m) = read_manifest(dir) {
+            if let Some(entry) = m.templates.iter().find(|e| e.uuid == t.template_hash) {
+                t.revision = t.revision.max(entry.revision);
+            }
+        }
         t.revision = t.revision.saturating_add(1);
         t.updated_at = now;
-        write_template_atomic(dir, &t)?;
+        cas_save_template(dir, &t, 0)?;
         for attempt in 0..5 {
             let mut manifest = read_manifest(dir).unwrap_or_default();
             let expected = manifest.manifest_revision;
@@ -1698,6 +1793,42 @@ mod tests {
             let m = v2::read_manifest(tmp.path()).unwrap();
             assert_eq!(m.templates.len(), 1);
             assert_eq!(m.templates[0].revision, 42);
+        }
+
+        #[test]
+        fn restore_template_is_create_only() {
+            let tmp = TempDir::new().unwrap();
+            // Peer B's live copy at rev 45 is on the share.
+            let mut live = fresh_template("Status", "vfx_2025");
+            live.revision = 45;
+            v2::write_template_atomic(tmp.path(), &live).unwrap();
+            // A's stale cache (rev 41) reacted to a transient NotFound.
+            let mut stale = live.clone();
+            stale.revision = 41;
+            stale.options.clear();
+            let err = v2::restore_template(tmp.path(), stale, 2000).unwrap_err();
+            assert!(matches!(err, TemplateError::RevisionMismatch { found: 45, .. }));
+            let back = v2::read_template(tmp.path(), &live.template_hash).unwrap();
+            assert_eq!(back.revision, 45);
+            assert_eq!(back.options.len(), live.options.len());
+        }
+
+        #[test]
+        fn restore_template_seeds_revision_from_manifest() {
+            let tmp = TempDir::new().unwrap();
+            // The file is lost but the manifest still records rev 45;
+            // restoring from a column definition (rev 0) must land
+            // AHEAD of every peer's cache, not at rev 1.
+            let mut live = fresh_template("Status", "vfx_2025");
+            live.revision = 45;
+            let mut m = v2::Manifest::default();
+            v2::apply_entry(&mut m, v2::entry_for(&live), 1000);
+            v2::write_manifest_atomic(tmp.path(), &m).unwrap();
+            let mut base = live.clone();
+            base.revision = 0;
+            let restored = v2::restore_template(tmp.path(), base, 2000).unwrap();
+            assert_eq!(restored.revision, 46);
+            assert_eq!(v2::read_manifest(tmp.path()).unwrap().templates[0].revision, 46);
         }
 
         #[test]
