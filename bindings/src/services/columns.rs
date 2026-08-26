@@ -1657,6 +1657,55 @@ fn auto_promote_on_update(
         // which version we're updating from.
         let expected_revision = match ufb_core::templates::v2::read_template(&dir, &hash) {
             Ok(t) => t.revision,
+            Err(ufb_core::templates::TemplateError::NotFound(_)) => {
+                // The share lost this template file (crashed/raced
+                // writer) while columns still reference the hash.
+                // Before this self-heal, every option edit silently
+                // no-op'd here forever and folder-open reconciles
+                // kept reverting the user's changes to the stale
+                // cache. Rebuild the file — from the local cache
+                // copy when one exists (its revision keeps peers'
+                // pull diffs advancing), else from this column's own
+                // definition — carrying the user's pending edit.
+                let cache = templates_v2_cache_dir();
+                let base = match ufb_core::templates::v2::read_template(&cache, &hash) {
+                    Ok(mut cached) => {
+                        cached.default_value = def.default_value.clone();
+                        cached.options = def.options.clone();
+                        cached
+                    }
+                    Err(_) => ufb_core::templates::v2::TemplateV2 {
+                        schema_version: ufb_core::templates::v2::SCHEMA_VERSION,
+                        template_hash: hash.clone(),
+                        display_name: def.column_name.clone(),
+                        common_name_slug: common_slug.clone(),
+                        project_slug: project_slug.clone(),
+                        column_type: def.column_type.clone(),
+                        default_value: def.default_value.clone(),
+                        options: def.options.clone(),
+                        created_by: ufb_core::templates::current_user(),
+                        created_at: now,
+                        updated_at: now,
+                        revision: 0, // restore bumps to 1
+                    },
+                };
+                match ufb_core::templates::v2::restore_template(&dir, base, now) {
+                    Ok(t) => {
+                        log::info!(
+                            "columns: auto-promote restored missing template {} (rev {}) from {}",
+                            hash,
+                            t.revision,
+                            if t.revision > 1 { "local cache" } else { "column definition" }
+                        );
+                        mirror_to_local_cache(&dir);
+                    }
+                    Err(e) => log::warn!(
+                        "columns: auto-promote restore of missing template {} failed: {}",
+                        hash, e
+                    ),
+                }
+                return;
+            }
             Err(e) => {
                 log::warn!(
                     "columns: auto-promote (update) read failed for {}: {}",

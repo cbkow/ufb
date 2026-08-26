@@ -560,17 +560,22 @@ pub mod v2 {
     use std::path::{Path, PathBuf};
 
     pub const SCHEMA_VERSION: u32 = 2;
-    // 0.9.97 — bumped subdir from "ufb/templates" to
-    // "ufb/templates_v3" alongside the snapshot rename
-    // (ufb_snapshot_v2 → ufb_snapshot_v3). New peers operate in a
-    // fresh shared namespace so old (pre-0.9.97) peers can't keep
-    // clobbering rows via cross-OS path drift in the legacy snapshot.
-    // Old peers continue using the original path and ignore the v3
-    // tree; new peers ignore the v2 tree.
-    // v5 epoch: templates live under the shared-folder version umbrella
-    // (`<farm>/v5/templates`) alongside snapshots + nodes, so old peers
-    // (which used `ufb/templates_v3`) and new peers never share files.
-    const TEMPLATES_SUBDIR: &str = "v5/templates";
+    // Templates live under the shared-folder epoch umbrella
+    // (`<farm>/<epoch>/templates`) alongside snapshots + nodes, so
+    // peers on different epochs never share files. Derived from
+    // `mesh::FARM_VERSION_SUBDIR` — the v5→v6 break moved snapshots +
+    // nodes but left a hardcoded "v5/templates" behind, stranding
+    // templates outside the epoch tree; deriving keeps the next bump
+    // from repeating that. `resolve_dir` copies the previous epoch's
+    // files forward on first touch (see
+    // `migrate_previous_epoch_templates`).
+    fn templates_subdir() -> String {
+        format!("{}/templates", crate::mesh::FARM_VERSION_SUBDIR)
+    }
+    /// Where pre-derivation builds kept templates (the stranded v5
+    /// location). Read-only migration source — old-build peers still
+    /// write here during a mixed-fleet window, so it is never deleted.
+    const LEGACY_TEMPLATES_SUBDIR: &str = "v5/templates";
     const MANIFEST_NAME: &str = "_index.json";
 
     /// Auto-promoted column template. Hash-keyed, project-scoped.
@@ -645,25 +650,93 @@ pub mod v2 {
         pub templates: Vec<ManifestEntry>,
     }
 
-    /// Resolve `<farm_root>/ufb/templates/`. Creates it on first
+    /// Resolve `<farm_root>/<epoch>/templates/`. Creates it on first
     /// call. Returns `DirUnavailable` for an empty / unreachable
     /// `farm_root`.
     ///
     /// Also runs `recover_misplaced_v2_files` to repair any v2
     /// templates that were mis-routed to the presets dir by a
-    /// pre-fix version of the v1 migration. Idempotent: no-op
-    /// once everything's in the right dir.
+    /// pre-fix version of the v1 migration, and copies the previous
+    /// epoch's template files forward on first touch. Both are
+    /// idempotent: no-op once everything's in the right dir.
     pub fn resolve_dir(farm_root: &str) -> Result<PathBuf> {
         if farm_root.trim().is_empty() {
             return Err(TemplateError::DirUnavailable(
                 "farm_root is empty — mesh sync not configured".into(),
             ));
         }
-        let dir = Path::new(farm_root).join(TEMPLATES_SUBDIR);
+        let dir = Path::new(farm_root).join(templates_subdir());
         fs::create_dir_all(&dir)
             .map_err(|e| TemplateError::DirUnavailable(format!("{}: {}", dir.display(), e)))?;
+        migrate_previous_epoch_templates_once(farm_root, &dir);
         let _ = super::recover_misplaced_v2_files(farm_root, &dir);
         Ok(dir)
+    }
+
+    /// Once-per-process wrapper around
+    /// `migrate_previous_epoch_templates`. Doesn't latch on a failed
+    /// legacy-dir read so a transient share error retries on the next
+    /// resolve.
+    fn migrate_previous_epoch_templates_once(farm_root: &str, dir: &Path) {
+        static DONE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if DONE.get().is_some() {
+            return;
+        }
+        if migrate_previous_epoch_templates(farm_root, dir).is_ok() {
+            let _ = DONE.set(());
+        }
+    }
+
+    /// Copy template files (incl. the manifest) from the previous
+    /// epoch's templates dir into `dir` — the current epoch's — when
+    /// they aren't there yet. COPY, not move: peers still on an
+    /// old build keep reading/writing the legacy dir during the
+    /// mixed-fleet window; once a file exists in the new dir the new
+    /// dir wins and later legacy edits are ignored. Idempotent.
+    pub(crate) fn migrate_previous_epoch_templates(
+        farm_root: &str,
+        dir: &Path,
+    ) -> std::io::Result<()> {
+        if templates_subdir() == LEGACY_TEMPLATES_SUBDIR {
+            return Ok(());
+        }
+        let legacy = Path::new(farm_root).join(LEGACY_TEMPLATES_SUBDIR);
+        if !legacy.is_dir() {
+            return Ok(());
+        }
+        let mut copied = 0usize;
+        for entry in fs::read_dir(&legacy)? {
+            let Ok(entry) = entry else { continue };
+            let src = entry.path();
+            let Some(name) = src.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Real payloads only — skips tmp/bak debris from crashed
+            // writers.
+            if !name.ends_with(".json") {
+                continue;
+            }
+            let dst = dir.join(name);
+            if dst.exists() {
+                continue;
+            }
+            match fs::copy(&src, &dst) {
+                Ok(_) => copied += 1,
+                Err(e) => log::warn!(
+                    "templates v2: epoch migration copy failed for {}: {}",
+                    name, e
+                ),
+            }
+        }
+        if copied > 0 {
+            log::info!(
+                "templates v2: migrated {} template file(s) from {} to {}",
+                copied,
+                legacy.display(),
+                dir.display()
+            );
+        }
+        Ok(())
     }
 
     /// Local cache mirror of the remote v2 templates dir, located at
@@ -781,10 +854,17 @@ pub mod v2 {
     }
 
     /// Atomic write of `payload` to `dest` via tempfile + rename.
-    /// `tmp_suffix` distinguishes concurrent in-flight writes (e.g.
-    /// two manifest updates racing — each picks a different temp
-    /// suffix, both reach `rename`, last writer wins; the
-    /// revision-CAS at the caller layer prevents lost updates).
+    ///
+    /// The temp name is unique PER WRITE (uuid), not derived from the
+    /// destination: the old scheme gave every writer of a given file —
+    /// fleet-wide, on the share — the SAME temp path, so two peers
+    /// replacing the same template could interleave create/remove/
+    /// rename on one temp file and delete the destination with nothing
+    /// left to rename over it (the lost `_index.json` / hot-template
+    /// incident of 2026-08-26). With private temps, concurrent
+    /// replacers serialise to last-writer-wins, which the caller-layer
+    /// revision-CAS already handles. `tmp_suffix` is kept only as a
+    /// human-readable marker in the temp name for debugging debris.
     fn atomic_write_json<T: Serialize>(
         dest: &Path,
         payload: &T,
@@ -793,21 +873,82 @@ pub mod v2 {
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = dest.with_extension(format!("json.tmp.{}", tmp_suffix));
+        let tmp = dest.with_extension(format!(
+            "json.tmp.{}.{}",
+            tmp_suffix,
+            uuid::Uuid::new_v4().simple()
+        ));
         {
             let json = serde_json::to_string_pretty(payload)?;
             let mut f = fs::File::create(&tmp)?;
             f.write_all(json.as_bytes())?;
             f.sync_all()?;
         }
-        #[cfg(windows)]
-        {
-            if dest.exists() {
-                let _ = fs::remove_file(dest);
+        if let Err(e) = replace_file(&tmp, dest) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Move `tmp` over `dest`, replacing any existing file. On Unix a
+    /// plain `rename` replaces atomically. On Windows `rename` refuses
+    /// to overwrite, so an existing `dest` is first SET ASIDE under a
+    /// unique backup name and restored if the final rename fails —
+    /// unlike the old remove-then-rename, `dest`'s content is never
+    /// deleted while the replacement could still be lost. Retries
+    /// absorb another writer racing the same destination.
+    #[cfg(not(windows))]
+    fn replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+        fs::rename(tmp, dest)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn replace_file(tmp: &Path, dest: &Path) -> Result<()> {
+        let mut last_err: Option<std::io::Error> = None;
+        for _ in 0..5 {
+            // Fast path — dest absent (fresh create, or a racing
+            // writer's set-aside is in flight).
+            match fs::rename(tmp, dest) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+            if !dest.exists() {
+                // Rename failed with no dest in the way — transient
+                // share error or a racer mid-replace; retry.
+                continue;
+            }
+            let bak = dest.with_extension(format!(
+                "json.bak.{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            match fs::rename(dest, &bak) {
+                Ok(()) => match fs::rename(tmp, dest) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&bak);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        // Roll the previous content back so dest never
+                        // stays missing.
+                        let _ = fs::rename(&bak, dest);
+                        last_err = Some(e);
+                    }
+                },
+                // dest vanished between exists() and rename — racing
+                // writer took it; retry the fast path.
+                Err(e) => last_err = Some(e),
             }
         }
-        fs::rename(&tmp, dest)?;
-        Ok(())
+        Err(last_err
+            .unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "replace_file: retries exhausted",
+                )
+            })
+            .into())
     }
 
     /// Write a template atomically without revision check. Used by
@@ -913,6 +1054,15 @@ pub mod v2 {
     /// nothing to pull" rather than an error.
     pub fn pull_to_local_cache(remote_dir: &Path, local_dir: &Path) -> Result<usize> {
         fs::create_dir_all(local_dir)?;
+        // A missing remote manifest means "fresh dir" — or a manifest
+        // lost to a crashed/raced writer. Either way there is nothing
+        // trustworthy to diff against, and mirroring the empty default
+        // over the local cache manifest would erase the cache's pull
+        // baseline (forcing needless re-pulls AND blanking the
+        // offline lookup view). Leave the cache untouched.
+        if !manifest_path(remote_dir).exists() {
+            return Ok(0);
+        }
         let remote_manifest = match read_manifest(remote_dir) {
             Ok(m) => m,
             Err(TemplateError::Io(_)) => return Ok(0),
@@ -1159,6 +1309,36 @@ pub mod v2 {
         // propagates the error.
         Err(TemplateError::ParseError(
             "manifest CAS exhausted retries".into(),
+        ))
+    }
+
+    /// Re-create a template file that has gone missing from the share
+    /// while column rows still reference its hash (file lost to a
+    /// crashed or raced writer). `base` supplies the content — callers
+    /// pass their local-cache copy when one exists, so the revision
+    /// line stays ahead of peers' caches and `pull_to_local_cache`'s
+    /// revision diff still advances; otherwise a reconstruction from
+    /// the column row (revision 0). Keeps `template_hash` STABLE —
+    /// peers reference it — bumps revision + updated_at, writes the
+    /// file, and folds the entry back into the manifest (CAS-retried,
+    /// recreating the manifest too when it is also missing).
+    pub fn restore_template(dir: &Path, base: TemplateV2, now: i64) -> Result<TemplateV2> {
+        let mut t = base;
+        t.revision = t.revision.saturating_add(1);
+        t.updated_at = now;
+        write_template_atomic(dir, &t)?;
+        for attempt in 0..5 {
+            let mut manifest = read_manifest(dir).unwrap_or_default();
+            let expected = manifest.manifest_revision;
+            apply_entry(&mut manifest, entry_for(&t), now);
+            match cas_save_manifest(dir, &manifest, expected) {
+                Ok(()) => return Ok(t),
+                Err(TemplateError::RevisionMismatch { .. }) if attempt < 4 => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(TemplateError::ParseError(
+            "manifest CAS exhausted retries during restore".into(),
         ))
     }
 
@@ -1434,6 +1614,90 @@ mod tests {
             let back = v2::read_template(tmp.path(), &t.template_hash).unwrap();
             assert_eq!(back.options.len(), 2);
             assert_eq!(back.revision, 2);
+        }
+
+        #[test]
+        fn atomic_replace_overwrites_and_leaves_no_debris() {
+            let tmp = TempDir::new().unwrap();
+            let mut t = fresh_template("Status", "vfx_2025");
+            v2::write_template_atomic(tmp.path(), &t).unwrap();
+            t.revision = 2;
+            // Second write exercises the replace-existing path.
+            v2::write_template_atomic(tmp.path(), &t).unwrap();
+            let back = v2::read_template(tmp.path(), &t.template_hash).unwrap();
+            assert_eq!(back.revision, 2);
+            for entry in fs::read_dir(tmp.path()).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().to_string();
+                assert!(name.ends_with(".json"), "debris left behind: {}", name);
+            }
+        }
+
+        #[test]
+        fn pull_missing_remote_manifest_leaves_local_cache_alone() {
+            let remote = TempDir::new().unwrap(); // no _index.json
+            let local = TempDir::new().unwrap();
+            let t = fresh_template("Status", "vfx_2025");
+            v2::write_template_atomic(local.path(), &t).unwrap();
+            let mut m = v2::Manifest::default();
+            v2::apply_entry(&mut m, v2::entry_for(&t), 1000);
+            v2::write_manifest_atomic(local.path(), &m).unwrap();
+
+            let pulled = v2::pull_to_local_cache(remote.path(), local.path()).unwrap();
+            assert_eq!(pulled, 0);
+            let back = v2::read_manifest(local.path()).unwrap();
+            assert_eq!(
+                back.templates.len(),
+                1,
+                "local cache manifest must not be clobbered by an empty default"
+            );
+        }
+
+        #[test]
+        fn epoch_migration_copies_legacy_templates_forward() {
+            let farm = TempDir::new().unwrap();
+            let legacy = farm.path().join("v5/templates");
+            fs::create_dir_all(&legacy).unwrap();
+            let t = fresh_template("Status", "vfx_2025");
+            v2::write_template_atomic(&legacy, &t).unwrap();
+            let mut m = v2::Manifest::default();
+            v2::apply_entry(&mut m, v2::entry_for(&t), 1000);
+            v2::write_manifest_atomic(&legacy, &m).unwrap();
+            // Writer debris must NOT be copied forward.
+            fs::write(legacy.join("junk.json.tmp.manifest.abc"), "x").unwrap();
+
+            let new_dir = farm
+                .path()
+                .join(format!("{}/templates", crate::mesh::FARM_VERSION_SUBDIR));
+            fs::create_dir_all(&new_dir).unwrap();
+            v2::migrate_previous_epoch_templates(farm.path().to_str().unwrap(), &new_dir)
+                .unwrap();
+
+            assert!(v2::read_template(&new_dir, &t.template_hash).is_ok());
+            assert_eq!(v2::read_manifest(&new_dir).unwrap().templates.len(), 1);
+            assert!(!new_dir.join("junk.json.tmp.manifest.abc").exists());
+            // Legacy stays intact — old-build peers still use it.
+            assert!(v2::read_template(&legacy, &t.template_hash).is_ok());
+            // Idempotent.
+            v2::migrate_previous_epoch_templates(farm.path().to_str().unwrap(), &new_dir)
+                .unwrap();
+            assert_eq!(v2::read_manifest(&new_dir).unwrap().templates.len(), 1);
+        }
+
+        #[test]
+        fn restore_template_bumps_revision_and_reindexes() {
+            let tmp = TempDir::new().unwrap();
+            let mut base = fresh_template("Status", "vfx_2025");
+            base.revision = 41; // the local-cache copy of a lost file
+            // Nothing on disk — the "file lost from the share" state.
+            let restored = v2::restore_template(tmp.path(), base.clone(), 2000).unwrap();
+            assert_eq!(restored.revision, 42);
+            assert_eq!(restored.template_hash, base.template_hash);
+            let back = v2::read_template(tmp.path(), &base.template_hash).unwrap();
+            assert_eq!(back.revision, 42);
+            assert_eq!(back.updated_at, 2000);
+            let m = v2::read_manifest(tmp.path()).unwrap();
+            assert_eq!(m.templates.len(), 1);
+            assert_eq!(m.templates[0].revision, 42);
         }
 
         #[test]
