@@ -10,6 +10,40 @@
          a button that opens the DMG link on GitHub Releases. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.1.6</title>
+      <sparkle:version>1.1.6</sparkle:version>
+      <sparkle:shortVersionString>1.1.6</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <!-- Informational: no enclosure. Empty informationalUpdate ->
+           applies to all installed versions. The button opens link. -->
+      <sparkle:informationalUpdate></sparkle:informationalUpdate>
+      <link>https://github.com/cbkow/ufb/releases/download/v1.1.6/UFB-1.1.6-arm64.dmg</link>
+      <description><![CDATA[<h2>UFB 1.1.6</h2>
+<ul>
+  <li><b>Shared templates no longer go missing.</b> Template files on the
+      shared store (including the index and per-column templates such as a
+      Status template) could be permanently lost when two machines saved
+      the same template at the same moment: every peer used the same
+      temporary file name on the share, and on Windows the old file was
+      removed before the new one was renamed into place. Writes now use a
+      unique temporary name per save, and on Windows the old file is set
+      aside and restored if the replacement fails — the store never ends
+      up with nothing.</li>
+  <li><b>Lost templates self-heal.</b> If a template file is found missing,
+      UFB rebuilds it (from the local cache copy when present, otherwise
+      from the column definition, keeping any pending edit) and re-indexes
+      it, instead of giving up, reverting your option edits, or hiding the
+      column on other machines.</li>
+  <li><b>A missing shared index no longer wipes the local cache
+      index.</b></li>
+  <li><b>Templates now live in the v6 farm folder</b> alongside the rest
+      of the v6 data. Existing template files are copied forward on first
+      use (the old folder is left in place so older builds keep working).
+      Please update all machines together.</li>
+</ul>]]></description>
+      <pubDate>Wed, 26 Aug 2026 16:05:50 -0400</pubDate>
+    </item>
+    <item>
       <title>Version 1.1.4</title>
       <sparkle:version>1.1.4</sparkle:version>
       <sparkle:shortVersionString>1.1.4</sparkle:shortVersionString>
