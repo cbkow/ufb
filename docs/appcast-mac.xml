@@ -10,6 +10,37 @@
          a button that opens the DMG link on GitHub Releases. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.1.4</title>
+      <sparkle:version>1.1.4</sparkle:version>
+      <sparkle:shortVersionString>1.1.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <!-- Informational: no enclosure. Empty informationalUpdate ->
+           applies to all installed versions. The button opens link. -->
+      <sparkle:informationalUpdate></sparkle:informationalUpdate>
+      <link>https://github.com/cbkow/ufb/releases/download/v1.1.4/UFB-1.1.4-arm64.dmg</link>
+      <description><![CDATA[<h2>UFB 1.1.4</h2>
+<ul>
+  <li><b>Windows: right-click freeze fixed.</b> Opening a context menu in
+      the file browser could hang the app (“not responding”) roughly a
+      third of the time when the menu fit neither below nor above the
+      cursor — typically a long menu with the cursor mid-screen on a
+      1080p display. The menu layout looped forever while the popup was
+      being clamped to the screen. Menus that don’t fit now simply
+      scroll.</li>
+  <li><b>All menus hardened:</b> every menu in the app (file browser,
+      item list, sidebar, tracker and its submenus, tab menu) now uses a
+      shared <code>UfbMenu</code> that cannot enter that layout loop.</li>
+  <li><b>Windows: smoother right-click.</b> Checking whether Paste should
+      be enabled no longer asks the clipboard owner to render its data
+      (a busy Explorer, Office, browser or Adobe app could stall UFB for
+      as long as it liked); the check is now instant. The native
+      “Show more options” shell menu no longer blocks the main window
+      while it is open, and can’t deadlock on a chatty shell
+      extension.</li>
+</ul>]]></description>
+      <pubDate>Mon, 24 Aug 2026 17:27:17 -0400</pubDate>
+    </item>
+    <item>
       <title>Version 1.1.3</title>
       <sparkle:version>1.1.3</sparkle:version>
       <sparkle:shortVersionString>1.1.3</sparkle:shortVersionString>
