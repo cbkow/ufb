@@ -247,9 +247,6 @@ elseif(APPLE)
         "-framework AudioToolbox"
         "-framework CoreAudio"
         "-framework AudioUnit"
-        # SMAppService login-item registration (plans/17 slice E,
-        # MacOSBootstrap.mm::registerGuiLoginItem).
-        "-framework ServiceManagement"
         # NetFSMountURLSync for GUI-owned plain SMB mounts (plans/17
         # F1, core::macos_mounts). The #[link] attribute in the Rust
         # staticlib doesn't survive into the C++ link.
@@ -308,19 +305,6 @@ if(APPLE)
                 "QCView-Player/external/Sparkle/Sparkle.framework (2.9.2) there.")
     endif()
 
-    # Login-item agent plist (plans/17 slice E): SMAppService requires
-    # it inside the bundle at Contents/Library/LaunchAgents/. Copied by
-    # an early POST_BUILD (before the deploy + codesign steps later in
-    # this file) so the signature covers it — a file added after
-    # signing would break the seal.
-    add_custom_command(TARGET ufb POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_BUNDLE_DIR:ufb>/Contents/Library/LaunchAgents"
-        COMMAND ${CMAKE_COMMAND} -E copy
-            "${CMAKE_CURRENT_SOURCE_DIR}/macos/dev.ufb.gui.plist"
-            "$<TARGET_BUNDLE_DIR:ufb>/Contents/Library/LaunchAgents/dev.ufb.gui.plist"
-        COMMENT "Bundling login-item plist (dev.ufb.gui.plist)"
-        VERBATIM)
 elseif(WIN32)
     target_sources(ufb PRIVATE updater/Updater_win.cpp)
     # UFB_APP_VERSION (WinSparkle's appcast comparison — ufb.exe has

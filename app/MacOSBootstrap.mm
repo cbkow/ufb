@@ -1,10 +1,9 @@
 // MacOSBootstrap.mm — see MacOSBootstrap.h for the contract.
 //
-// Slice 04 ships the PROBE half: detects whether the agent's
-// LaunchAgent is loaded and logs the result. The INSTALL half (copy
-// plist from .app Resources, launchctl bootstrap, register Login Item
-// via SMAppService) lands in slice 08, when the .app bundle has a
-// template plist in Resources/ to copy from.
+// Probes whether an agent LaunchAgent plist is present and logs it
+// (heal-on-open drives the agent lifecycle), and owns the Dock-icon
+// activation-policy toggle for one-app tray mode. The SMAppService
+// login item that lived here through 1.1.6 was removed in 1.2.0.
 
 #include "MacOSBootstrap.h"
 
@@ -12,7 +11,6 @@
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
-#import <ServiceManagement/ServiceManagement.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -79,43 +77,6 @@ void setDockIconVisible(bool visible) {
             // the restored window comes up behind the current app.
             [NSApp activateIgnoringOtherApps:YES];
         }
-    }
-}
-
-void registerGuiLoginItem() {
-    // Register this app as a launchd Login Item via SMAppService with
-    // a bundled agent plist (Contents/Library/LaunchAgents/
-    // dev.ufb.gui.plist) whose ProgramArguments carry --background —
-    // so login starts UFB tray-only, which then heals the mount agent.
-    // Replaces UFBTray's SMAppService.mainApp registration. Idempotent
-    // (status check first); user can disable in System Settings →
-    // Login Items. First registration shows Apple's one-time
-    // "added a Login Item" notification.
-    if (@available(macOS 13.0, *)) {
-        SMAppService* svc =
-            [SMAppService agentServiceWithPlistName:@"dev.ufb.gui.plist"];
-        switch (svc.status) {
-        case SMAppServiceStatusEnabled:
-            qInfo() << "[bootstrap] GUI login item already registered";
-            return;
-        case SMAppServiceStatusRequiresApproval:
-            qInfo() << "[bootstrap] GUI login item awaiting approval in"
-                    << "System Settings";
-            return;
-        default: {
-            NSError* err = nil;
-            if ([svc registerAndReturnError:&err]) {
-                qInfo() << "[bootstrap] registered GUI login item"
-                        << "(--background)";
-            } else {
-                qWarning() << "[bootstrap] GUI login item registration"
-                           << "failed:"
-                           << QString::fromNSString(err.localizedDescription);
-            }
-        }
-        }
-    } else {
-        qInfo() << "[bootstrap] macOS < 13 — SMAppService unavailable";
     }
 }
 

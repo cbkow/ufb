@@ -269,11 +269,11 @@ int main(int argc, char *argv[])
     ufb::runMacOSFirstLaunchBootstrap();
 
     // One-app mode (plans/17 slice E): the GUI hosts the tray now.
-    // Retire any legacy UFBTray still running (second icon + agent
-    // race), register ourselves as the login item (--background via
-    // the bundled dev.ufb.gui.plist), and start menu-bar-only when
-    // launched in background mode.
-    ufb::registerGuiLoginItem();
+    // Start menu-bar-only when launched in background mode. (The
+    // SMAppService login item that used to be registered here was
+    // dropped in 1.2.0 — the mount agent heals on demand, so a login
+    // launch bought nothing but Apple's "added a Login Item" prompt
+    // and a BTM record pinned to whichever bundle ran last.)
     if (startInBackground)
         ufb::setDockIconVisible(false);
 #endif
@@ -425,8 +425,8 @@ int main(int argc, char *argv[])
     // One-app mode (plans/17 slice E): the GUI hosts the tray icon and
     // stays resident when the last window closes — closing the window
     // no longer tears down the mesh, thumbnails, or the mount client.
-    // Quit is explicit (tray menu / Cmd-Q). `--background` (login item
-    // via the bundled SMAppService plist) starts tray-only, no window.
+    // Quit is explicit (tray menu / Cmd-Q). `--background` starts
+    // tray-only, no window.
     QGuiApplication::setQuitOnLastWindowClosed(false);
     engine.rootContext()->setContextProperty("_startInBackground",
                                              startInBackground);

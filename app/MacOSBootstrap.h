@@ -41,10 +41,6 @@ void runMacOSFirstLaunchBootstrap();
 /// (and activate) when the window shows.
 void setDockIconVisible(bool visible);
 
-/// Register UFB.app as a launchd Login Item (SMAppService agent plist
-/// with --background) so login starts the app tray-only. Idempotent.
-void registerGuiLoginItem();
-
 }  // namespace ufb
 
 #endif  // __APPLE__
