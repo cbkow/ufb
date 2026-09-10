@@ -246,13 +246,42 @@ QImage decodeExrLayer(const QString& path, QSize requestedSize,
 
 } // namespace
 
+// For the default view: does part 0 carry bare channels RgbaInputFile can
+// read (R/G/B/A or luminance-chroma Y/RY/BY)? Renderers that write only
+// prefixed channels — Blender's single "ViewLayer.Combined.R/G/B/A", for
+// instance — produce a single-part file with NO bare channels; RgbaInputFile
+// then reads nothing and the preview (and thumbnail) comes back blank.
+// Returns "" when the bare path is fine, else the first non-cryptomatte
+// layer prefix to decode through the named-layer path instead.
+std::string defaultLayerFallback(const QString& path) {
+    Imf::MultiPartInputFile file(path.toStdString().c_str());
+    if (file.parts() > 1) return "";   // RgbaInputFile reads part 0 as-is
+    const Imf::ChannelList& channels = file.header(0).channels();
+    for (const char* bare : { "R", "G", "B", "Y", "RY", "BY" })
+        if (channels.findChannel(bare)) return "";
+    for (auto it = channels.begin(); it != channels.end(); ++it) {
+        const std::string n = it.name();
+        const std::size_t dot = n.find_last_of('.');
+        if (dot == std::string::npos) continue;
+        const std::string prefix = n.substr(0, dot);
+        if (!isCryptomatte(prefix)) return prefix;
+    }
+    return "";
+}
+
 QImage decodeExr(const QString& path, QSize requestedSize, qint64 maxPixels,
                  const QString& layer) {
     qInfo("ExrBackend: start path=%s layer=%s",
           qPrintable(path), qPrintable(layer));
     try {
-        const std::string l = layer.toStdString();
-        QImage img = (l.empty() || l == "default")
+        std::string l = layer.toStdString();
+        if (l.empty() || l == "default") {
+            l = defaultLayerFallback(path);
+            if (!l.empty())
+                qInfo("ExrBackend: %s has no bare R/G/B channels; using layer '%s'",
+                      qPrintable(path), l.c_str());
+        }
+        QImage img = l.empty()
             ? decodeExrRgba(path, requestedSize, maxPixels)
             : decodeExrLayer(path, requestedSize, maxPixels, l);
         if (!img.isNull())
