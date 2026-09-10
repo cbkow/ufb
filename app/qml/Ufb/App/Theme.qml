@@ -68,11 +68,11 @@ QtObject {
         // never for state or actions (that's accent / success / warning).
         readonly property color brand:        "#e8c21f"
         // Sidebar section identities alongside the brand yellow
-        // (Subscriptions): sky blue for Bookmarks, rose for Trackers.
-        // Identity only, like brand — not state (green is taken by the
-        // mount status dots below, so trackers stay off that hue).
+        // (Subscriptions): sky blue for Bookmarks, warm grey for
+        // Trackers (a tool, not a place — stays neutral; green is taken
+        // by the mount status dots below). Identity only, not state.
         readonly property color sidebarBookmark: "#59a9f0"
-        readonly property color sidebarTracker:  "#ec7fa6"
+        readonly property color sidebarTracker:  "#b8b0a4"
         readonly property color success:      "#4cb050"
         readonly property color warning:      "#f5a623"
         readonly property color error:        "#c04040"
