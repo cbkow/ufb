@@ -51,7 +51,6 @@ FILES=(
     agent/Cargo.toml
     installer/ufb_installer.iss
     agent/macos/Info.plist
-    macos-helpers/UFBTray/Info.plist
     macos-helpers/UFBFinderSync/Info.plist
     vcpkg.json
 )
