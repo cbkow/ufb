@@ -247,6 +247,10 @@ Rectangle {
     /// re-flows every visible row's Row per mouse move (visibly
     /// stuttery); the real width commits once on release.
     property real _dragGuideX: -1
+    // A missed release (window deactivated mid-drag, native drag loop)
+    // must not leave the guide line on screen.
+    readonly property bool _winActiveForGuide: Window.active
+    on_WinActiveForGuideChanged: if (!_winActiveForGuide) _dragGuideX = -1
     function _setLiveColumnWidth(name, w) {
         var m = Object.assign({}, _columnWidthOverrides)
         m[name] = Math.max(40, w)
@@ -833,7 +837,7 @@ Rectangle {
                                     anchors.topMargin: 4
                                     anchors.bottomMargin: 4
                                     width: 2
-                                    color: projectHandleMa.containsMouse || projectHandleMa.pressed
+                                    color: projectHandleMaHover.hovered || projectHandleMa.pressed
                                         ? Theme.colors.accent : Theme.colors.borderStrong
                                     z: 10
                                 }
@@ -845,6 +849,11 @@ Rectangle {
                                     anchors.rightMargin: -3
                                     width: 10
                                     hoverEnabled: true
+                                    // HoverHandler, not containsMouse, for the tint: MouseArea's
+                                    // containsMouse only clears on a leave event, which can be lost
+                                    // when the window deactivates or a native drag runs its modal
+                                    // loop — the blue line then sticks. HoverHandler re-evaluates.
+                                    HoverHandler { id: projectHandleMaHover }
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11
@@ -904,7 +913,7 @@ Rectangle {
                                     anchors.topMargin: 4
                                     anchors.bottomMargin: 4
                                     width: 2
-                                    color: nameHandleMa.containsMouse || nameHandleMa.pressed
+                                    color: nameHandleMaHover.hovered || nameHandleMa.pressed
                                         ? Theme.colors.accent : Theme.colors.borderStrong
                                     z: 10
                                 }
@@ -916,6 +925,11 @@ Rectangle {
                                     anchors.rightMargin: -3
                                     width: 10
                                     hoverEnabled: true
+                                    // HoverHandler, not containsMouse, for the tint: MouseArea's
+                                    // containsMouse only clears on a leave event, which can be lost
+                                    // when the window deactivates or a native drag runs its modal
+                                    // loop — the blue line then sticks. HoverHandler re-evaluates.
+                                    HoverHandler { id: nameHandleMaHover }
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11
@@ -999,7 +1013,7 @@ Rectangle {
                                         anchors.topMargin: 4
                                         anchors.bottomMargin: 4
                                         width: 2
-                                        color: handleMa.containsMouse || handleMa.pressed
+                                        color: handleMaHover.hovered || handleMa.pressed
                                             ? Theme.colors.accent : Theme.colors.borderStrong
                                         z: 10
                                     }
@@ -1011,6 +1025,11 @@ Rectangle {
                                         anchors.rightMargin: -3
                                         width: 10
                                         hoverEnabled: true
+                                        // HoverHandler, not containsMouse, for the tint: MouseArea's
+                                        // containsMouse only clears on a leave event, which can be lost
+                                        // when the window deactivates or a native drag runs its modal
+                                        // loop — the blue line then sticks. HoverHandler re-evaluates.
+                                        HoverHandler { id: handleMaHover }
                                         cursorShape: Qt.SizeHorCursor
                                         preventStealing: true
                                         z: 11
@@ -1074,7 +1093,7 @@ Rectangle {
                                     anchors.topMargin: 4
                                     anchors.bottomMargin: 4
                                     width: 2
-                                    color: folderHandleMa.containsMouse || folderHandleMa.pressed
+                                    color: folderHandleMaHover.hovered || folderHandleMa.pressed
                                         ? Theme.colors.accent : Theme.colors.borderStrong
                                     z: 10
                                 }
@@ -1086,6 +1105,11 @@ Rectangle {
                                     anchors.rightMargin: -3
                                     width: 10
                                     hoverEnabled: true
+                                    // HoverHandler, not containsMouse, for the tint: MouseArea's
+                                    // containsMouse only clears on a leave event, which can be lost
+                                    // when the window deactivates or a native drag runs its modal
+                                    // loop — the blue line then sticks. HoverHandler re-evaluates.
+                                    HoverHandler { id: folderHandleMaHover }
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11

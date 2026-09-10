@@ -67,6 +67,10 @@ Rectangle {
     /// stuttery once metadata cells sit to the right); the real
     /// width commits once on release.
     property real _dragGuideX: -1
+    // A missed release (window deactivated mid-drag, native drag loop)
+    // must not leave the guide line on screen.
+    readonly property bool _winActiveForGuide: Window.active
+    on_WinActiveForGuideChanged: if (!_winActiveForGuide) _dragGuideX = -1
 
     /// Set of item paths (within this folder) that are currently
     /// tracked. Built inside _refreshMetadataAndColumns from the same
@@ -608,7 +612,7 @@ Rectangle {
                         anchors.topMargin: 4
                         anchors.bottomMargin: 4
                         width: 2
-                        color: itemNameHandleMa.containsMouse || itemNameHandleMa.pressed
+                        color: itemNameHandleMaHover.hovered || itemNameHandleMa.pressed
                             ? Theme.colors.accent : Theme.colors.borderStrong
                         z: 10
                     }
@@ -620,6 +624,11 @@ Rectangle {
                         anchors.rightMargin: -3
                         width: 10
                         hoverEnabled: true
+                        // HoverHandler, not containsMouse, for the tint: MouseArea's
+                        // containsMouse only clears on a leave event, which can be lost
+                        // when the window deactivates or a native drag runs its modal
+                        // loop — the blue line then sticks. HoverHandler re-evaluates.
+                        HoverHandler { id: itemNameHandleMaHover }
                         cursorShape: Qt.SizeHorCursor
                         preventStealing: true
                         z: 11
@@ -695,7 +704,7 @@ Rectangle {
                             anchors.topMargin: 4
                             anchors.bottomMargin: 4
                             width: 2
-                            color: itemHeaderHandleMa.containsMouse || itemHeaderHandleMa.pressed
+                            color: itemHeaderHandleMaHover.hovered || itemHeaderHandleMa.pressed
                                 ? Theme.colors.accent : Theme.colors.borderStrong
                             z: 10
                         }
@@ -707,6 +716,11 @@ Rectangle {
                             anchors.rightMargin: -3
                             width: 10
                             hoverEnabled: true
+                            // HoverHandler, not containsMouse, for the tint: MouseArea's
+                            // containsMouse only clears on a leave event, which can be lost
+                            // when the window deactivates or a native drag runs its modal
+                            // loop — the blue line then sticks. HoverHandler re-evaluates.
+                            HoverHandler { id: itemHeaderHandleMaHover }
                             cursorShape: Qt.SizeHorCursor
                             preventStealing: true
                             z: 11
