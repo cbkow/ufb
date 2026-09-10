@@ -269,7 +269,7 @@ pub mod qobject {
 
         /// Create a date-prefixed note FILE using the same
         /// `YYMMDD<letter>_<name>` slot walk, but with a `.mndb`
-        /// extension (WIP UFB notes format — created empty). Returns
+        /// extension — a real minNotes document (schema + seed block). Returns
         /// the new path or "" on error.
         #[qinvokable]
         fn create_date_prefixed_note(

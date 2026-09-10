@@ -231,7 +231,8 @@ Rectangle {
     property bool allowOpenInMainBrowser: false
 
     /// Adds "Add Note…" to the background context menu — creates a
-    /// date-prefixed `.mndb` note file (WIP UFB notes format) via
+    /// date-prefixed `.mndb` minNotes document (schema + one empty
+    /// paragraph, so minNotes opens it) via
     /// FileOps.create_date_prefixed_note and opens it in the default
     /// app. On only for the notes tab's browser (FolderTabView gates
     /// on the tab folder's name).
@@ -1350,9 +1351,8 @@ Rectangle {
                 return
             }
             refreshAfterDropTimer.restart()
-            // Hand the new note to the default .mndb handler. The UFB
-            // notes app is WIP — until it exists (and registers the
-            // extension) this open is a harmless no-op/OS shrug.
+            // Hand the new note to the default .mndb handler (minNotes
+            // registers the extension; without it this is an OS shrug).
             FileOps.open_file(newPath)
         }
     }

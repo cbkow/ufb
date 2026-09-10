@@ -812,14 +812,21 @@ pub fn create_date_prefixed_item(parent: &str, base_name: &str) -> Result<String
     ))
 }
 
-/// Create a date-prefixed note FILE. Format:
+/// Create a date-prefixed minNotes note. Format:
 /// `{YYMMDD}{letter}_{base_name}.mndb` — the same shared a–z slot
 /// walk as [`create_date_prefixed_item`], with two differences:
-/// the result is an empty file rather than a directory, and the
-/// slot scan counts every entry (files AND folders) with today's
-/// prefix so a note and a folder can't end up sharing a letter.
-/// `.mndb` is the WIP UFB notes format; the file is created empty
-/// and the (future) notes app owns its contents.
+/// the result is a file rather than a directory, and the slot scan
+/// counts every entry (files AND folders) with today's prefix so a
+/// note and a folder can't end up sharing a letter.
+///
+/// The file is a real minNotes document, not an empty placeholder:
+/// minNotes only seeds a first block for documents it creates itself
+/// (`BlockModel::newDocument` → `seedEmptyDoc`), so an empty file gave
+/// it nothing to put a cursor in and the note never opened. This writes
+/// what minNotes' own new-document path writes — the v3 schema, a
+/// stamped `doc_meta` row, and one empty paragraph block — as a plain
+/// rollback-journal SQLite file (minNotes normalises saves to that
+/// form; it never runs SQLite on the share itself, it stages a copy).
 ///
 /// Returns the absolute path of the new file on success.
 pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String, String> {
@@ -841,11 +848,10 @@ pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String
         if !existing.iter().any(|n| n.starts_with(&prefix)) {
             let file_name = format!("{}_{}.mndb", prefix, base_name);
             let full_path = parent_path.join(&file_name);
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&full_path)
-                .map_err(|e| format!("create {:?}: {}", full_path, e))?;
+            if full_path.exists() {
+                continue;
+            }
+            write_minnotes_document(&full_path)?;
             return Ok(full_path.to_string_lossy().into_owned());
         }
     }
@@ -854,6 +860,107 @@ pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String
         "All date-prefixed slots for {} are taken (a–z exhausted)",
         today
     ))
+}
+
+/// minNotes document format version this writer produces
+/// (`Document::kSchemaVersion` in the minNotes repo).
+const MINNOTES_SCHEMA_VERSION: i64 = 3;
+
+/// ULID (48-bit ms timestamp + 80 random bits, Crockford base32, 26
+/// chars) — the block-id shape minNotes' `makeUlid()` produces, so ids
+/// created here sort alongside ids minNotes adds later.
+fn make_ulid() -> String {
+    const ENC: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut ts = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let mut out = [b'0'; 26];
+    for i in (0..10).rev() {
+        out[i] = ENC[(ts & 0x1F) as usize];
+        ts >>= 5;
+    }
+    let rnd = uuid::Uuid::new_v4();
+    let bytes = rnd.as_bytes();
+    for (k, slot) in out.iter_mut().enumerate().skip(10) {
+        // One 5-bit draw per char from the 128 random bits (16 draws = 80 bits).
+        let bit = (k - 10) * 5;
+        let byte = bit / 8;
+        let shift = bit % 8;
+        let v = ((bytes[byte] as u16) | ((bytes[(byte + 1) % 16] as u16) << 8)) >> shift;
+        *slot = ENC[(v & 0x1F) as usize];
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Write a fresh minNotes document at `path`: schema, `doc_meta` stamp,
+/// and one empty paragraph block. Mirrors `Document::open` (DDL) +
+/// `stampMeta` + `BlockModel::seedEmptyDoc` in the minNotes repo.
+fn write_minnotes_document(path: &Path) -> Result<(), String> {
+    use rusqlite::{params, Connection, OpenFlags};
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+    )
+    .map_err(|e| format!("create {:?}: {}", path, e))?;
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE IF NOT EXISTS blocks (
+            id       TEXT PRIMARY KEY,
+            rank     TEXT NOT NULL,
+            depth    INTEGER NOT NULL DEFAULT 0,
+            type     TEXT NOT NULL,
+            attrs    TEXT,
+            content  TEXT NOT NULL DEFAULT '',
+            created  INTEGER,
+            modified INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS blocks_order ON blocks(rank, depth, type);
+        CREATE TABLE IF NOT EXISTS doc_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            title TEXT, schema_version INTEGER, app_version TEXT,
+            created INTEGER, modified INTEGER, last_cursor TEXT,
+            page_width INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS block_ink (
+            block_id TEXT PRIMARY KEY REFERENCES blocks(id) ON DELETE CASCADE,
+            ink      TEXT NOT NULL,
+            modified INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS comment_threads (
+            id       TEXT PRIMARY KEY,
+            created  INTEGER,
+            resolved INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS comment_messages (
+            id        TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL REFERENCES comment_threads(id) ON DELETE CASCADE,
+            body      TEXT NOT NULL,
+            created   INTEGER,
+            modified  INTEGER
+        );
+        "#,
+    )
+    .map_err(|e| format!("schema {:?}: {}", path, e))?;
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let app_version = format!("ufb {}", crate::version());
+    conn.execute(
+        "INSERT INTO doc_meta (id, schema_version, app_version, created, modified)          VALUES (1, ?1, ?2, ?3, ?3)",
+        params![MINNOTES_SCHEMA_VERSION, app_version, now],
+    )
+    .map_err(|e| format!("doc_meta {:?}: {}", path, e))?;
+
+    // First block: rank "V" is what minNotes' rankBetween("", "") yields —
+    // the midpoint of the 62-digit alphabet, leaving room to insert
+    // before it. attrs NULL, content "" (NOT NULL — an empty string, not
+    // a null, or the row is refused and the doc opens empty).
+    conn.execute(
+        "INSERT INTO blocks (id, rank, depth, type, attrs, content, created, modified)          VALUES (?1, 'V', 0, 'paragraph', NULL, '', ?2, ?2)",
+        params![make_ulid(), now],
+    )
+    .map_err(|e| format!("seed block {:?}: {}", path, e))?;
+
+    conn.close().map_err(|(_, e)| format!("close {:?}: {}", path, e))?;
+    Ok(())
 }
 
 // ── Folder layout detection (FolderTabView Mode B / Mode C) ─────────
