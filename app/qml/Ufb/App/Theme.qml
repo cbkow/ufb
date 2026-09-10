@@ -108,6 +108,14 @@ QtObject {
         readonly property int sidebarRowGap:     2
         readonly property int sidebarListPad:    4
         readonly property int sidebarSectionGap: 10
+        // Zebra-striped lists (browser list/tree, project item panel)
+        // can't take a gap between rows without breaking the stripes,
+        // so their rhythm is taller rows (padding inside each stripe)
+        // plus this much air under the column header.
+        readonly property int listTopPad:        4
+        readonly property int listRowHeight:     24   // browser list + tree
+        readonly property int listRowHeightSearch: 36 // list row with parent-path subtitle
+        readonly property int itemRowHeight:     28   // project item panel
 
         // Radii — squared by default; small radius reserved for pills.
         readonly property int radius:            0

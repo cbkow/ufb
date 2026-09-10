@@ -776,6 +776,7 @@ Rectangle {
                 model: itemsModel
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
+                topMargin: Theme.dim.listTopPad
                 ScrollBar.vertical: UfbScrollBar {}
 
                 delegate: Rectangle {
@@ -793,7 +794,7 @@ Rectangle {
                     // the zebra striping below.
                     required property int index
                     width: itemView.width
-                    height: 26
+                    height: Theme.dim.itemRowHeight
                     property bool selected: itemRow.path === root.selectedItemPath
                     color: selected
                         ? Theme.colors.accentSelected

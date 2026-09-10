@@ -2658,6 +2658,7 @@ Rectangle {
                 highlightMoveDuration: 0
                 currentIndex: root.currentIndex
                 boundsBehavior: Flickable.StopAtBounds
+                topMargin: Theme.dim.listTopPad
                 ScrollBar.vertical: UfbScrollBar {}
 
                 // Inside-the-Flickable TapHandler. The viewPanel-scope
@@ -2695,7 +2696,8 @@ Rectangle {
                     width: entryList.width
                     // Taller in search mode to fit the parent-path subtitle
                     // under the name (recursive hits span many folders).
-                    height: root._searchActive ? 34 : 22
+                    height: root._searchActive ? Theme.dim.listRowHeightSearch
+                                               : Theme.dim.listRowHeight
                     property bool selected: root._isSelected(index)
                     property bool isCurrent: root.currentIndex === index
                     // A folder under a hovering drag wins over selection
@@ -3144,6 +3146,7 @@ Rectangle {
                 clip: true
                 focus: visible
                 boundsBehavior: Flickable.StopAtBounds
+                topMargin: Theme.dim.listTopPad
                 ScrollBar.vertical: UfbScrollBar {}
 
                 TapHandler {
@@ -3170,7 +3173,7 @@ Rectangle {
                 delegate: Rectangle {
                     id: treeRow
                     width: entryTree.width
-                    height: 22
+                    height: Theme.dim.listRowHeight
                     property bool selected: root._isTreeSelected(model.path)
                     property bool dropTarget: model.isDir
                         && root._dropTargetPath === model.path
