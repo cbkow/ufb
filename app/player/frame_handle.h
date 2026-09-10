@@ -37,6 +37,12 @@ public:
                         // VkImage on our shared VkDevice. Bridge in
                         // D3D11VulkanDecodeBridge (F.2.4.3) imports it
                         // into an ID3D11Texture2D via NT shared handle.
+        D3D11   = 4,    // Windows, Phase K.1: avFrame is an
+                        // AV_PIX_FMT_D3D11 frame decoded by D3D11VA
+                        // straight into a texture array on the
+                        // renderer's own ID3D11Device (data[0] = the
+                        // array, data[1] = slice). D3D11VaDecodeBridge
+                        // samples the slice — no readback.
     };
 
     FrameHandle() = default;
@@ -75,6 +81,15 @@ public:
     static FrameHandle vulkan(AVFrame *avFrame, int width, int height,
                               int64_t pts);
 
+    // Phase K.1 Windows: D3D11VA frame on the renderer's device. Same
+    // ownership contract as vulkan(): `avFrame` is a fresh clone that
+    // the handle av_frame_free's; holding it keeps the pool slice from
+    // being recycled while the renderer samples it.
+    static FrameHandle d3d11(AVFrame *avFrame, int width, int height,
+                             int64_t pts);
+    // D3D11 accessor — undefined if kind() != D3D11.
+    AVFrame *d3d11AvFrame() const { return m_avFrame; }
+
     Kind     kind() const { return m_kind; }
     bool     isValid() const { return m_kind != Kind::Empty; }
     int64_t  pts() const { return m_pts; }
@@ -103,7 +118,7 @@ private:
 
     QImage  m_cpuImage;     // Cpu kind
     void   *m_metalPixbuf = nullptr;  // CVPixelBufferRef, retained
-    AVFrame *m_avFrame    = nullptr;  // Vulkan kind, av_frame_free'd
+    AVFrame *m_avFrame    = nullptr;  // Vulkan / D3D11 kinds, av_frame_free'd
     // Type-erased keepalive for the cpuShared path. Non-null for
     // FrameHandles built via cpuShared(); the QImage's bits point
     // into this object's buffer and stay valid until the FrameHandle

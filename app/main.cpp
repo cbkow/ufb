@@ -37,6 +37,7 @@
 
 #include "UfbImageProviders.h"
 #include "player/video_decoder.h"
+#include "player/VideoSurfaceItem.h"   // installD3D11DeviceHook (Windows)
 #if defined(Q_OS_WIN)
 #  include "player/vulkan/vulkan_device_manager.h"
 #endif
@@ -495,6 +496,16 @@ int main(int argc, char *argv[])
     );
 
     engine.loadFromModule("Ufb.App", "Main");
+
+    // Phase K.1 (Windows): hand the window's D3D11 device to the video
+    // decoder side the moment the scene graph exists, so the first clip
+    // a lightbox opens decodes zero-copy (D3D11VA into a texture array
+    // on Qt's device). No-op elsewhere. Must be connected before the
+    // window is first shown, i.e. right after load.
+    for (QObject *rootObj : engine.rootObjects()) {
+        if (auto *rootWin = qobject_cast<QQuickWindow *>(rootObj))
+            VideoSurfaceItem::installD3D11DeviceHook(rootWin);
+    }
 
 #ifdef Q_OS_MACOS
     // ── macOS-specific post-engine setup ─────────────────────────────

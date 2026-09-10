@@ -181,6 +181,11 @@ if(WIN32)
         player/vulkan/vulkan_device_manager.cpp
         player/vulkan_hw_device_ctx.h
         player/vulkan_hw_device_ctx.cpp
+        # Phase K.1 (ported from QCView): D3D11VA decodes H.264 / HEVC /
+        # AV1 / VP9 straight into a texture array on Qt's own D3D11 device;
+        # the bridge samples the slice — no readback.
+        player/d3d11va_hw_device_ctx.h
+        player/d3d11va_hw_device_ctx.cpp
         # WASAPI audio output (parallel to coreaudio_device on macOS).
         player/wasapi_audio_device.h
         player/wasapi_audio_device.cpp
@@ -193,7 +198,9 @@ if(WIN32)
         player/d3d11/d3d11_vulkan_yuv_compositor.h
         player/d3d11/d3d11_vulkan_yuv_compositor.cpp
         player/d3d11/d3d11_vulkan_decode_bridge.h
-        player/d3d11/d3d11_vulkan_decode_bridge.cpp)
+        player/d3d11/d3d11_vulkan_decode_bridge.cpp
+        player/d3d11/d3d11va_decode_bridge.h
+        player/d3d11/d3d11va_decode_bridge.cpp)
     target_include_directories(ufb PRIVATE player/d3d11)
 
     # Vulkan: VulkanDeviceManager + FrameHandle::Vulkan expose Vulkan
@@ -213,7 +220,9 @@ if(WIN32)
 
     # D3D11 + DXGI for the device manager / bridge / compositor. dxguid
     # supplies the IID_* GUIDs used by IID_PPV_ARGS / QueryInterface.
-    target_link_libraries(ufb PRIVATE d3d11 dxgi dxguid)
+    # d3dcompiler: the D3D11VA bridge compiles its YUV→RGB compute
+    # shader at runtime (d3dcompiler_47.dll ships with Windows 10+).
+    target_link_libraries(ufb PRIVATE d3d11 dxgi dxguid d3dcompiler)
 
     # WASAPI device: ole32 (COM, already linked below) + avrt (MMCSS
     # AvSetMmThreadCharacteristics on the audio render thread).

@@ -16,6 +16,7 @@
 
 #include <QColor>
 #include <QQuickRhiItem>
+#include <QQuickWindow>
 #include <QtQmlIntegration>
 
 class VideoSurfaceItem : public QQuickRhiItem
@@ -29,6 +30,17 @@ class VideoSurfaceItem : public QQuickRhiItem
 
 public:
     explicit VideoSurfaceItem(QQuickItem *parent = nullptr);
+
+    // Phase K.1 (Windows): register the window's QRhi D3D11 device with
+    // the decoder side as soon as the scene graph is initialized, so
+    // the very first clip a lightbox opens can attach a shared-device
+    // D3D11VA context (zero-copy) instead of FFmpeg's own device +
+    // readback. The registration lives with the window's scene graph
+    // (cleared on sceneGraphInvalidated), not with any lightbox item —
+    // decoders open before the item has rendered a frame. No-op on
+    // other platforms / backends. Call once per top-level window from
+    // main.cpp.
+    static void installD3D11DeviceHook(QQuickWindow *window);
 
     QColor fillColor() const { return m_fillColor; }
     void setFillColor(const QColor &c);

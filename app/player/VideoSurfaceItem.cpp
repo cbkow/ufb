@@ -11,6 +11,8 @@
 #  include "d3d11/d3d11_device_manager.h"
 #  include "d3d11/d3d11_vulkan_yuv_compositor.h"
 #  include "d3d11/d3d11_vulkan_decode_bridge.h"
+#  include "d3d11/d3d11va_decode_bridge.h"
+#  include "d3d11va_hw_device_ctx.h"
 #endif
 
 #include <QFile>
@@ -220,6 +222,10 @@ private:
             prepareVulkanFrame(r, cb, pipe, srb, frameSize);
             return;
         }
+        if (m_frame.kind() == FrameHandle::Kind::D3D11) {
+            prepareD3D11Frame(r, cb, pipe, srb, frameSize);
+            return;
+        }
 #endif
 #if defined(Q_OS_MACOS)
         if (m_frame.kind() == FrameHandle::Kind::Metal) {
@@ -386,6 +392,85 @@ private:
         *pipe = m_pipeVk.get();
         *srb = m_srbVk.get();
     }
+
+    // Phase K.1 — D3D11VA frame decoded into a texture array on Qt's
+    // device: the bridge builds per-slice views, runs its YUV→RGB
+    // compute into a bridge-owned RGBA16F texture, and we wrap that
+    // exactly like the Vulkan bridge's output. Opaque (NV12/P010), so
+    // no blend.
+    void prepareD3D11Frame(QRhi *r, QRhiCommandBuffer *cb,
+                           QRhiGraphicsPipeline **pipe,
+                           QRhiShaderResourceBindings **srb, QSize *frameSize)
+    {
+        using B = QRhiShaderResourceBinding;
+        if (m_vaInitFailed)
+            return;
+        // Lazy per-renderer bridge (the device itself was registered by
+        // installD3D11DeviceHook when the window's scene graph came up).
+        if (!m_vaBridge) {
+            const auto *nh = static_cast<const QRhiD3D11NativeHandles *>(
+                r->nativeHandles());
+            if (!nh || !nh->dev || !nh->context
+                || !ufbplayer::D3D11DeviceManager::instance()
+                        .initializeWithDevice(nh->dev, nh->context)) {
+                m_vaInitFailed = true;
+                ufbplayer::clearSharedD3D11Device();   // later clips → readback
+                return;
+            }
+            auto bridge = std::make_unique<ufbplayer::D3D11VaDecodeBridge>();
+            if (!bridge->initialize()) {
+                qWarning("VideoSurfaceItem: D3D11VA bridge init failed — "
+                         "unregistering the shared device; later clips take "
+                         "the readback path");
+                m_vaInitFailed = true;
+                ufbplayer::clearSharedD3D11Device();
+                return;
+            }
+            m_vaBridge = std::move(bridge);
+        }
+
+        // Native D3D11 compute + context binds behind QRhi's back;
+        // bracket so QRhi invalidates its cached pipeline state.
+        const ufbplayer::D3D11VulkanDecodeBridge::ImportedFrame *imp = nullptr;
+        cb->beginExternal();
+        imp = m_vaBridge->consume(m_frame, m_rangeOverride);
+        cb->endExternal();
+        if (!imp || imp->planes.empty() || !imp->planes.front().texture)
+            return;
+
+        ID3D11Texture2D *tex = imp->planes.front().texture;
+        const QSize sz(imp->pictureWidth, imp->pictureHeight);
+
+        if (m_vaTexNative != reinterpret_cast<quintptr>(tex)
+            || !m_vaTex || m_vaTex->pixelSize() != sz) {
+            m_vaTex.reset(r->newTexture(QRhiTexture::RGBA16F, sz, 1));
+            QRhiTexture::NativeTexture nt;
+            nt.object = static_cast<quint64>(reinterpret_cast<quintptr>(tex));
+            nt.layout = 0;
+            if (!m_vaTex->createFrom(nt)) {
+                qWarning("VideoSurfaceItem: createFrom(D3D11VA RGBA16F) failed");
+                m_vaTex.reset();
+                return;
+            }
+            m_vaTexNative = reinterpret_cast<quintptr>(tex);
+
+            if (!m_srbVa) m_srbVa.reset(r->newShaderResourceBindings());
+            m_srbVa->setBindings({
+                B::uniformBuffer(0, B::FragmentStage, m_ubuf.get()),
+                B::sampledTexture(1, B::FragmentStage, m_vaTex.get(),
+                                  m_sampler.get()),
+            });
+            m_srbVa->create();
+            if (!m_pipeVa)
+                m_pipeVa = makePipeline(
+                    r, ":/ufb/player/shaders/passthrough.frag.qsb",
+                    m_srbVa.get(), /*blend*/ false);   // NV12/P010: opaque
+        }
+
+        *frameSize = sz;
+        *pipe = m_pipeVa.get();
+        *srb = m_srbVa.get();
+    }
 #endif
 
     QColor m_fill{ 0, 0, 0 };
@@ -421,6 +506,15 @@ private:
     std::unique_ptr<QRhiGraphicsPipeline>       m_pipeVk;
     quintptr m_vkTexNative   = 0;     // last wrapped ID3D11Texture2D*
     bool     m_d3dInitFailed = false; // one-shot: don't retry on every frame
+
+    // Phase K.1 — D3D11VA zero-copy (separate wrapper from the Vulkan
+    // one so a ProRes ↔ H.264 clip switch doesn't thrash one texture).
+    std::unique_ptr<ufbplayer::D3D11VaDecodeBridge> m_vaBridge;
+    std::unique_ptr<QRhiTexture>                m_vaTex;
+    std::unique_ptr<QRhiShaderResourceBindings> m_srbVa;
+    std::unique_ptr<QRhiGraphicsPipeline>       m_pipeVa;
+    quintptr m_vaTexNative  = 0;
+    bool     m_vaInitFailed = false;   // one-shot: don't retry on every frame
 #endif
 };
 
@@ -429,6 +523,36 @@ private:
 VideoSurfaceItem::VideoSurfaceItem(QQuickItem *parent)
     : QQuickRhiItem(parent)
 {
+}
+
+void VideoSurfaceItem::installD3D11DeviceHook(QQuickWindow *window)
+{
+#if defined(Q_OS_WIN)
+    if (!window) return;
+    // Both signals are emitted on the render thread; direct connections
+    // run there, which is where QQuickWindow::rhi() is valid.
+    QObject::connect(window, &QQuickWindow::sceneGraphInitialized, window, [window] {
+        QRhi *r = window->rhi();
+        if (!r || r->backend() != QRhi::D3D11) return;
+        const auto *nh = static_cast<const QRhiD3D11NativeHandles *>(r->nativeHandles());
+        if (!nh || !nh->dev || !nh->context) {
+            qWarning("VideoSurfaceItem: no D3D11 native handles at scene-graph "
+                     "init — D3D11VA stays on the readback path");
+            return;
+        }
+        if (!ufbplayer::D3D11DeviceManager::instance()
+                 .initializeWithDevice(nh->dev, nh->context))
+            return;
+        ufbplayer::setSharedD3D11Device(nh->dev, nh->context);
+    }, Qt::DirectConnection);
+    QObject::connect(window, &QQuickWindow::sceneGraphInvalidated, window, [] {
+        // The device is going away with the scene graph: drop the
+        // decoder-side registration + cached pools first.
+        ufbplayer::clearSharedD3D11Device();
+    }, Qt::DirectConnection);
+#else
+    Q_UNUSED(window);
+#endif
 }
 
 void VideoSurfaceItem::setFillColor(const QColor &c)

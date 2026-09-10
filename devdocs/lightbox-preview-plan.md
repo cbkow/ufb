@@ -352,6 +352,63 @@ minimal — these are decode/audio-layer units).
 
 Append newest entries at the top. Each milestone updates this as part of its commit.
 
+### 2026-09-10 — QCView catch-up (Windows session; macOS unverified)
+QCView-Player moved a long way after the June 2 fork (FFmpeg 9.0.1, Vulkan
+stability, zero-copy D3D11VA, audio servo). Ported the lightbox-relevant
+parts as copies, one verified commit per stage. Skipped on purpose:
+SoundTouch / shuttle audio / review speeds, live SRT, image sequences,
+OCIO, inspector overrides, the 16-bit CPU path (UFB is 8-bit by design).
+- **Alpha on the CPU path** (`2740584`): the CPU passthrough pipeline now
+  blends straight alpha over the fill. Scrubbing a ProRes 4444 clip on
+  Windows drops to software decode → CPU RGBA with straight alpha, and the
+  opaque draw was what lost the alpha the moment you stepped a frame. The
+  "stray alpha=0 blanks video" fear behind the opaque CPU draw was
+  unfounded (swscale writes alpha=255 for alpha-less sources). Also the
+  padded swscale target (`sws_rgba_image.h`) — bare QImages of non-16-
+  multiple widths (portrait 1080) access-violated on the last row.
+- **Rotation / pixel aspect / RGB legal range** (`aadf715`): display-matrix
+  rotation + SAR detected at open; applied at fit time (viewport) plus an
+  inverse-rotated sampling UV in all three frags — every frame kind gets
+  it. RGB legal→full expansion on the CPU paths when tagged limited; the
+  Vulkan bridge's Auto no longer stretches untagged RGB.
+- **FFmpeg 9.0.1 cut-over** (`5c6ed48`): QCView's build with its three
+  patches (now in `scripts/ffmpeg-patches/`, applied by the mac build
+  script — dry-run verified against the 9.0.1 tarball, mac build itself
+  unverified). `external.cmake` globs DLL majors; include-order guard so
+  the Vulkan bridge can never compile against a foreign FFmpeg header.
+  Rode along: abuffersink via `av_opt_set_array` between alloc/init,
+  audio `pkt_timebase`, software-only codec guard (ProRes RAW), attached-
+  device get_format + first REAL software format fallback, slice threads
+  for intra codecs (scrub decoder was single-threaded), threaded swscale
+  in dynamic mode (matrix/range per frame), packet-walk frame count +
+  seek shim for animated WebP/GIF, Vulkan I.D–I.G (queue mutex, cached
+  frame pools from get_format, AVVkFrame semaphores in the compositor,
+  internally-synchronized queues, parked bridge outputs, avutil ABI guard).
+- **Animated GIF / WebP → video player** (`4cca02e`): `MediaInfo.isAnimated`
+  (QImageReader header check) routes multi-frame files to VideoPreview.
+- **Audio sync servo** (`79a7d8b`): PI controller trims the render
+  callback's consumption ratio ≤ ±0.2 % through a Catmull-Rom drain;
+  re-seeks only past 40 ms. Real playout estimate (consumed frames minus
+  device latency), anchor owned by seek/open/close, muted playback keeps
+  consuming, `seekPending()` guard, AudioDecoder ring 2 MB → ~500 ms,
+  EOF freeze. Trace on the dogfood box: +14.5 ms / ratio 1.00065.
+- **D3D11VA zero-copy** (this commit): the M4 we dropped in June because
+  QCView didn't have it — it does now (Phase K.1). VideoSurfaceRenderer::
+  initialize registers Qt's D3D11 device (+ ID3D10Multithread protection);
+  the decoder attaches a shared-device D3D11VA context, get_format hands
+  FFmpeg an app-owned texture-array pool with SHADER_RESOURCE, NV12/P010
+  frames publish as `FrameHandle::D3D11`, and `D3D11VaDecodeBridge` runs
+  a compute YUV→RGB (coded-size normalised) into RGBA16F. Anything else
+  (no shared device yet, other sw_formats) keeps the readback path. The
+  scrub decoder keeps its own device + readback (fixed-size pool rule).
+- Verification driver for future sessions: `pythonw launch.py <clip>` in
+  the session scratchpad launches the dev build detached with stderr
+  captured (AttachConsole fails without a console, so the Qt handler's
+  output lands in the file). Synthetic clips: alpha ProRes 4444 needs
+  real alpha (overlay filters — drawbox on a transparent canvas writes
+  alpha 0 everywhere); rotation via `-display_rotation -90` on remux
+  (`-metadata rotate=` no longer writes a display matrix in 8.x/9.x).
+
 ### 2026-06-04 — Dogfood edge polish (verified, macOS)
 Five small UX fixes from a dogfood pass:
 - **Refocus the browser on close.** The lightbox grabbed keyboard focus on
