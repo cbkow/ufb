@@ -1,8 +1,10 @@
 #include "video_decoder.h"
 
 #include "decoder_cleanup_queue.h"
+#include "rgb_range.h"
 #include "scrub_decoder.h"
 #include "sws_rgba_image.h"
+#include <cmath>
 #include <memory>
 
 #include <QDebug>
@@ -16,6 +18,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libavutil/display.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
@@ -59,6 +62,29 @@ QString avErrToString(int err)
     char buf[256];
     av_strerror(err, buf, sizeof(buf));
     return QString::fromUtf8(buf);
+}
+
+// Display-matrix rotation → clockwise display degrees {0,90,180,270}.
+// Phone footage (MP4 `tkhd` display matrix) is stored sideways and
+// relies on the player to rotate. av_display_rotation_get reports
+// counter-clockwise degrees and real phone files land near-quarter
+// (−89.97…), so negate then snap. Ported from QCView's metadata
+// extractor; rotation is applied purely renderer-side (fit-dim swap +
+// inverse-rotated sampling UV), so every path — HW, software, scrub —
+// gets it without touching the decode loop.
+int rotationFromStream(const AVStream *stream)
+{
+    const AVCodecParameters *cp = stream->codecpar;
+    const AVPacketSideData *sd = av_packet_side_data_get(
+        cp->coded_side_data, cp->nb_coded_side_data,
+        AV_PKT_DATA_DISPLAYMATRIX);
+    if (!sd || sd->size < 9 * sizeof(int32_t)) return 0;
+    const double theta =
+        av_display_rotation_get(reinterpret_cast<const int32_t *>(sd->data));
+    if (std::isnan(theta)) return 0;
+    int rot = static_cast<int>(std::lround(-theta)) % 360;
+    if (rot < 0) rot += 360;
+    return ((rot + 45) / 90 * 90) % 360;
 }
 
 // Presentation timestamp for a decoded frame. We deliberately prefer
@@ -435,6 +461,8 @@ void VideoDecoder::close()
     if (!m_sourcePath.isEmpty()) {
         m_sourcePath.clear();
         m_width = m_height = m_frameCount = 0;
+        m_rotationDeg = 0;
+        m_sarNum = m_sarDen = 1;
         m_codecName.clear();
         m_pixelFormat.clear();
         m_sourceTimecode.clear();
@@ -845,6 +873,15 @@ bool VideoDecoder::initFFmpeg(const QString &path)
 
     m_width      = codecpar->width;
     m_height     = codecpar->height;
+    m_rotationDeg = rotationFromStream(st);
+    // Sample aspect ratio — reconciles the stream SAR with the codec
+    // SAR (av_guess_* prefers the stream's). SAR ≠ 1:1 ⇒ anamorphic /
+    // non-square pixels; the renderer un-squeezes in stored space.
+    {
+        const AVRational sar = av_guess_sample_aspect_ratio(m_fmt, st, nullptr);
+        if (sar.num > 0 && sar.den > 0) { m_sarNum = sar.num; m_sarDen = sar.den; }
+        else                            { m_sarNum = m_sarDen = 1; }
+    }
     m_frameCount = static_cast<int>(st->nb_frames);
     m_codecName  = QString::fromUtf8(codec->long_name ? codec->long_name : codec->name);
     if (const char *pn = av_get_pix_fmt_name(static_cast<AVPixelFormat>(codecpar->format))) {
@@ -1034,7 +1071,14 @@ void VideoDecoder::publishCpuFrame(AVFrame *frame)
 
     // Padded-destination helper — a bare QImage overflows on odd widths
     // (see sws_rgba_image.h).
-    QImage rgba = swsFrameToRgbaImage(m_sws, frame);
+    // RGB sources: swscale applies no range handling on an RGB→RGB
+    // conversion, so legal-range RGB masters would come up flat — apply
+    // the legal→full expansion under the shared rule (rgb_range.h; same
+    // helper the scrub path uses).
+    QImage rgba = swsFrameToRgbaImage(
+        m_sws, frame,
+        rgbFrameNeedsLegalExpansion(
+            frame, m_rangeOverride.load(std::memory_order_acquire)));
     if (rgba.isNull()) {
         qWarning("VideoDecoder: sws_scale failed; frame dropped");
         return;

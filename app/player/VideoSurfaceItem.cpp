@@ -19,6 +19,7 @@
 #  include <rhi/qrhi_platform.h>   // QRhiD3D11NativeHandles
 #endif
 
+#include <cmath>
 #include <memory>
 
 namespace {
@@ -48,8 +49,41 @@ public:
         auto *s = static_cast<VideoSurfaceItem *>(item);
         m_fill = s->fillColor();
         m_decoder = s->videoDecoder();
-        if (m_decoder)
+        if (m_decoder) {
             m_decoder->fetchLatest(&m_frame);   // no-op if no newer frame
+            // Stored-space geometry hints (GUI thread is blocked here, so
+            // plain reads are safe). Rotation in quarter turns CW; SAR
+            // for the anamorphic un-squeeze. Both are applied at fit time
+            // in render(), so every frame kind — HW, software, scrub —
+            // gets them without touching the decode path.
+            const int deg = m_decoder->rotationDeg();
+            m_rotQ = (deg == 90) ? 1 : (deg == 180) ? 2 : (deg == 270) ? 3 : 0;
+            m_sarNum = m_decoder->sarNum();
+            m_sarDen = m_decoder->sarDen();
+            m_rangeOverride = m_decoder->rangeOverride();
+        } else {
+            m_rotQ = 0;
+            m_sarNum = m_sarDen = 1;
+            m_rangeOverride = 0;
+        }
+    }
+
+    // Display size of a stored-size frame: PAR acts in stored space
+    // (widen the larger-pixel axis UP so nothing is downsampled), then
+    // odd quarter-turns swap the axes. Ported from QCView's renderer
+    // geometry path.
+    QSize displaySizeFor(const QSize &stored) const
+    {
+        QSize s = stored;
+        const int w = stored.width(), h = stored.height();
+        if (w > 0 && h > 0 && m_sarNum > 0 && m_sarDen > 0 && m_sarNum != m_sarDen) {
+            if (m_sarNum > m_sarDen)
+                s.setWidth(static_cast<int>(std::lround(double(w) * m_sarNum / m_sarDen)));
+            else
+                s.setHeight(static_cast<int>(std::lround(double(h) * m_sarDen / m_sarNum)));
+        }
+        if (m_rotQ & 1) s.transpose();
+        return s;
     }
 
     void render(QRhiCommandBuffer *cb) override
@@ -61,6 +95,14 @@ public:
         QRhiGraphicsPipeline *pipe = nullptr;
         QRhiShaderResourceBindings *srb = nullptr;
         QSize frameSize;
+
+        // Rotation quarter-turns for the fragment shaders' inverse-rotated
+        // sampling (offset 8 of the shared std140 UBO; matrix/range at
+        // 0/4 are written by the Metal path as needed).
+        {
+            const int rotQ = m_rotQ;
+            u->updateDynamicBuffer(m_ubuf.get(), 8, 4, &rotQ);
+        }
 
         if (m_frame.isValid())
             prepareFrame(r, u, cb, &pipe, &srb, &frameSize);
@@ -78,10 +120,14 @@ public:
 
         if (pipe && srb && frameSize.width() > 0 && frameSize.height() > 0) {
             const QSize rt = renderTarget()->pixelSize();
-            const float scale = qMin(float(rt.width()) / frameSize.width(),
-                                     float(rt.height()) / frameSize.height());
-            const float vw = frameSize.width() * scale;
-            const float vh = frameSize.height() * scale;
+            // Fit the DISPLAY size (PAR un-squeezed, rotation-swapped);
+            // the shader inverse-rotates its UV back onto the stored
+            // texture, so the viewport is the only place geometry lives.
+            const QSize fit = displaySizeFor(frameSize);
+            const float scale = qMin(float(rt.width()) / fit.width(),
+                                     float(rt.height()) / fit.height());
+            const float vw = fit.width() * scale;
+            const float vh = fit.height() * scale;
             const float vx = (rt.width() - vw) * 0.5f;
             const float vy = (rt.height() - vh) * 0.5f;
             cb->setGraphicsPipeline(pipe);
@@ -230,7 +276,8 @@ private:
                 m_cpuTex->create();
                 if (!m_srbCpu) m_srbCpu.reset(r->newShaderResourceBindings());
                 m_srbCpu->setBindings({
-                    B::sampledTexture(0, B::FragmentStage, m_cpuTex.get(),
+                    B::uniformBuffer(0, B::FragmentStage, m_ubuf.get()),
+                    B::sampledTexture(1, B::FragmentStage, m_cpuTex.get(),
                                       m_sampler.get()),
                 });
                 m_srbCpu->create();
@@ -299,7 +346,7 @@ private:
         // D3D11 pipeline state before our subsequent draw.
         const ufbplayer::D3D11VulkanDecodeBridge::ImportedFrame *imp = nullptr;
         cb->beginExternal();
-        imp = m_vkBridge->consume(m_frame, /*rangeOverride*/ 0);
+        imp = m_vkBridge->consume(m_frame, m_rangeOverride);
         cb->endExternal();
         if (!imp || imp->planes.empty() || !imp->planes.front().texture)
             return;
@@ -324,7 +371,8 @@ private:
 
             if (!m_srbVk) m_srbVk.reset(r->newShaderResourceBindings());
             m_srbVk->setBindings({
-                B::sampledTexture(0, B::FragmentStage, m_vkTex.get(),
+                B::uniformBuffer(0, B::FragmentStage, m_ubuf.get()),
+                B::sampledTexture(1, B::FragmentStage, m_vkTex.get(),
                                   m_sampler.get()),
             });
             m_srbVk->create();
@@ -343,6 +391,10 @@ private:
     QColor m_fill{ 0, 0, 0 };
     ufbplayer::VideoDecoder *m_decoder = nullptr;
     FrameHandle m_frame;
+    int m_rotQ = 0;            // quarter-turns CW, from the decoder
+    int m_sarNum = 1;          // sample aspect ratio
+    int m_sarDen = 1;
+    int m_rangeOverride = 0;   // 0 auto / 1 full / 2 limited
 
     std::unique_ptr<QRhiBuffer> m_vbuf;
     std::unique_ptr<QRhiSampler> m_sampler;

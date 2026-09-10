@@ -22,8 +22,7 @@ layout(location = 0) out vec4 fragColor;
 layout(std140, binding = 0) uniform Uniforms {
     int   matrixIdx;   // 0=BT.601, 1=BT.709, 2=BT.2020
     int   fullRange;   // 1 if PC-range YCbCr (no level scaling), 0 otherwise
-    // pad to 16 bytes
-    int   pad0;
+    int   rotQ;        // 0/1/2/3 = 0/90/180/270 degrees clockwise
     int   pad1;
 } u;
 
@@ -57,12 +56,20 @@ mat3 ycbcrToRgb(int idx) {
     );
 }
 
+// Display→stored UV for the quarter-turn rotation (see passthrough.frag).
+vec2 rotatedSrcUv(vec2 p) {
+    if (u.rotQ == 1) return vec2(p.y, 1.0 - p.x);          //  90 CW
+    if (u.rotQ == 2) return vec2(1.0 - p.x, 1.0 - p.y);    // 180
+    if (u.rotQ == 3) return vec2(1.0 - p.y, p.x);          // 270 CW
+    return p;
+}
+
 void main() {
     // CVPixelBuffer / IOSurface stores rows top-down; QRhi's NDC →
     // texture mapping through the offscreen Pass 0 round-trip would
     // otherwise display the image upside down. Flip v here so the
     // top of the source image lands at the top of m_srcA.
-    vec2 sampleUv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec2 sampleUv = rotatedSrcUv(vec2(v_uv.x, 1.0 - v_uv.y));
 
     float y    = texture(u_yPlane,  sampleUv).r;
     vec2  cbcr = texture(u_uvPlane, sampleUv).rg;

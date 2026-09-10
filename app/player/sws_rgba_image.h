@@ -22,6 +22,8 @@
 // QImage references the buffer directly. Shared by every CPU publish path
 // (streaming decoder + scrub decoder, Windows + macOS).
 
+#include "rgb_range.h"
+
 #include <QImage>
 
 #include <cstddef>
@@ -36,9 +38,12 @@ extern "C" {
 namespace ufbplayer {
 
 // `sws` must already be configured for yf's format/size → AV_PIX_FMT_RGBA at
-// the same size (the callers' initSwsContext). Returns a null QImage on
+// the same size (the callers' initSwsContext). `expandLegalRgb`: apply the
+// RGB legal→full expansion after the scale (see rgb_range.h) — callers pass
+// rgbFrameNeedsLegalExpansion(yf, rangeOverride). Returns a null QImage on
 // failure.
-inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf)
+inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf,
+                                  bool expandLegalRgb = false)
 {
     if (!sws || !yf || yf->width <= 0 || yf->height <= 0) return {};
     const int w = yf->width;
@@ -55,6 +60,7 @@ inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf)
         av_free(buf);
         return {};
     }
+    if (expandLegalRgb) expandRgba8LegalToFull(buf, w, h, stride);
 
     return QImage(buf, w, h, stride, QImage::Format_RGBA8888,
                   [](void *p) { av_free(p); }, buf);

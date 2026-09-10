@@ -1,5 +1,6 @@
 #include "scrub_decoder.h"
 #include "decoder_cleanup_queue.h"
+#include "rgb_range.h"
 #include "sws_rgba_image.h"
 #include "video_decoder.h"
 
@@ -623,7 +624,9 @@ void ScrubDecoder::publishEntry(const std::shared_ptr<ScrubCacheEntry> &entry)
     // helper — a bare QImage overflows on odd widths (see sws_rgba_image.h).
     AVFrame *yf = entry->yuvFrame();
     if (!yf || !initSwsContext(yf)) return;
-    QImage rgba = swsFrameToRgbaImage(m_sws, yf);
+    const int rangeOv = m_rangeOverride.load(std::memory_order_acquire);
+    QImage rgba = swsFrameToRgbaImage(
+        m_sws, yf, rgbFrameNeedsLegalExpansion(yf, rangeOv));
     if (rgba.isNull()) return;
     m_streaming->publishExternalFrame(
         FrameHandle::cpu(std::move(rgba), entry->pts()), entry->pts());

@@ -53,6 +53,13 @@ class VideoDecoder : public QObject
     Q_PROPERTY(QString sourcePath READ sourcePath NOTIFY sourcePathChanged)
     Q_PROPERTY(int width READ width NOTIFY metadataChanged)
     Q_PROPERTY(int height READ height NOTIFY metadataChanged)
+    // Stored-space geometry hints the renderer applies at fit time:
+    // display-matrix rotation (0/90/180/270, clockwise) and the sample
+    // aspect ratio (≠1:1 ⇒ anamorphic). width/height stay the stored
+    // (coded) size.
+    Q_PROPERTY(int rotationDeg READ rotationDeg NOTIFY metadataChanged)
+    Q_PROPERTY(int sarNum READ sarNum NOTIFY metadataChanged)
+    Q_PROPERTY(int sarDen READ sarDen NOTIFY metadataChanged)
     Q_PROPERTY(int frameCount READ frameCount NOTIFY metadataChanged)
     Q_PROPERTY(QString codecName READ codecName NOTIFY metadataChanged)
     Q_PROPERTY(QString pixelFormat READ pixelFormat NOTIFY metadataChanged)
@@ -120,6 +127,9 @@ public:
     QString lastError() const { return m_lastError; }
     int width() const { return m_width; }
     int height() const { return m_height; }
+    int rotationDeg() const { return m_rotationDeg; }
+    int sarNum() const { return m_sarNum; }
+    int sarDen() const { return m_sarDen; }
     int frameCount() const { return m_frameCount; }
     QString codecName() const { return m_codecName; }
     QString pixelFormat() const { return m_pixelFormat; }
@@ -258,6 +268,9 @@ private:
     bool    m_reopening = false;
     int     m_width = 0;
     int     m_height = 0;
+    int     m_rotationDeg = 0;   // 0/90/180/270 CW, from the display matrix
+    int     m_sarNum = 1;        // sample aspect ratio (1:1 = square pixels)
+    int     m_sarDen = 1;
     int     m_frameCount = 0;
     QString m_codecName;
     QString m_pixelFormat;
