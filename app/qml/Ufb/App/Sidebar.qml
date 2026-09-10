@@ -325,7 +325,7 @@ Rectangle {
                             ? model.icon
                             : (model.isProjectFolder ? "briefcase" : "star")
                         size: Theme.icon.sizeToolbar
-                        color: Theme.colors.brand
+                        color: Theme.colors.sidebarBookmark
                     }
                     Label {
                         Layout.fillWidth: true
@@ -522,7 +522,7 @@ Rectangle {
                 Icon {
                     name: "list-checks"
                     size: Theme.icon.sizeToolbar
-                    color: Theme.colors.brand
+                    color: Theme.colors.sidebarTracker
                 }
                 Label {
                     text: qsTr("All Tracked")
@@ -552,7 +552,7 @@ Rectangle {
                 Icon {
                     name: "stack"
                     size: Theme.icon.sizeToolbar
-                    color: Theme.colors.brand
+                    color: Theme.colors.sidebarTracker
                 }
                 Label {
                     text: qsTr("Transcode Queue")
