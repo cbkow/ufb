@@ -854,6 +854,11 @@ Rectangle {
                                     // when the window deactivates or a native drag runs its modal
                                     // loop — the blue line then sticks. HoverHandler re-evaluates.
                                     HoverHandler { id: projectHandleMaHover }
+                                    // Belt and braces for the guide line: `pressed` also drops on
+                                    // cancel, on a stolen grab, and on a click landing elsewhere,
+                                    // so the guide can never outlive the press even if onReleased
+                                    // is never delivered.
+                                    onPressedChanged: if (!pressed) root._dragGuideX = -1
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11
@@ -930,6 +935,11 @@ Rectangle {
                                     // when the window deactivates or a native drag runs its modal
                                     // loop — the blue line then sticks. HoverHandler re-evaluates.
                                     HoverHandler { id: nameHandleMaHover }
+                                    // Belt and braces for the guide line: `pressed` also drops on
+                                    // cancel, on a stolen grab, and on a click landing elsewhere,
+                                    // so the guide can never outlive the press even if onReleased
+                                    // is never delivered.
+                                    onPressedChanged: if (!pressed) root._dragGuideX = -1
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11
@@ -1030,6 +1040,11 @@ Rectangle {
                                         // when the window deactivates or a native drag runs its modal
                                         // loop — the blue line then sticks. HoverHandler re-evaluates.
                                         HoverHandler { id: handleMaHover }
+                                        // Belt and braces for the guide line: `pressed` also drops on
+                                        // cancel, on a stolen grab, and on a click landing elsewhere,
+                                        // so the guide can never outlive the press even if onReleased
+                                        // is never delivered.
+                                        onPressedChanged: if (!pressed) root._dragGuideX = -1
                                         cursorShape: Qt.SizeHorCursor
                                         preventStealing: true
                                         z: 11
@@ -1048,13 +1063,17 @@ Rectangle {
                                                 .mapToItem(tableArea, _dragWidth, 0).x
                                         }
                                         onReleased: {
-                                            if (_dragWidth >= 0) {
-                                                root._setLiveColumnWidth(
-                                                    modelData.columnName, _dragWidth)
-                                                root._commitColumnWidth(modelData)
-                                            }
+                                            // Clear the guide BEFORE committing:
+                                            // the commit refreshes the columns,
+                                            // which tears this delegate down
+                                            // mid-handler (see ItemListPanel).
+                                            const w = _dragWidth
                                             _dragWidth = -1
                                             root._dragGuideX = -1
+                                            if (w >= 0) {
+                                                root._setLiveColumnWidth(modelData.columnName, w)
+                                                root._commitColumnWidth(modelData)
+                                            }
                                         }
                                         onCanceled: {
                                             _dragWidth = -1
@@ -1110,6 +1129,11 @@ Rectangle {
                                     // when the window deactivates or a native drag runs its modal
                                     // loop — the blue line then sticks. HoverHandler re-evaluates.
                                     HoverHandler { id: folderHandleMaHover }
+                                    // Belt and braces for the guide line: `pressed` also drops on
+                                    // cancel, on a stolen grab, and on a click landing elsewhere,
+                                    // so the guide can never outlive the press even if onReleased
+                                    // is never delivered.
+                                    onPressedChanged: if (!pressed) root._dragGuideX = -1
                                     cursorShape: Qt.SizeHorCursor
                                     preventStealing: true
                                     z: 11

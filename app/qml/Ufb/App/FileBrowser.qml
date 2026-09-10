@@ -2483,6 +2483,11 @@ Rectangle {
                         // when the window deactivates or a native drag runs its modal
                         // loop — the blue line then sticks. HoverHandler re-evaluates.
                         HoverHandler { id: nameHandleMaHover }
+                        // Belt and braces for the guide line: `pressed` also drops on
+                        // cancel, on a stolen grab, and on a click landing elsewhere,
+                        // so the guide can never outlive the press even if onReleased
+                        // is never delivered.
+                        onPressedChanged: if (!pressed) root._dragGuideX = -1
                         cursorShape: Qt.SizeHorCursor
                         preventStealing: true
                         z: 11
@@ -2576,6 +2581,11 @@ Rectangle {
                         // when the window deactivates or a native drag runs its modal
                         // loop — the blue line then sticks. HoverHandler re-evaluates.
                         HoverHandler { id: sizeHandleMaHover }
+                        // Belt and braces for the guide line: `pressed` also drops on
+                        // cancel, on a stolen grab, and on a click landing elsewhere,
+                        // so the guide can never outlive the press even if onReleased
+                        // is never delivered.
+                        onPressedChanged: if (!pressed) root._dragGuideX = -1
                         cursorShape: Qt.SizeHorCursor
                         preventStealing: true
                         z: 11

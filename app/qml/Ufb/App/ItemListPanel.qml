@@ -629,6 +629,11 @@ Rectangle {
                         // when the window deactivates or a native drag runs its modal
                         // loop — the blue line then sticks. HoverHandler re-evaluates.
                         HoverHandler { id: itemNameHandleMaHover }
+                        // Belt and braces for the guide line: `pressed` also drops on
+                        // cancel, on a stolen grab, and on a click landing elsewhere,
+                        // so the guide can never outlive the press even if onReleased
+                        // is never delivered.
+                        onPressedChanged: if (!pressed) root._dragGuideX = -1
                         cursorShape: Qt.SizeHorCursor
                         preventStealing: true
                         z: 11
@@ -721,6 +726,11 @@ Rectangle {
                             // when the window deactivates or a native drag runs its modal
                             // loop — the blue line then sticks. HoverHandler re-evaluates.
                             HoverHandler { id: itemHeaderHandleMaHover }
+                            // Belt and braces for the guide line: `pressed` also drops on
+                            // cancel, on a stolen grab, and on a click landing elsewhere,
+                            // so the guide can never outlive the press even if onReleased
+                            // is never delivered.
+                            onPressedChanged: if (!pressed) root._dragGuideX = -1
                             cursorShape: Qt.SizeHorCursor
                             preventStealing: true
                             z: 11
@@ -739,13 +749,20 @@ Rectangle {
                                     .mapToItem(root, _dragWidth, 0).x
                             }
                             onReleased: {
-                                if (_dragWidth >= 0) {
-                                    root._setLiveColumnWidth(
-                                        modelData.columnName, _dragWidth)
-                                    root._commitColumnWidth(modelData)
-                                }
+                                // Clear the guide BEFORE committing: the
+                                // commit refreshes visibleColumns, which
+                                // tears this delegate down synchronously —
+                                // anything after that line runs with the
+                                // delegate's context gone ("root is not
+                                // defined") and used to leave the guide
+                                // stuck on screen.
+                                const w = _dragWidth
                                 _dragWidth = -1
                                 root._dragGuideX = -1
+                                if (w >= 0) {
+                                    root._setLiveColumnWidth(modelData.columnName, w)
+                                    root._commitColumnWidth(modelData)
+                                }
                             }
                             onCanceled: {
                                 _dragWidth = -1
@@ -907,7 +924,11 @@ Rectangle {
                                     // otherwise leave our cell display stale
                                     // (we've seen the data after a tab swap
                                     // proves the DB write landed).
-                                    root._refreshMetadataAndColumns()
+                                    // Deferred: the refresh rebuilds the
+                                    // column delegates, and doing that from
+                                    // inside a delegate's own handler tears
+                                    // the running context down mid-call.
+                                    Qt.callLater(root._refreshMetadataAndColumns)
                                 }
                             }
                         }
