@@ -31,15 +31,15 @@ QtObject {
         readonly property color toolbarAlt:   "#262626"   // sub-header
 
         // Lines.
-        readonly property color border:       "#35322d"   // panel borders
-        readonly property color borderStrong: "#403c36"   // headers / inset
+        readonly property color border:       "#333333"   // panel borders
+        readonly property color borderStrong: "#3d3d3d"   // headers / inset
         // Hairline tone for 1px separators — a notch below `border` so
         // the tonal background still carries most of the separation.
-        // All three line tones are warmed toward the sidebar's neutral
-        // icon grey (sidebarNeutral) and lifted a step from the old
-        // #222222 / #2a2a2a / #333333, which vanished against the
-        // #1a1a1a panels.
-        readonly property color divider:      "#2c2a26"   // 1px separators
+        // All three line tones are neutral and one step lighter than
+        // the old #222222 / #2a2a2a / #333333, which vanished against
+        // the #1a1a1a panels. (A warm-tinted variant was tried and
+        // rejected — lines stay neutral; only glyphs carry warmth.)
+        readonly property color divider:      "#2a2a2a"   // 1px separators
 
         // Text.
         readonly property color text:         "#dddddd"   // primary
