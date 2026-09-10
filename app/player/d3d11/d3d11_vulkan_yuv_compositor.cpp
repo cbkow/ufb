@@ -499,7 +499,7 @@ void D3D11VulkanYuvCompositor::shutdown()
     // Drain any in-flight compute before destroying the pipeline.
     auto &vkMgr = ufbplayer::VulkanDeviceManager::instance();
     VkDevice device = vkMgr.isInitialized() ? vkMgr.device() : VK_NULL_HANDLE;
-    if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+    if (device != VK_NULL_HANDLE) vkMgr.waitForGpu();   // Phase I.D — queue-locked
 
     teardownTimelineFence(*m_impl);
     teardownComputePipeline(*m_impl);
@@ -634,21 +634,58 @@ bool D3D11VulkanYuvCompositor::dispatch(const DispatchParams &params)
     // Submit on the timeline path or fall back to host-wait. The
     // D3D11 GPU-side Wait on the timeline path means CPU returns
     // immediately and the next D3D11 sample blocks GPU-side instead.
+    // Phase I.F — FFmpeg frame sync (see DispatchParams). Waits: each
+    // source image's timeline semaphore at the value the decode
+    // signalled. Signals: the same semaphores at value + 1 (our read
+    // done), plus — on the timeline path — the cross-API fence.
+    const int nSync = (params.nbSync > 0 && params.nbSync <= 4) ? params.nbSync : 0;
+    VkSemaphore          waitSems[4];
+    uint64_t             waitVals[4];
+    VkPipelineStageFlags waitStages[4];
+    VkSemaphore          signalSems[5];
+    uint64_t             signalVals[5];
+    uint32_t             nWait = 0, nSignal = 0;
+    for (int i = 0; i < nSync; ++i) {
+        waitSems[nWait]   = params.syncSem[i];
+        waitVals[nWait]   = params.syncWaitValue[i];
+        waitStages[nWait] = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        ++nWait;
+        signalSems[nSignal] = params.syncSem[i];
+        signalVals[nSignal] = params.syncWaitValue[i] + 1;
+        ++nSignal;
+    }
+
     if (impl.timelineReady) {
         const uint64_t signalValue = ++impl.timelineValue;
+        signalSems[nSignal] = impl.vkSemaphore;
+        signalVals[nSignal] = signalValue;
+        ++nSignal;
+
         VkTimelineSemaphoreSubmitInfo tsi{};
         tsi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-        tsi.signalSemaphoreValueCount = 1;
-        tsi.pSignalSemaphoreValues    = &signalValue;
+        tsi.waitSemaphoreValueCount   = nWait;
+        tsi.pWaitSemaphoreValues      = nWait ? waitVals : nullptr;
+        tsi.signalSemaphoreValueCount = nSignal;
+        tsi.pSignalSemaphoreValues    = signalVals;
 
         VkSubmitInfo si{};
         si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.pNext                = &tsi;
+        si.waitSemaphoreCount   = nWait;
+        si.pWaitSemaphores      = nWait ? waitSems : nullptr;
+        si.pWaitDstStageMask    = nWait ? waitStages : nullptr;
         si.commandBufferCount   = 1;
         si.pCommandBuffers      = &impl.cmdBuf;
-        si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores    = &impl.vkSemaphore;
-        if (vkQueueSubmit(impl.computeQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+        si.signalSemaphoreCount = nSignal;
+        si.pSignalSemaphores    = signalSems;
+        VkResult submitRes;
+        {
+            // Phase I.D — serialize with FFmpeg decode submits and any
+            // wait-idle (see VulkanDeviceManager::queueMutex).
+            std::lock_guard<std::recursive_mutex> qlock(vkMgr.queueMutex());
+            submitRes = vkQueueSubmit(impl.computeQueue, 1, &si, VK_NULL_HANDLE);
+        }
+        if (submitRes != VK_SUCCESS) {
             qWarning("D3D11VulkanYuvCompositor: vkQueueSubmit (timeline) failed");
             return false;
         }
@@ -656,12 +693,31 @@ bool D3D11VulkanYuvCompositor::dispatch(const DispatchParams &params)
         return true;
     }
 
+    VkTimelineSemaphoreSubmitInfo fbTsi{};
+    fbTsi.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    fbTsi.waitSemaphoreValueCount   = nWait;
+    fbTsi.pWaitSemaphoreValues      = nWait ? waitVals : nullptr;
+    fbTsi.signalSemaphoreValueCount = nSignal;
+    fbTsi.pSignalSemaphoreValues    = nSignal ? signalVals : nullptr;
+
     VkSubmitInfo si{};
-    si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers    = &impl.cmdBuf;
+    si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext                = nSync ? &fbTsi : nullptr;
+    si.waitSemaphoreCount   = nWait;
+    si.pWaitSemaphores      = nWait ? waitSems : nullptr;
+    si.pWaitDstStageMask    = nWait ? waitStages : nullptr;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = &impl.cmdBuf;
+    si.signalSemaphoreCount = nSignal;
+    si.pSignalSemaphores    = nSignal ? signalSems : nullptr;
     vkResetFences(device, 1, &impl.cmdFence);
-    if (vkQueueSubmit(impl.computeQueue, 1, &si, impl.cmdFence) != VK_SUCCESS) {
+    VkResult fbSubmitRes;
+    {
+        // Phase I.D — same serialization as the timeline path.
+        std::lock_guard<std::recursive_mutex> qlock(vkMgr.queueMutex());
+        fbSubmitRes = vkQueueSubmit(impl.computeQueue, 1, &si, impl.cmdFence);
+    }
+    if (fbSubmitRes != VK_SUCCESS) {
         qWarning("D3D11VulkanYuvCompositor: vkQueueSubmit (fallback) failed");
         return false;
     }

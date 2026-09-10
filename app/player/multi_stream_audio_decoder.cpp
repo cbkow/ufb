@@ -275,6 +275,11 @@ bool MultiStreamAudioDecoder::openStreams(const QString &path)
             continue;
         }
         AVCodecContext *cctx = avcodec_alloc_context3(codec);
+        // pkt_timebase is "set by user" for decoding — FFmpeg needs it
+        // to re-stamp frames after dropping AAC priming / padding
+        // samples (skip_samples side data on seeks); 9.0 warns "Could
+        // not update timestamps for discarded samples" without it.
+        if (cctx) cctx->pkt_timebase = s->time_base;
         if (!cctx
             || avcodec_parameters_to_context(cctx, s->codecpar) < 0
             || avcodec_open2(cctx, codec, nullptr) < 0) {
@@ -563,20 +568,38 @@ MultiStreamAudioDecoder::buildPipeline(int mode) const
     }
 
     // Sink + final-format opts.
-    if (avfilter_graph_create_filter(&p->buffersink, abufsink, "out",
-                                        nullptr, nullptr, p->graph) < 0) {
-        qWarning("MultiStreamAudioDecoder: abuffersink create failed");
+    //
+    // FFmpeg 9.0 (lavfi 12 / lavu 61) removed av_opt_set_int_list() and
+    // abuffersink's legacy binary-list options ("sample_fmts",
+    // "sample_rates", "ch_layouts"). The array-typed replacements
+    // ("sample_formats", "samplerates", "channel_layouts") plus
+    // av_opt_set_array() exist since FFmpeg 7.1, so this compiles
+    // against both the 8.1 line and 9.x.
+    //
+    // The options MUST be set between alloc and init: 9.0 tracks the
+    // filter's initialised state and rejects them afterwards ("is not
+    // a runtime option and so cannot be set after the object has been
+    // initialized"), which silently dropped the sink's format
+    // constraints. avfilter_graph_create_filter() allocs+inits in one
+    // go, so split it into avfilter_graph_alloc_filter() + opts +
+    // avfilter_init_dict(). 8.1 accepts either order.
+    p->buffersink = avfilter_graph_alloc_filter(p->graph, abufsink, "out");
+    if (!p->buffersink) {
+        qWarning("MultiStreamAudioDecoder: abuffersink alloc failed");
         return {};
     }
-    static const enum AVSampleFormat kOutFmts[] = { AV_SAMPLE_FMT_FLT,
-                                                     AV_SAMPLE_FMT_NONE };
-    static const int kOutRates[] = { kOutSampleRate, -1 };
-    av_opt_set_int_list(p->buffersink, "sample_fmts", kOutFmts,
-                          AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
-    av_opt_set_int_list(p->buffersink, "sample_rates", kOutRates,
-                          -1, AV_OPT_SEARCH_CHILDREN);
-    av_opt_set(p->buffersink, "ch_layouts", "stereo",
-                 AV_OPT_SEARCH_CHILDREN);
+    const enum AVSampleFormat outFmt = AV_SAMPLE_FMT_FLT;
+    const int outRate = kOutSampleRate;
+    av_opt_set_array(p->buffersink, "sample_formats", AV_OPT_SEARCH_CHILDREN,
+                     0, 1, AV_OPT_TYPE_SAMPLE_FMT, &outFmt);
+    av_opt_set_array(p->buffersink, "samplerates", AV_OPT_SEARCH_CHILDREN,
+                     0, 1, AV_OPT_TYPE_INT, &outRate);
+    av_opt_set(p->buffersink, "channel_layouts", "stereo",
+               AV_OPT_SEARCH_CHILDREN);
+    if (avfilter_init_dict(p->buffersink, nullptr) < 0) {
+        qWarning("MultiStreamAudioDecoder: abuffersink init failed");
+        return {};
+    }
 
     const int mergeInputs = static_cast<int>(plan.inputStreams.size());
     AVFilterContext *prev = nullptr;

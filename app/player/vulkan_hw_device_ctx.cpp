@@ -4,12 +4,16 @@
 
 #include <QtLogging>
 
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 extern "C" {
+#include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <vulkan/vulkan.h>
@@ -61,6 +65,25 @@ AVBufferRef *createSharedVulkanHwDeviceCtx()
     vk->device_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     vk->device_features.pNext = nullptr;
 
+    // Phase I.G — tell FFmpeg the queues were created internally
+    // synchronized: (a) queue_flags so its vkGetDeviceQueue2 matches the
+    // creation flags (mismatch = no queue), (b) the feature struct in the
+    // device_features chain, which is what ff_vk_exec_pool_init() looks
+    // for before it uses the flag and skips its own per-queue mutexes.
+    // Static storage: FFmpeg keeps the pNext pointer for the context's
+    // lifetime. lock_queue/unlock_queue below stay wired (harmless, and
+    // still required by lavu 61); this is what replaces them at lavu 62.
+#if defined(VK_KHR_internally_synchronized_queues) && LIBAVUTIL_VERSION_MAJOR >= 61
+    static VkPhysicalDeviceInternallySynchronizedQueuesFeaturesKHR s_isqFeatures{};
+    if (dm.internallySyncedQueues()) {
+        s_isqFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INTERNALLY_SYNCHRONIZED_QUEUES_FEATURES_KHR;
+        s_isqFeatures.pNext = nullptr;
+        s_isqFeatures.internallySynchronizedQueues = VK_TRUE;
+        vk->device_features.pNext = &s_isqFeatures;
+        vk->queue_flags = VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR;
+    }
+#endif
+
     vk->enabled_inst_extensions    = nullptr;
     vk->nb_enabled_inst_extensions = 0;
 
@@ -107,6 +130,29 @@ AVBufferRef *createSharedVulkanHwDeviceCtx()
            dm.videoDecodeCodecOps());
     vk->nb_qf = nq;
 
+    // Phase I.D (2026-09-01) — wire FFmpeg per-queue lock callbacks
+    // to the app-wide queue mutex. Left NULL, lavu installs its OWN
+    // internal mutex, which serializes FFmpeg against FFmpeg only —
+    // the renderer compositor dispatch and GUI-thread waitForGpu()
+    // still raced FFmpeg vkQueueSubmit (playlist-boundary nvoglv64
+    // crash on mixed-resolution ProRes playlists). Deprecated fields,
+    // but honored while FF_API_VULKAN_SYNC_QUEUES holds (libavutil 60).
+#if FF_API_VULKAN_SYNC_QUEUES
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    vk->lock_queue = [](AVHWDeviceContext *, uint32_t, uint32_t) {
+        ufbplayer::VulkanDeviceManager::instance().queueMutex().lock();
+    };
+    vk->unlock_queue = [](AVHWDeviceContext *, uint32_t, uint32_t) {
+        ufbplayer::VulkanDeviceManager::instance().queueMutex().unlock();
+    };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+#endif // FF_API_VULKAN_SYNC_QUEUES
+
     const int initErr = av_hwdevice_ctx_init(ref);
     if (initErr < 0) {
         qWarning("createSharedVulkanHwDeviceCtx: av_hwdevice_ctx_init failed (%d)", initErr);
@@ -117,6 +163,167 @@ AVBufferRef *createSharedVulkanHwDeviceCtx()
           "(%d queue families, %d device extensions)",
           nq, static_cast<int>(exts.size()));
     return ref;
+}
+
+// ---------------------------------------------------------------------
+// Phase I.E — cached, app-owned Vulkan frame pools (see header).
+// ---------------------------------------------------------------------
+namespace {
+
+struct FramesCacheEntry {
+    const void       *device   = nullptr;   // VkDevice identity (see acquire)
+    int               width    = 0;
+    int               height   = 0;
+    int               swFormat = AV_PIX_FMT_NONE;
+    VkFormat          planeFmt[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED,
+                                      VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
+    VkImageUsageFlags usage    = 0;
+    AVBufferRef      *frames   = nullptr;   // our cache ref (initialised)
+};
+
+std::mutex                    g_framesCacheMutex;
+std::vector<FramesCacheEntry> g_framesCache;
+
+} // namespace
+
+AVBufferRef *acquireSharedVulkanFramesCtx(AVCodecContext *avctx)
+{
+    if (!avctx || !avctx->hw_device_ctx) return nullptr;
+    const auto *dev =
+        reinterpret_cast<const AVHWDeviceContext *>(avctx->hw_device_ctx->data);
+    if (!dev || dev->type != AV_HWDEVICE_TYPE_VULKAN) return nullptr;
+    // Key on the VkDevice, not the AVHWDeviceContext: every context
+    // createSharedVulkanHwDeviceCtx() hands out wraps the SAME
+    // VulkanDeviceManager device (same queues, same lock callbacks),
+    // and a decoder that visits a D3D11VA clip in between comes back
+    // with a fresh AVHWDeviceContext pointer. The pool keeps its own
+    // device_ref alive, so the context it was built on outlives it.
+    const void *deviceKey =
+        reinterpret_cast<const AVVulkanDeviceContext *>(dev->hwctx)->act_dev;
+
+    // Let the hwaccel describe the pool it needs (dims incl. coded
+    // alignment, sw_format, per-plane VkFormats, usage, create_pnext).
+    AVBufferRef *fresh = nullptr;
+    int err = avcodec_get_hw_frames_parameters(avctx, avctx->hw_device_ctx,
+                                               AV_PIX_FMT_VULKAN, &fresh);
+    if (err < 0 || !fresh) {
+        qWarning("acquireSharedVulkanFramesCtx: avcodec_get_hw_frames_parameters "
+                 "failed (%d) — FFmpeg will manage the pool", err);
+        return nullptr;
+    }
+    auto *fc  = reinterpret_cast<AVHWFramesContext *>(fresh->data);
+    auto *vfc = reinterpret_cast<AVVulkanFramesContext *>(fc->hwctx);
+
+    // Key = the hwaccel's REQUEST, captured before av_hwframe_ctx_init:
+    // vulkan_frames_init widens `usage` to what the device supports
+    // and fills the per-plane VkFormats, so post-init values never
+    // equal the next request's pre-init values.
+    FramesCacheEntry key;
+    key.device   = deviceKey;
+    key.width    = fc->width;
+    key.height   = fc->height;
+    key.swFormat = fc->sw_format;
+    std::memcpy(key.planeFmt, vfc->format, sizeof(key.planeFmt));
+    key.usage    = vfc->usage;
+
+    std::lock_guard<std::mutex> lock(g_framesCacheMutex);
+    for (const FramesCacheEntry &e : g_framesCache) {
+        if (e.device == key.device && e.width == key.width
+            && e.height == key.height && e.swFormat == key.swFormat
+            && e.usage == key.usage
+            && std::memcmp(e.planeFmt, key.planeFmt, sizeof(e.planeFmt)) == 0) {
+            av_buffer_unref(&fresh);
+            qInfo("acquireSharedVulkanFramesCtx: pool HIT %dx%d %s (%zu cached)",
+                  e.width, e.height,
+                  av_get_pix_fmt_name(static_cast<AVPixelFormat>(e.swFormat)),
+                  g_framesCache.size());
+            return av_buffer_ref(e.frames);
+        }
+    }
+
+    // Mirror ff_decode_get_hw_frames_ctx's headroom for fixed-size
+    // pools (Vulkan pools are dynamic → initial_pool_size is 0 and
+    // this is a no-op, kept for parity).
+    if (fc->initial_pool_size) {
+        const int extra = avctx->extra_hw_frames > 0 ? avctx->extra_hw_frames : 0;
+        fc->initial_pool_size += 3 + extra;
+    }
+    if ((err = av_hwframe_ctx_init(fresh)) < 0) {
+        qWarning("acquireSharedVulkanFramesCtx: av_hwframe_ctx_init failed "
+                 "(%d) — FFmpeg will manage the pool", err);
+        av_buffer_unref(&fresh);
+        return nullptr;
+    }
+
+    key.frames = av_buffer_ref(fresh);
+    g_framesCache.push_back(key);
+    qInfo("acquireSharedVulkanFramesCtx: pool allocated %dx%d %s (%zu cached)",
+          key.width, key.height,
+          av_get_pix_fmt_name(static_cast<AVPixelFormat>(key.swFormat)),
+          g_framesCache.size());
+    return fresh;
+}
+
+void releaseSharedVulkanFramesCache()
+{
+    std::vector<AVBufferRef *> refs;
+    {
+        std::lock_guard<std::mutex> lock(g_framesCacheMutex);
+        refs.reserve(g_framesCache.size());
+        for (FramesCacheEntry &e : g_framesCache) refs.push_back(e.frames);
+        g_framesCache.clear();
+    }
+    // Unref outside the lock — a last-ref drop runs FFmpeg's pool
+    // teardown (semaphore waits + vkDestroyImage) and must not hold
+    // our cache mutex while doing so.
+    for (AVBufferRef *r : refs) av_buffer_unref(&r);
+    if (!refs.empty())
+        qInfo("releaseSharedVulkanFramesCache: dropped %zu cached pool(s)",
+              refs.size());
+}
+
+// ---- Phase K.3 — routing helpers shared by VideoDecoder / DualVideoDecoder
+
+bool vulkanPreferredCodec(int avCodecId)
+{
+    // ProRes ONLY. FFV1 and APV were routed here for one evening
+    // (2026-09-08) and measured on the RTX 5090 with the vendored
+    // 9.0.1 CLI, 1080p 4:2:2 10-bit, 24 frames:
+    //   FFV1  software 228 ms   Vulkan 4659 ms (24 slices), 3585 ms
+    //                            for TEN frames at the encoder default
+    //                            of one slice — ~3 fps, and the single
+    //                            giant workgroup stalls the desktop
+    //   APV   software 111 ms   Vulkan  671 ms
+    // The Vulkan FFV1 decoder is a slice-parallel compute shader; real
+    // archives are often 1-4 slices, so it is unusable as a default.
+    // Software FFV1/APV are frame-threaded and faster than the GPU
+    // here anyway. The bridge's 3-plane support stays for the day a
+    // compute decoder earns its place.
+    switch (static_cast<AVCodecID>(avCodecId)) {
+    case AV_CODEC_ID_PRORES:   // Vulkan decoder since FFmpeg 8.0
+        return true;
+    default:
+        return false;
+    }
+}
+
+AVPixelFormat attachedHwPixelFormat(const AVCodecContext *avctx)
+{
+    if (!avctx || !avctx->hw_device_ctx) return AV_PIX_FMT_NONE;
+    const auto *dev = reinterpret_cast<const AVHWDeviceContext *>(avctx->hw_device_ctx->data);
+    if (!dev) return AV_PIX_FMT_NONE;
+    switch (dev->type) {
+    case AV_HWDEVICE_TYPE_VULKAN:  return AV_PIX_FMT_VULKAN;
+    case AV_HWDEVICE_TYPE_D3D11VA: return AV_PIX_FMT_D3D11;
+    default:                       return AV_PIX_FMT_NONE;
+    }
+}
+
+int attachedHwDeviceType(const AVBufferRef *hwDeviceCtx)
+{
+    if (!hwDeviceCtx) return AV_HWDEVICE_TYPE_NONE;
+    const auto *dev = reinterpret_cast<const AVHWDeviceContext *>(hwDeviceCtx->data);
+    return dev ? dev->type : AV_HWDEVICE_TYPE_NONE;
 }
 
 } // namespace ufbplayer

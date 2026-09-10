@@ -55,14 +55,23 @@ Write-Host "UFB external setup..."
 # ffmpeg source: prefer QCView-Player's vendored prebuilts; otherwise download a
 # complete BtbN shared GPL build (headers + import libs + DLLs + ffmpeg.exe /
 # ffprobe.exe). Both expose the include/ + lib/*.lib + bin/*.{dll,exe} layout
-# that cmake/external.cmake + app/CMakeLists expect (ffmpeg 8.x: avcodec-62,
+# that cmake/external.cmake + app/CMakeLists expect (ffmpeg 9.x: avcodec-63,
 # etc.). QCView is only needed for ffmpeg, so its absence is no longer fatal.
 # GPL build is fine - UFB is GPL-3.0.
+#
+# Prefer QCView's build: it is FFmpeg 9.0.1 built with the three local
+# patches UFB also carries in scripts/ffmpeg-patches/ (DNxHR 444 adaptive
+# colour transform + Avid legal-range tag, MXF RGBA range tag, ProRes RAW
+# Bayer patterns). The stock BtbN fallback below plays everything but
+# lacks those patches, so DNxHR 444 / MXF RGBA come up untagged.
+# cmake/external.cmake globs the DLL majors, so no filename pins here.
 $ufbFf = Join-Path $ufbExt 'ffmpeg'
-$qcFf  = Join-Path $qcRoot 'external\ffmpeg'
-# Pinned BtbN asset (ffmpeg 8.x shared). Bump when moving ffmpeg majors;
-# cmake/external.cmake hardcodes the DLL major-version filenames to match.
-$ffmpegAsset = 'ffmpeg-n8.1-latest-win64-gpl-shared-8.1'
+$qcFf  = Join-Path $qcRoot 'external\ffmpeg-win64'
+if (-not (Test-Path (Join-Path $qcFf 'include\libavcodec\avcodec.h'))) {
+    $qcFf = Join-Path $qcRoot 'external\ffmpeg'   # older QCView layout
+}
+# Pinned BtbN asset (ffmpeg 9.x shared). Bump when moving ffmpeg majors.
+$ffmpegAsset = 'ffmpeg-n9.0-latest-win64-gpl-shared-9.0'
 
 if (Test-Path (Join-Path $qcFf 'include\libavcodec\avcodec.h')) {
     # QCView mirrors bin/ wholesale (ffmpeg.exe + ffprobe.exe + every av*/sw*

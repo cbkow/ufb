@@ -38,6 +38,14 @@ qt_add_executable(ufb
     player/scrub_decoder.h
     player/sws_rgba_image.h
     player/rgb_range.h
+    # FFmpeg 9 cut-over helpers (ported from QCView): codec routing,
+    # software threading policy, demuxer seek shim, packet-walk extent
+    # for duration-less containers, threaded swscale (dynamic mode).
+    player/hw_routing.h
+    player/thread_policy.h
+    player/seek_compat.h
+    player/stream_extent.h
+    player/sws_threaded.h
     # Audio subsystem (ported from QCView, namespace ufbplayer). AudioPlayer
     # itself is a QML element — see the qt_add_qml_module SOURCES below.
     player/audio_routing.h
@@ -419,6 +427,16 @@ if(libheif_FOUND AND TARGET heif)
 endif()
 if(TARGET ufb::ffmpeg)
     target_link_libraries(ufb PRIVATE ufb::ffmpeg)
+    # The vendored FFmpeg headers must win over any other copy on the
+    # include path (vcpkg's FFmpeg on Windows, Homebrew's on macOS).
+    # app/player/d3d11 reads AVVkFrame / AVVulkanFramesContext by struct
+    # layout; compiling against a different major's headers while
+    # loading the vendored DLLs shifts the layout (9.0 widened
+    # AVVkFrame.access[], moving sem[]) and turns image layouts into
+    # garbage semaphore handles → driver crash. BEFORE puts the vendored
+    # include dir ahead of everything (same guard as QCView's renderer).
+    target_include_directories(ufb BEFORE PRIVATE
+        $<TARGET_PROPERTY:ufb::ffmpeg,INTERFACE_INCLUDE_DIRECTORIES>)
 endif()
 
 

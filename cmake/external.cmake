@@ -38,14 +38,18 @@ if(WIN32 AND EXISTS "${UFB_FFMPEG_ROOT}/include/libavcodec/avcodec.h")
     endforeach()
 
     # Per-DLL IMPORTED_LOCATION uses the actual DLL filename, which
-    # encodes the major version (avcodec-62.dll, etc.). Set them
-    # individually since the version differs per library.
-    set_target_properties(ufb::avcodec    PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/avcodec-62.dll")
-    set_target_properties(ufb::avformat   PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/avformat-62.dll")
-    set_target_properties(ufb::avutil     PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/avutil-60.dll")
-    set_target_properties(ufb::avfilter   PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/avfilter-11.dll")
-    set_target_properties(ufb::swscale    PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/swscale-9.dll")
-    set_target_properties(ufb::swresample PROPERTIES IMPORTED_LOCATION "${UFB_FFMPEG_ROOT}/bin/swresample-6.dll")
+    # encodes the library's major version (avcodec-63.dll, etc.) and
+    # differs per library and per ffmpeg release. Glob it so an ffmpeg
+    # bump (8.1 → 9.0 moved every major) never needs a hardcoded rename.
+    foreach(_lib IN LISTS _ufb_ffmpeg_libs)
+        file(GLOB _ufb_dll "${UFB_FFMPEG_ROOT}/bin/${_lib}-[0-9]*.dll")
+        list(LENGTH _ufb_dll _ufb_dll_count)
+        if(_ufb_dll_count EQUAL 0)
+            message(FATAL_ERROR "ufb: no ${_lib}-<major>.dll under ${UFB_FFMPEG_ROOT}/bin — re-run scripts/setup-external.ps1")
+        endif()
+        list(GET _ufb_dll 0 _ufb_dll_path)
+        set_target_properties(ufb::${_lib} PROPERTIES IMPORTED_LOCATION "${_ufb_dll_path}")
+    endforeach()
 
     message(STATUS "ufb: ffmpeg (Windows) found at ${UFB_FFMPEG_ROOT}")
 elseif(APPLE AND EXISTS "${UFB_FFMPEG_ROOT}/include/libavcodec/avcodec.h")

@@ -8,6 +8,7 @@
 #include <QtLogging>
 
 extern "C" {
+#include <libavutil/avutil.h>     // avutil_version() — ABI guard in initialize()
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
@@ -37,6 +38,42 @@ namespace {
 // (h264/h265/av1 hwaccel), map the multi-plane format to the per-plane
 // VkFormats we use when creating PLANE_0/PLANE_1 aspect views.
 // Returns true on a known biplanar format; out params filled.
+// Three-plane multiplane images (one VkImage, PLANE_0/1/2 aspects) —
+// what hwcontext_vulkan allocates for 8-bit planar YUV when the
+// driver exposes the format (yuv420p / yuv422p / yuv444p from FFV1,
+// and the 10/12/16-bit 3PACK16 variants). The per-plane view format
+// is the same for all three planes; the packed 10X6 / 12X4 formats
+// sample as full-scale UNORM (data in the high bits), so bitScale
+// stays 1 like the biplanar P010 path.
+bool triplanarPlaneFormat(VkFormat multiPlane, VkFormat &planeFmt)
+{
+    switch (multiPlane) {
+        case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+        case VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM:
+        case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
+            planeFmt = VK_FORMAT_R8_UNORM;
+            return true;
+        case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
+        case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_422_UNORM_3PACK16:
+        case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
+            planeFmt = VK_FORMAT_R10X6_UNORM_PACK16;
+            return true;
+        case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_420_UNORM_3PACK16:
+        case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_422_UNORM_3PACK16:
+        case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_444_UNORM_3PACK16:
+            planeFmt = VK_FORMAT_R12X4_UNORM_PACK16;
+            return true;
+        case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
+        case VK_FORMAT_G16_B16_R16_3PLANE_422_UNORM:
+        case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
+            planeFmt = VK_FORMAT_R16_UNORM;
+            return true;
+        default:
+            planeFmt = VK_FORMAT_UNDEFINED;
+            return false;
+    }
+}
+
 bool biplanarPlaneFormats(VkFormat multiPlane,
                            VkFormat &plane0Fmt,
                            VkFormat &plane1Fmt)
@@ -126,6 +163,11 @@ struct D3D11VulkanDecodeBridge::Impl {
     };
     SharedRgba    output;
 
+    // Phase I.D.2 — parked outputs, keyed (width<<32|height). See the
+    // park-and-reuse comment in consumeAVFrame. Destroyed only in
+    // reset()/shutdown.
+    std::unordered_map<uint64_t, SharedRgba> outputCache;
+
     // Per-frame VkImageView resolution — keyed by VkImage so FFmpeg's
     // ~26-image pool warms the cache in steady-state. Each decoder
     // instance has its own pool with distinct VkImage identities
@@ -139,8 +181,10 @@ struct D3D11VulkanDecodeBridge::Impl {
         VkImageView color  = VK_NULL_HANDLE;
         VkImageView plane0 = VK_NULL_HANDLE;
         VkImageView plane1 = VK_NULL_HANDLE;
+        VkImageView plane2 = VK_NULL_HANDLE;   // 3-plane multiplane images
     };
     std::unordered_map<VkImage, CachedPlaneViews> viewCache;
+    const AVHWFramesContext *loggedLayoutBail = nullptr;   // one warning per pool
 
     // Tracks the AVHWFramesContext pointer the cache was built
     // against. Pointer compare only — we never dereference after the
@@ -329,6 +373,7 @@ VkImageView resolveCachedView(D3D11VulkanDecodeBridge::Impl &impl,
     VkImageView *slot = nullptr;
     if (aspect == VK_IMAGE_ASPECT_PLANE_0_BIT)      slot = &entry.plane0;
     else if (aspect == VK_IMAGE_ASPECT_PLANE_1_BIT) slot = &entry.plane1;
+    else if (aspect == VK_IMAGE_ASPECT_PLANE_2_BIT) slot = &entry.plane2;
     else                                             slot = &entry.color;
     if (*slot != VK_NULL_HANDLE) return *slot;
 
@@ -361,6 +406,7 @@ void destroyCachedViews(D3D11VulkanDecodeBridge::Impl &impl)
             if (kv.second.color  != VK_NULL_HANDLE) vkDestroyImageView(device, kv.second.color,  nullptr);
             if (kv.second.plane0 != VK_NULL_HANDLE) vkDestroyImageView(device, kv.second.plane0, nullptr);
             if (kv.second.plane1 != VK_NULL_HANDLE) vkDestroyImageView(device, kv.second.plane1, nullptr);
+            if (kv.second.plane2 != VK_NULL_HANDLE) vkDestroyImageView(device, kv.second.plane2, nullptr);
         }
     }
     impl.viewCache.clear();
@@ -385,6 +431,23 @@ bool D3D11VulkanDecodeBridge::initialize(D3D11VulkanYuvCompositor *yuvCompositor
     }
     if (!d3d.isInitialized()) {
         qWarning("D3D11VulkanDecodeBridge: D3D11DeviceManager not initialized");
+        return false;
+    }
+
+    // ABI guard (2026-09-08): this TU reads AVVkFrame / AVVulkanFramesContext
+    // by struct layout. If the headers it was compiled against belong to
+    // a different libavutil major than the DLL that is actually loaded
+    // (it happened: vcpkg's 8.1 headers vs the vendored 9.0 DLLs — the
+    // widened `access[]` shifted `sem[]`, and we submitted image layouts
+    // as semaphore handles), refuse to run the zero-copy path rather
+    // than corrupt the driver. Decoders then fall back to CPU publish.
+    const unsigned rtMajor = AV_VERSION_MAJOR(avutil_version());
+    if (rtMajor != static_cast<unsigned>(LIBAVUTIL_VERSION_MAJOR)) {
+        qCritical("D3D11VulkanDecodeBridge: libavutil ABI mismatch — headers "
+                  "%d, runtime DLL %u. Zero-copy Vulkan bridge DISABLED. "
+                  "(Fix the include order: the vendored FFmpeg include dir "
+                  "must precede every other FFmpeg copy on the path.)",
+                  LIBAVUTIL_VERSION_MAJOR, rtMajor);
         return false;
     }
 
@@ -432,6 +495,13 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
     // previous decoder's images can hit on a new decoder's image
     // → undefined sampling → green/magenta chroma corruption.
     if (hwfc != m_impl->lastHwfc) {
+        // Phase I.D — drain in-flight compute before destroying the
+        // old pool views: the PREVIOUS dispatch may still be executing
+        // with these VkImageViews bound (the timeline wait inside
+        // dispatch() happens after this point, not before it).
+        if (!m_impl->viewCache.empty()) {
+            ufbplayer::VulkanDeviceManager::instance().waitForGpu();
+        }
         destroyCachedViews(*m_impl);
         m_impl->lastHwfc = hwfc;
         if (hwfc) {
@@ -454,8 +524,41 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
     }
 
     if (needRealloc) {
-        reset();
-        if (!allocateSharedRgba(avFrame->width, avFrame->height, m_impl->output)) {
+        // Phase I.D.2 (2026-09-01) — park-and-reuse instead of
+        // destroy-and-realloc. The old path called reset() here:
+        // device-wide idle + destroy of the (possibly still D3D11-
+        // referenced) shared texture + NT-handle close on EVERY
+        // resolution change. Mixed-resolution ProRes playlists churn
+        // that at every clip boundary, and the NVIDIA driver
+        // eventually faulted on it (nvlddmkm event 153 bursts at
+        // boundaries, then VK_ERROR_DEVICE_LOST; the pure-FFmpeg
+        // open/decode/close churn was proven clean standalone). Now
+        // the current output is PARKED per-resolution and revived on
+        // the next visit; nothing GPU-visible is destroyed until
+        // reset()/shutdown. Cost: one RGBA16F surface (9-17 MB) per
+        // distinct resolution in the session — bounded and tiny next
+        // to the decode pools.
+        const auto keyOf = [](int w, int h) {
+            return (static_cast<uint64_t>(static_cast<uint32_t>(w)) << 32)
+                 | static_cast<uint32_t>(h);
+        };
+        if (m_impl->output.d3dTex) {
+            m_impl->outputCache[keyOf(m_impl->output.width,
+                                        m_impl->output.height)]
+                = std::move(m_impl->output);
+            m_impl->output = {};
+        }
+        const uint64_t key = keyOf(avFrame->width, avFrame->height);
+        if (auto it = m_impl->outputCache.find(key);
+            it != m_impl->outputCache.end()) {
+            m_impl->output = std::move(it->second);
+            m_impl->outputCache.erase(it);
+            qInfo("D3D11VulkanDecodeBridge: output cache HIT %dx%d "
+                  "(%zu parked)",
+                  avFrame->width, avFrame->height,
+                  m_impl->outputCache.size());
+        } else if (!allocateSharedRgba(avFrame->width, avFrame->height,
+                                        m_impl->output)) {
             qWarning("D3D11VulkanDecodeBridge: shared RGBA16F alloc failed at "
                      "%dx%d — further frames at this dim will be dropped",
                      avFrame->width, avFrame->height);
@@ -464,15 +567,16 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
             m_impl->cachedH        = avFrame->height;
             m_impl->allocFailed    = true;
             return nullptr;
+        } else {
+            qInfo("D3D11VulkanDecodeBridge: shared RGBA16F allocated %dx%d "
+                  "(D3D11 owns → Vulkan import OK; sw_format=%s)",
+                  avFrame->width, avFrame->height,
+                  av_get_pix_fmt_name(sw_format));
         }
         m_impl->cachedSwFormat = sw_format;
         m_impl->cachedW        = avFrame->width;
         m_impl->cachedH        = avFrame->height;
         m_impl->allocFailed    = false;
-        qInfo("D3D11VulkanDecodeBridge: shared RGBA16F allocated %dx%d "
-              "(D3D11 owns → Vulkan import OK; sw_format=%s)",
-              avFrame->width, avFrame->height,
-              av_get_pix_fmt_name(sw_format));
     }
 
     if (m_impl->output.vkView == VK_NULL_HANDLE) {
@@ -504,15 +608,41 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
                                             biplanePlane1Fmt);
     }
 
-    if (!isBiplanar && planeCount < 3) {
-        // Unknown layout — can't dispatch.
+    bool     isTriplanar = false;
+    VkFormat triplanePlaneFmt = VK_FORMAT_UNDEFINED;
+    if (planeCount == 1 && !isBiplanar) {
+        isTriplanar = triplanarPlaneFormat(vkfctx->format[0], triplanePlaneFmt);
+    }
+
+    if (!isBiplanar && !isTriplanar && planeCount < 3) {
+        // Unknown layout — can't dispatch. Say so once per pool so a
+        // silent blank canvas has a log line behind it.
+        if (m_impl->loggedLayoutBail != hwfc) {
+            m_impl->loggedLayoutBail = hwfc;
+            qWarning("D3D11VulkanDecodeBridge: unsupported Vulkan frame layout — "
+                     "%d image(s), format[0]=%d (sw_format=%s); frame dropped",
+                     planeCount, static_cast<int>(vkfctx->format[0]),
+                     av_get_pix_fmt_name(sw_format));
+        }
         return nullptr;
     }
 
-    const bool hasAlpha = (!isBiplanar && planeCount >= 4);
+    const bool hasAlpha = (!isBiplanar && !isTriplanar && planeCount >= 4);
     VkImageView samplerViews[4] = { VK_NULL_HANDLE, VK_NULL_HANDLE,
                                      VK_NULL_HANDLE, VK_NULL_HANDLE };
-    if (isBiplanar) {
+    if (isTriplanar) {
+        samplerViews[0] = resolveCachedView(*m_impl, vkf->img[0],
+                                              VK_IMAGE_ASPECT_PLANE_0_BIT,
+                                              triplanePlaneFmt);
+        samplerViews[1] = resolveCachedView(*m_impl, vkf->img[0],
+                                              VK_IMAGE_ASPECT_PLANE_1_BIT,
+                                              triplanePlaneFmt);
+        samplerViews[2] = resolveCachedView(*m_impl, vkf->img[0],
+                                              VK_IMAGE_ASPECT_PLANE_2_BIT,
+                                              triplanePlaneFmt);
+        samplerViews[3] = samplerViews[2];
+        if (!samplerViews[0] || !samplerViews[1] || !samplerViews[2]) return nullptr;
+    } else if (isBiplanar) {
         samplerViews[0] = resolveCachedView(*m_impl, vkf->img[0],
                                               VK_IMAGE_ASPECT_PLANE_0_BIT,
                                               biplanePlane0Fmt);
@@ -547,7 +677,7 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
     dp.outputView  = m_impl->output.vkView;
     dp.width       = avFrame->width;
     dp.height      = avFrame->height;
-    if (isBiplanar)               dp.bitScale = 1.0f;
+    if (isBiplanar || isTriplanar) dp.bitScale = 1.0f;   // multiplane: full-scale UNORM
     else if (bitDepth >= 16)      dp.bitScale = 1.0f;
     else if (bitDepth == 12)      dp.bitScale = 65535.0f / 4095.0f;
     else if (bitDepth == 10)      dp.bitScale = 65535.0f / 1023.0f;
@@ -583,7 +713,43 @@ D3D11VulkanDecodeBridge::consumeAVFrame(AVFrame *avFrame, int rangeOverride)
     dp.hasAlpha   = hasAlpha ? 1 : 0;
     dp.isBiplanar = isBiplanar ? 1 : 0;
 
-    if (!m_impl->yuv->dispatch(dp)) {
+    // Phase I.F — make our GPU read visible to FFmpeg's frame sync.
+    // AVVkFrame carries one timeline semaphore per VkImage (one image
+    // for multi-plane NV12/P010, one per plane otherwise). Per the
+    // hwcontext_vulkan contract: lock the frame, wait each image at
+    // its current sem_value, signal at sem_value + 1, bump sem_value,
+    // unlock right after submission (no waiting inside the lock).
+    // FFmpeg's vulkan_frame_free() and the next decode into this image
+    // both wait on that value, so a pool teardown or reuse can no
+    // longer overtake an in-flight compositor dispatch.
+    const int nbImages = (isBiplanar || isTriplanar) ? 1 : planeCount;
+    if (vkfctx->lock_frame) vkfctx->lock_frame(hwfc, vkf);
+    dp.nbSync = 0;
+    for (int i = 0; i < nbImages && i < 4; ++i) {
+        if (vkf->sem[i] == VK_NULL_HANDLE) continue;
+        dp.syncSem[dp.nbSync]       = vkf->sem[i];
+        dp.syncWaitValue[dp.nbSync] = vkf->sem_value[i];
+        ++dp.nbSync;
+    }
+    if (!m_impl->loggedFirstFrame) {
+        qInfo("D3D11VulkanDecodeBridge: frame sync — %d image(s): "
+              "sem=[%p %p %p %p] value=[%llu %llu %llu %llu] img=[%p %p %p %p] "
+              "lock_frame=%p",
+              nbImages, (void *)vkf->sem[0], (void *)vkf->sem[1],
+              (void *)vkf->sem[2], (void *)vkf->sem[3],
+              (unsigned long long)vkf->sem_value[0], (unsigned long long)vkf->sem_value[1],
+              (unsigned long long)vkf->sem_value[2], (unsigned long long)vkf->sem_value[3],
+              (void *)vkf->img[0], (void *)vkf->img[1], (void *)vkf->img[2], (void *)vkf->img[3],
+              (void *)vkfctx->lock_frame);
+    }
+    const bool dispatched = m_impl->yuv->dispatch(dp);
+    if (dispatched) {
+        for (int i = 0; i < nbImages && i < 4; ++i) {
+            if (vkf->sem[i] != VK_NULL_HANDLE) vkf->sem_value[i] += 1;
+        }
+    }
+    if (vkfctx->unlock_frame) vkfctx->unlock_frame(hwfc, vkf);
+    if (!dispatched) {
         return nullptr;
     }
 
@@ -617,22 +783,32 @@ void D3D11VulkanDecodeBridge::reset()
     auto &vkMgr = ufbplayer::VulkanDeviceManager::instance();
     VkDevice device = vkMgr.isInitialized() ? vkMgr.device() : VK_NULL_HANDLE;
     if (device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device);
+        // Phase I.D — queue-locked wait-idle. reset() runs on the
+        // RENDER thread on every resolution change (needRealloc in
+        // consumeAVFrame) while the new clip decode thread is already
+        // submitting Vulkan work — an unsynchronized vkDeviceWaitIdle
+        // here was the mixed-resolution-playlist driver crash.
+        vkMgr.waitForGpu();
     }
     destroyCachedViews(*m_impl);
-    auto &o = m_impl->output;
-    if (device != VK_NULL_HANDLE) {
-        if (o.vkView   != VK_NULL_HANDLE) vkDestroyImageView(device, o.vkView, nullptr);
-        if (o.vkImage  != VK_NULL_HANDLE) vkDestroyImage(device, o.vkImage, nullptr);
-        if (o.vkMemory != VK_NULL_HANDLE) vkFreeMemory(device, o.vkMemory, nullptr);
-    }
-    o.vkView   = VK_NULL_HANDLE;
-    o.vkImage  = VK_NULL_HANDLE;
-    o.vkMemory = VK_NULL_HANDLE;
-    o.d3dSrv.Reset();
-    o.d3dTex.Reset();
-    if (o.ntHandle) { CloseHandle(o.ntHandle); o.ntHandle = nullptr; }
-    o.width = o.height = 0;
+    const auto destroyOutput = [device](Impl::SharedRgba &o) {
+        if (device != VK_NULL_HANDLE) {
+            if (o.vkView   != VK_NULL_HANDLE) vkDestroyImageView(device, o.vkView, nullptr);
+            if (o.vkImage  != VK_NULL_HANDLE) vkDestroyImage(device, o.vkImage, nullptr);
+            if (o.vkMemory != VK_NULL_HANDLE) vkFreeMemory(device, o.vkMemory, nullptr);
+        }
+        o.vkView   = VK_NULL_HANDLE;
+        o.vkImage  = VK_NULL_HANDLE;
+        o.vkMemory = VK_NULL_HANDLE;
+        o.d3dSrv.Reset();
+        o.d3dTex.Reset();
+        if (o.ntHandle) { CloseHandle(o.ntHandle); o.ntHandle = nullptr; }
+        o.width = o.height = 0;
+    };
+    destroyOutput(m_impl->output);
+    // Phase I.D.2 — parked per-resolution outputs die here too.
+    for (auto &kv : m_impl->outputCache) destroyOutput(kv.second);
+    m_impl->outputCache.clear();
 
     m_impl->cachedSwFormat = -1;
     m_impl->cachedW        = 0;

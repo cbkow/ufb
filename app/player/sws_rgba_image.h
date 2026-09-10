@@ -23,6 +23,7 @@
 // (streaming decoder + scrub decoder, Windows + macOS).
 
 #include "rgb_range.h"
+#include "sws_threaded.h"
 
 #include <QImage>
 
@@ -37,13 +38,15 @@ extern "C" {
 
 namespace ufbplayer {
 
-// `sws` must already be configured for yf's format/size → AV_PIX_FMT_RGBA at
-// the same size (the callers' initSwsContext). `expandLegalRgb`: apply the
-// RGB legal→full expansion after the scale (see rgb_range.h) — callers pass
+// `sws` is a dynamic-mode context from swsCreateThreaded() (the callers'
+// initSwsContext); matrix + range are set per frame inside
+// swsConvertToBuffer. `expandLegalRgb`: apply the RGB legal→full expansion
+// after the scale (see rgb_range.h) — callers pass
 // rgbFrameNeedsLegalExpansion(yf, rangeOverride). Returns a null QImage on
 // failure.
 inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf,
-                                  bool expandLegalRgb = false)
+                                  bool expandLegalRgb = false,
+                                  int rangeOverride = 0)
 {
     if (!sws || !yf || yf->width <= 0 || yf->height <= 0) return {};
     const int w = yf->width;
@@ -54,9 +57,9 @@ inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf,
     auto *buf = static_cast<uint8_t *>(av_malloc(bufSize));
     if (!buf) return {};
 
-    uint8_t *dst[4]   = { buf, nullptr, nullptr, nullptr };
-    int      dstStr[4] = { stride, 0, 0, 0 };
-    if (sws_scale(sws, yf->data, yf->linesize, 0, h, dst, dstStr) < 0) {
+    // Frame API so a context built by swsCreateThreaded slices across
+    // its threads (the pointer API is always single-threaded).
+    if (swsConvertToBuffer(sws, yf, AV_PIX_FMT_RGBA, buf, stride, rangeOverride) < 0) {
         av_free(buf);
         return {};
     }

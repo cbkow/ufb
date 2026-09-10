@@ -1,8 +1,13 @@
 #include "scrub_decoder.h"
 #include "decoder_cleanup_queue.h"
+#include "hw_routing.h"             // softwareOnlyCodec (all platforms)
 #include "rgb_range.h"
+#include "seek_compat.h"
 #include "sws_rgba_image.h"
+#include "sws_threaded.h"
+#include "thread_policy.h"
 #include "video_decoder.h"
+#include "vulkan_hw_device_ctx.h"   // firstSoftwareFormat (all platforms)
 
 #if defined(Q_OS_WIN)
 // Cut A — see VideoDecoder::close for rationale. Same flush before
@@ -40,8 +45,10 @@ QString avErrToString(int err)
     return QString::fromUtf8(buf);
 }
 
-AVPixelFormat hwaccelGetFormat(AVCodecContext * /*ctx*/, const AVPixelFormat *fmts)
+AVPixelFormat hwaccelGetFormat(AVCodecContext *ctx, const AVPixelFormat *fmts)
 {
+    if (ctx && ufbplayer::softwareOnlyCodec(ctx->codec_id))   // hw_routing.h
+        return ufbplayer::firstSoftwareFormat(fmts);
 #if defined(Q_OS_MACOS)
     constexpr AVPixelFormat kPreferred = AV_PIX_FMT_VIDEOTOOLBOX;
 #elif defined(Q_OS_WIN)
@@ -54,7 +61,11 @@ AVPixelFormat hwaccelGetFormat(AVCodecContext * /*ctx*/, const AVPixelFormat *fm
     for (int i = 0; fmts[i] != AV_PIX_FMT_NONE; ++i) {
         if (fmts[i] == kPreferred) return kPreferred;
     }
-    return fmts[0];
+    // fmts[0] can be a foreign hwaccel (`vulkan` for FFV1/APV, `vaapi`
+    // for VVC; on macOS `vulkan` for ProRes RAW since 9.0 compiles the
+    // Vulkan hwaccels in) that FFmpeg rejects before re-calling us; go
+    // straight to the first software format.
+    return ufbplayer::firstSoftwareFormat(fmts);
 }
 
 } // namespace
@@ -269,7 +280,14 @@ bool ScrubDecoder::initFFmpeg(const QString &path)
               "performance/hardwareDecodeEnabled is off");
     }
 
-    // FFmpeg 7.1 needs pkt_timebase to populate frame PTS correctly (see
+    // libavcodec's default is ONE thread when nothing is set, so this
+    // decoder used to be fully single-threaded (a 4K RAW scrub frame =
+    // 530 ms in QCView's measurements). Same policy as VideoDecoder with
+    // the auto count — see the note above on why the user knob is not
+    // read here.
+    ufbplayer::applySoftwareThreadPolicy(m_cctx, codec, 0);
+
+    // FFmpeg needs pkt_timebase to populate frame PTS correctly (see
     // VideoDecoder). Without it, scrubbed frames get a bad/constant PTS and
     // the target-frame comparison misbehaves.
     m_cctx->pkt_timebase = m_fmt->streams[m_videoStreamIdx]->time_base;
@@ -314,49 +332,16 @@ bool ScrubDecoder::initSwsContext(AVFrame *frame)
         m_swsSrcWidth  == frame->width &&
         m_swsSrcHeight == frame->height &&
         m_swsSrcFormat == frame->format;
-    // Fast path: nothing changed (dims/format AND range), reuse as-is.
-    if (dimsSame &&
-        !m_swsColorspaceDirty.exchange(false, std::memory_order_acq_rel)) {
-        return true;
-    }
-    if (!dimsSame) {
-        if (m_sws) { sws_freeContext(m_sws); m_sws = nullptr; }
-        m_sws = sws_getContext(
-            frame->width, frame->height,
-            static_cast<AVPixelFormat>(frame->format),
-            frame->width, frame->height, AV_PIX_FMT_RGBA,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!m_sws) return false;
-    }
-    // Either we (re)created the context, or the range override changed —
-    // (re)apply the colorspace details below in both cases.
-
-    int srcCsp;
-    switch (frame->colorspace) {
-        case AVCOL_SPC_BT709:      srcCsp = SWS_CS_ITU709; break;
-        case AVCOL_SPC_BT470BG:    srcCsp = SWS_CS_ITU601; break;
-        case AVCOL_SPC_SMPTE170M:  srcCsp = SWS_CS_SMPTE170M; break;
-        case AVCOL_SPC_SMPTE240M:  srcCsp = SWS_CS_SMPTE240M; break;
-        case AVCOL_SPC_FCC:        srcCsp = SWS_CS_FCC; break;
-        case AVCOL_SPC_BT2020_NCL:
-        case AVCOL_SPC_BT2020_CL:  srcCsp = SWS_CS_BT2020; break;
-        default:
-            srcCsp = (frame->width >= 1280 || frame->height >= 720)
-                     ? SWS_CS_ITU709 : SWS_CS_SMPTE170M;
-            break;
-    }
-    // Apply the user's per-clip range override (Phase 3.G parity with
-    // VideoDecoder) so scrubbed levels match playback. Auto (0) uses the
-    // stream's detected color_range.
-    int srcFullRange = (frame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
-    const int rangeOv = m_rangeOverride.load(std::memory_order_acquire);
-    if (rangeOv == 1)      srcFullRange = 1;   // Full
-    else if (rangeOv == 2) srcFullRange = 0;   // Limited
-    sws_setColorspaceDetails(
-        m_sws,
-        sws_getCoefficients(srcCsp), srcFullRange,
-        sws_getCoefficients(SWS_CS_ITU709), 1,
-        0, 1 << 16, 1 << 16);
+    // Range changes no longer need a context rebuild: matrix + range
+    // travel on the frame per conversion (sws_threaded.h), so the dirty
+    // flag only exists to nudge a re-decode of the held frame.
+    m_swsColorspaceDirty.store(false, std::memory_order_release);
+    if (dimsSame) return true;
+    if (m_sws) { sws_freeContext(m_sws); m_sws = nullptr; }
+    // Dynamic-mode context: reusable across sizes/formats in principle,
+    // but we still rebuild on a change so the cached dims stay honest.
+    m_sws = ufbplayer::swsCreateThreaded();
+    if (!m_sws) return false;
 
     m_swsSrcWidth  = frame->width;
     m_swsSrcHeight = frame->height;
@@ -453,8 +438,10 @@ bool ScrubDecoder::decodeAndPublish(int target, AVPacket *pkt,
         //    the target and flush. AVSEEK_FLAG_BACKWARD lands on a keyframe
         //    (an IDR for inter codecs — exactly what VideoToolbox needs to
         //    recover after a flush); for intra codecs it's the exact frame.
-        if (av_seek_frame(m_fmt, m_videoStreamIdx, targetPts,
-                          AVSEEK_FLAG_BACKWARD) < 0) {
+        //    seekStream: av_seek_frame, or a reopen-at-start for demuxers
+        //    that cannot seek (animated WebP) — see seek_compat.h.
+        if (ufbplayer::seekStream(&m_fmt, m_videoStreamIdx, targetPts,
+                                  AVSEEK_FLAG_BACKWARD) < 0) {
             return false;
         }
         avcodec_flush_buffers(m_cctx);
@@ -498,9 +485,10 @@ bool ScrubDecoder::decodeForwardCaching(int target, int64_t targetPts,
             if (recvErr == AVERROR(EAGAIN)) break;
             if (recvErr < 0) { m_decoderPositioned = false; return false; }
 
-            // Prefer frame->pts: best_effort_timestamp is unreliable on UFB's
-            // FFmpeg 7.1 + VideoToolbox (constant garbage), which would break
-            // the target-PTS comparison. Mirrors VideoDecoder.
+            // Prefer frame->pts: best_effort_timestamp was unreliable on the
+            // FFmpeg 7.1 + VideoToolbox build UFB started on (constant
+            // garbage), which would break the target-PTS comparison.
+            // Mirrors VideoDecoder::framePresentationPts.
             const int64_t framePts =
                 (frame->pts != AV_NOPTS_VALUE) ? frame->pts
                 : (frame->best_effort_timestamp != AV_NOPTS_VALUE)
@@ -626,7 +614,7 @@ void ScrubDecoder::publishEntry(const std::shared_ptr<ScrubCacheEntry> &entry)
     if (!yf || !initSwsContext(yf)) return;
     const int rangeOv = m_rangeOverride.load(std::memory_order_acquire);
     QImage rgba = swsFrameToRgbaImage(
-        m_sws, yf, rgbFrameNeedsLegalExpansion(yf, rangeOv));
+        m_sws, yf, rgbFrameNeedsLegalExpansion(yf, rangeOv), rangeOv);
     if (rgba.isNull()) return;
     m_streaming->publishExternalFrame(
         FrameHandle::cpu(std::move(rgba), entry->pts()), entry->pts());

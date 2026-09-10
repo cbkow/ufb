@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-FFMPEG_VERSION="8.1.2"
+FFMPEG_VERSION="9.0.1"
 DEPLOYMENT_TARGET="13.0"
 SOURCE_DIR="/tmp/ufb-ffmpeg-build/ffmpeg-${FFMPEG_VERSION}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -86,6 +86,16 @@ if [[ ! -d "$SOURCE_DIR" ]]; then
     curl -L "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
         -o ffmpeg.tar.xz
     tar xf ffmpeg.tar.xz
+    # Local patches (copies of QCView-Player's external/patches/ffmpeg,
+    # kept in-tree so the two apps decode the same way): DNxHR 444
+    # adaptive colour transform + Avid legal-range tag, MXF RGBA range
+    # tag from ComponentMin/MaxRef, ProRes RAW non-zero Bayer pattern
+    # headers. Applied once, right after extraction; a fresh SOURCE_DIR
+    # re-applies them.
+    for p in "$REPO_ROOT"/scripts/ffmpeg-patches/*.patch; do
+        echo "[ffmpeg] applying $(basename "$p")"
+        patch -d "$SOURCE_DIR" -p1 --forward < "$p"
+    done
 fi
 
 cd "$SOURCE_DIR"
