@@ -253,7 +253,9 @@ Item {
         font.family: Theme.font.family
         font.pixelSize: Theme.font.sizeBody
         text: root.currentPath
-        visible: !root._isVideo
+        // Shown for every type, video included: the content Loader is
+        // inset 64 px at the bottom, so this band sits BELOW the video
+        // transport bar rather than over it.
     }
 
     FlatButton {

@@ -239,6 +239,15 @@ ApplicationWindow {
     onVisibilityChanged: {
         _captureWindowedGeometry()
         if (_geometryRestored) _windowSaveTimer.restart()
+        // Minimising or hiding (close-to-tray) the window closes the
+        // preview: a video would otherwise keep decoding and playing
+        // audio in the background, and the lightbox would still be up
+        // on the next show.
+        if ((window.visibility === Window.Minimized
+             || window.visibility === Window.Hidden)
+                && previewLightbox.visible) {
+            previewLightbox.close()
+        }
     }
 
     // ── Tab state persistence ─────────────────────────────────────────
