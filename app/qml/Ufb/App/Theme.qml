@@ -67,12 +67,13 @@ QtObject {
         // identity — the sidebar's bookmark / job / tracker glyphs —
         // never for state or actions (that's accent / success / warning).
         readonly property color brand:        "#e8c21f"
-        // Sidebar section identities alongside the brand yellow
-        // (Subscriptions): sky blue for Bookmarks, warm grey for
-        // Trackers (a tool, not a place — stays neutral; green is taken
-        // by the mount status dots below). Identity only, not state.
-        readonly property color sidebarBookmark: "#59a9f0"
-        readonly property color sidebarTracker:  "#b8b0a4"
+        // Sidebar section identities: the brand yellow marks
+        // Subscriptions (the jobs); Bookmarks and Trackers share a warm
+        // neutral so only the jobs carry colour (green is taken by the
+        // mount status dots below). Identity only, not state.
+        readonly property color sidebarNeutral:  "#b8b0a4"
+        readonly property color sidebarBookmark: sidebarNeutral
+        readonly property color sidebarTracker:  sidebarNeutral
         readonly property color success:      "#4cb050"
         readonly property color warning:      "#f5a623"
         readonly property color error:        "#c04040"
