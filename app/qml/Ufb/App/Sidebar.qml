@@ -19,7 +19,7 @@ Rectangle {
     // No root border — Sidebar sits inside the outer SplitView, whose
     // splitter is the separator from the main column. Bg color +
     // internal section headers carry the visual structure.
-    color: Theme.colors.bg
+    color: Theme.colors.surface
 
     signal navigateRequested(string path)
     /// Sidebar row right-click → "Open in New Tab". Host appends a
@@ -283,6 +283,8 @@ Rectangle {
             // Cap matches the wider expected count (~12 bookmarks
             // visible without scrolling at the dense 22px row).
             Layout.preferredHeight: Math.min(contentHeight, 280)
+            Layout.topMargin: Theme.dim.sidebarListPad
+            spacing: Theme.dim.sidebarRowGap
             model: bookmarksModel
             interactive: contentHeight > height
             clip: true
@@ -380,6 +382,16 @@ Rectangle {
         // automatically when a job is opened. Manually adding a
         // path to subscribe doesn't match how the rest of the app
         // produces them.
+
+        // Section divider (hairline, inset like the rows).
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.dim.sidebarSectionGap
+            Layout.leftMargin: Theme.dim.padding
+            Layout.rightMargin: Theme.dim.padding
+            implicitHeight: Theme.dim.divider
+            color: Theme.colors.divider
+        }
         SectionHeader {
             Layout.fillWidth: true
             Layout.topMargin: Theme.dim.padding
@@ -392,6 +404,8 @@ Rectangle {
             // before the inner scrollbar kicks in. Was 220 (only 5
             // rows fit at the new height — felt truncated).
             Layout.preferredHeight: Math.min(contentHeight, 360)
+            Layout.topMargin: Theme.dim.sidebarListPad
+            spacing: Theme.dim.sidebarRowGap
             model: subscriptionsModel
             interactive: contentHeight > height
             clip: true
@@ -480,6 +494,15 @@ Rectangle {
         }
 
         // ── Trackers ────────────────────────────────────────────────
+        // Section divider (hairline, inset like the rows).
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.dim.sidebarSectionGap
+            Layout.leftMargin: Theme.dim.padding
+            Layout.rightMargin: Theme.dim.padding
+            implicitHeight: Theme.dim.divider
+            color: Theme.colors.divider
+        }
         SectionHeader {
             Layout.fillWidth: true
             Layout.topMargin: Theme.dim.padding
@@ -488,6 +511,7 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.dim.rowHeight
+            Layout.topMargin: Theme.dim.sidebarListPad
             color: trackerHover.containsMouse
                 ? Theme.colors.surfaceHover
                 : "transparent"
@@ -517,6 +541,7 @@ Rectangle {
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.dim.rowHeight
+            Layout.topMargin: Theme.dim.sidebarRowGap
             color: transcodeHover.containsMouse
                 ? Theme.colors.surfaceHover
                 : "transparent"
@@ -545,6 +570,15 @@ Rectangle {
         }
 
         // ── Mounts ──────────────────────────────────────────────────
+        // Section divider (hairline, inset like the rows).
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.dim.sidebarSectionGap
+            Layout.leftMargin: Theme.dim.padding
+            Layout.rightMargin: Theme.dim.padding
+            implicitHeight: Theme.dim.divider
+            color: Theme.colors.divider
+        }
         SectionHeader {
             Layout.fillWidth: true
             Layout.topMargin: Theme.dim.padding
@@ -565,6 +599,8 @@ Rectangle {
             id: mountsList
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.topMargin: Theme.dim.sidebarListPad
+            spacing: Theme.dim.sidebarRowGap
             model: mountsModel
             clip: true
             boundsBehavior: Flickable.StopAtBounds

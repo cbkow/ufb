@@ -93,6 +93,13 @@ QtObject {
         readonly property int spacing:           4
         readonly property int spacingLoose:      8
 
+        // Sidebar rhythm: gap between rows inside a section list,
+        // breathing room between a section header and its first row,
+        // and the space above the hairline that separates sections.
+        readonly property int sidebarRowGap:     2
+        readonly property int sidebarListPad:    4
+        readonly property int sidebarSectionGap: 10
+
         // Radii — squared by default; small radius reserved for pills.
         readonly property int radius:            0
         readonly property int radiusPill:       10
