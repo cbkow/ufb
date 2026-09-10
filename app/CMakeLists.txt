@@ -90,6 +90,8 @@ qt_add_qml_module(ufb
         ExrInfo.h
         TextInfo.cpp
         TextInfo.h
+        MediaInfo.cpp
+        MediaInfo.h
         MndbDoc.cpp
         MndbDoc.h
         # miniz: zip reader for .mnpkg packages (MndbDoc staging); vendored

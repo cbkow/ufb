@@ -28,7 +28,13 @@ Item {
     readonly property var _audioExts: ["wav", "wave", "bwf", "mp3", "aiff",
         "aif", "aifc", "flac", "m4a", "aac", "ogg", "oga", "opus", "wma",
         "caf"]
-    readonly property bool _isVideo: _videoExts.indexOf(_ext) >= 0
+    // Animated GIF / WebP play in the video player (FFmpeg decodes both;
+    // the decoder counts packets for their duration-less containers).
+    // Static ones stay on the image preview — MediaInfo.isAnimated is a
+    // header-level check through Qt's image plugins.
+    readonly property bool _isAnimatedImage: (_ext === "gif" || _ext === "webp")
+        && currentPath.length > 0 && MediaInfo.isAnimated(currentPath)
+    readonly property bool _isVideo: _videoExts.indexOf(_ext) >= 0 || _isAnimatedImage
     readonly property bool _isAudio: _audioExts.indexOf(_ext) >= 0
     readonly property bool _isPdf: _ext === "pdf" || _ext === "ai"
     // Rendered HTML needs the optional WebEngine module; without it,
