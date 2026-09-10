@@ -41,24 +41,107 @@ Rectangle {
     /// Columns DB per (job, folder) as before.
     property real nameColWidth: 240
 
-    /// Restore the folder's remembered Name width. Runs on folderPath
-    /// changes; missing entry keeps the current width (inherit).
-    function _restoreNameColWidth() {
-        if (!folderPath || folderPath.length === 0) return
-        try {
-            var prefs = JSON.parse(Settings.folder_view_prefs(folderPath))
-            if (prefs.ilpNameColWidth > 0) nameColWidth = prefs.ilpNameColWidth
-        } catch (e) {}
+    // ── Board view (KanbanBoard) state ───────────────────────────────
+    /// "list" | "board". Board mode needs a lane column (see laneColumn).
+    property string viewMode: "list"
+    /// columnName of the column whose options define the lanes.
+    property string boardColumn: ""
+    /// refresh()'s sorted rows, handed to the board (it partitions, never
+    /// sorts, so lanes follow the panel's Sort).
+    property var _sortedRows: []
+    /// Columns that can define lanes: dropdown / priority with options
+    /// (same test as CellEditor.isDropdownLike) or checkbox.
+    /// Synthetic lane column for the tracked star: not a metadata
+    /// column, so it never appears in the header; drops call
+    /// set_item_tracked instead of a metadata write.
+    readonly property var _trackedColumn: ({
+        columnName: "__tracked__", label: qsTr("Tracked ★"),
+        columnType: "tracked", options: []
+    })
+    readonly property var _eligibleColumns: visibleColumns.filter(function(c) {
+        return root._isBoardEligible(c)
+    }).concat(jobPath.length > 0 ? [_trackedColumn] : [])
+    /// Display name for a lane column (synthetic ones carry a label).
+    function _columnLabel(c) { return c ? (c.label || c.columnName) : "" }
+    readonly property var laneColumn: {
+        for (var i = 0; i < _eligibleColumns.length; ++i)
+            if (_eligibleColumns[i].columnName === boardColumn) return _eligibleColumns[i]
+        return null
     }
-    /// Merge-save the Name width into the folder's prefs row (which
-    /// FileBrowser panes / JobView activeSubtab also share).
-    function _saveNameColWidth() {
-        if (!folderPath || folderPath.length === 0) return
+    function _isBoardEligible(c) {
+        if (!c) return false
+        var t = String(c.columnType).toLowerCase()
+        if (t === "checkbox") return true
+        return (t === "dropdown" || t === "priority")
+            && Array.isArray(c.options) && c.options.length > 0
+    }
+    function _enterBoard(columnName) {
+        if (columnName && columnName.length > 0) boardColumn = columnName
+        if (!laneColumn && _eligibleColumns.length > 0)
+            boardColumn = _eligibleColumns[0].columnName
+        if (laneColumn) viewMode = "board"
+    }
+    function _setViewMode(v) {
+        if (v === "board") _enterBoard("")
+        else viewMode = "list"
+    }
+    /// The lane column vanished (deleted / hidden / renamed, here or via
+    /// the mesh): fall back to the list and forget the choice.
+    function _validateBoardColumn() {
+        if (_applyingPrefs) return
+        if (jobPath.length === 0 || folderPath.length === 0) return
+        if (viewMode === "board" && !laneColumn) {
+            viewMode = "list"
+            boardColumn = ""
+        }
+    }
+    onVisibleColumnsChanged: _validateBoardColumn()
+
+    // ── Per-folder, per-user prefs (FileBrowser's pattern) ──────────
+    // One shared row per folder (FileBrowser panes + JobView's activeSubtab
+    // write to it too) → always read-merge-write. Restored on folder
+    // change, saved through a debounce gated on the restored flag so the
+    // restore itself never writes.
+    property string _prefsPath: ""
+    property bool _prefsRestored: false
+    property bool _applyingPrefs: false
+    function _applyFolderPrefs() {
+        _prefsPath = folderPath || ""
+        if (_prefsPath.length === 0) return
+        var prefs
+        try { prefs = JSON.parse(Settings.folder_view_prefs(_prefsPath)) } catch (e) { return }
+        _applyingPrefs = true
+        if (prefs.ilpNameColWidth > 0) nameColWidth = prefs.ilpNameColWidth
+        boardColumn = (typeof prefs.ilpBoardColumn === "string") ? prefs.ilpBoardColumn : ""
+        // Validated against the columns just loaded for this folder.
+        viewMode = (prefs.ilpViewMode === "board" && laneColumn) ? "board" : "list"
+        _applyingPrefs = false
+    }
+    function _saveFolderPrefs() {
+        if (_prefsPath.length === 0) return
         var prefs = ({})
-        try { prefs = JSON.parse(Settings.folder_view_prefs(folderPath)) } catch (e) { prefs = ({}) }
+        try { prefs = JSON.parse(Settings.folder_view_prefs(_prefsPath)) } catch (e) { prefs = ({}) }
         prefs.ilpNameColWidth = Math.round(nameColWidth)
-        Settings.set_folder_view_prefs(folderPath, JSON.stringify(prefs))
+        prefs.ilpViewMode = viewMode
+        prefs.ilpBoardColumn = boardColumn
+        Settings.set_folder_view_prefs(_prefsPath, JSON.stringify(prefs))
     }
+    /// Flush a pending save before the folder changes so it lands on
+    /// the folder it belongs to.
+    function _flushFolderPrefs() {
+        if (!_prefsSaveTimer.running) return
+        _prefsSaveTimer.stop()
+        _saveFolderPrefs()
+    }
+    Timer {
+        id: _prefsSaveTimer
+        interval: 500
+        repeat: false
+        onTriggered: root._saveFolderPrefs()
+    }
+    onNameColWidthChanged: if (_prefsRestored && !_applyingPrefs) _prefsSaveTimer.restart()
+    onViewModeChanged:     if (_prefsRestored && !_applyingPrefs) _prefsSaveTimer.restart()
+    onBoardColumnChanged:  if (_prefsRestored && !_applyingPrefs) _prefsSaveTimer.restart()
 
     /// X (root coords) of the column-resize guide line, -1 when no
     /// header handle is being dragged. Handles track this during the
@@ -404,6 +487,7 @@ Rectangle {
                     return root._sortDir * root._compareItems(a, b)
                 })
             }
+            root._sortedRows = rows
             for (var j = 0; j < rows.length; ++j) {
                 itemsModel.append(rows[j])
             }
@@ -422,19 +506,25 @@ Rectangle {
     }
 
     onFolderPathChanged: {
+        _flushFolderPrefs()          // to the OLD folder's row
+        _applyingPrefs = true        // the column reload must not flip/save view mode
         if (folderPath.length > 0) {
             itemsProbe.navigate_to(folderPath)
         } else {
             itemsModel.clear()
         }
         _refreshMetadataAndColumns()
-        _restoreNameColWidth()
+        _applyFolderPrefs()
+        _applyingPrefs = false
     }
     onJobPathChanged: _refreshMetadataAndColumns()
     Component.onCompleted: {
+        _applyingPrefs = true
         if (folderPath.length > 0) itemsProbe.navigate_to(folderPath)
         _refreshMetadataAndColumns()
-        _restoreNameColWidth()
+        _applyFolderPrefs()
+        _applyingPrefs = false
+        Qt.callLater(function() { root._prefsRestored = true })
     }
     Connections {
         target: itemsProbe
@@ -505,6 +595,62 @@ Rectangle {
                     Layout.preferredHeight: 16
                     Layout.alignment: Qt.AlignVCenter
                 }
+                // List / board switch. Board needs a lane column; when
+                // none is eligible the control stays but dims.
+                SegmentedControl {
+                    id: viewSwitch
+                    visible: root.jobPath.length > 0
+                    enabled: root._eligibleColumns.length > 0
+                    opacity: enabled ? 1 : 0.4
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredHeight: Theme.dim.toolStripHeight
+                    variant: "accent"
+                    value: root.viewMode
+                    onValueChanged: {
+                        if (value === root.viewMode) return
+                        root._setViewMode(value)
+                        // Board refused (no lane column): snap back.
+                        if (value !== root.viewMode) value = root.viewMode
+                    }
+                    // A click assigns `value` and breaks the binding above,
+                    // so panel-driven changes (prefs restore, lane column
+                    // removed) are pushed explicitly.
+                    Connections {
+                        target: root
+                        function onViewModeChanged() { viewSwitch.value = root.viewMode }
+                    }
+                    options: [
+                        { value: "list",  icon: "list-bullets",
+                          tooltip: qsTr("List") },
+                        { value: "board", icon: "kanban",
+                          tooltip: qsTr("Board — lanes from a dropdown, priority or checkbox column") }
+                    ]
+                }
+                // Which column defines the lanes (board mode only).
+                FlatButton {
+                    id: boardColumnButton
+                    visible: root.viewMode === "board"
+                    Layout.preferredHeight: Theme.dim.toolStripHeight
+                    Layout.alignment: Qt.AlignVCenter
+                    iconName: "kanban"
+                    text: qsTr("Board: %1").arg(root._columnLabel(root.laneColumn))
+                    tooltip: qsTr("Column whose options define the lanes — click to change")
+                    onClicked: boardColumnMenu.popup(0, height)
+                    UfbMenu {
+                        id: boardColumnMenu
+                        Instantiator {
+                            model: root._eligibleColumns
+                            onObjectAdded: (i, o) => boardColumnMenu.insertItem(i, o)
+                            onObjectRemoved: (i, o) => boardColumnMenu.removeItem(o)
+                            delegate: MenuItem {
+                                required property var modelData
+                                text: root._columnLabel(modelData)
+                                    + (modelData.columnName === root.boardColumn ? "  \u2713" : "")
+                                onTriggered: root._enterBoard(modelData.columnName)
+                            }
+                        }
+                    }
+                }
                 FlatButton {
                     Layout.preferredHeight: Theme.dim.toolStripHeight
                     Layout.alignment: Qt.AlignVCenter
@@ -568,6 +714,7 @@ Rectangle {
         // JobListPanel column-header pattern.
         Rectangle {
             id: columnHeaderBar
+            visible: root.viewMode === "list"
             Layout.fillWidth: true
             Layout.preferredHeight: 20
             color: Theme.colors.toolbarAlt
@@ -697,8 +844,18 @@ Rectangle {
                             anchors.top: parent.top
                             anchors.bottom: parent.bottom
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                if (modelData) root._toggleSort(modelData.columnName)
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: (mouse) => {
+                                if (!modelData) return
+                                if (mouse.button === Qt.RightButton) {
+                                    // Eligible column -> offer the board view.
+                                    if (root._isBoardEligible(modelData)) {
+                                        columnHeaderMenu.column = modelData
+                                        columnHeaderMenu.popup()
+                                    }
+                                    return
+                                }
+                                root._toggleSort(modelData.columnName)
                             }
                         }
                         Rectangle {
@@ -797,6 +954,7 @@ Rectangle {
         // border on the inner list would re-stack chrome. Surface tone
         // gives the list area its own subtle lift from the bg root.
         Rectangle {
+            visible: root.viewMode === "list"
             Layout.fillWidth: true
             Layout.fillHeight: true
             color: Theme.colors.surface
@@ -998,6 +1156,58 @@ Rectangle {
             }
         }
 
+        // ── Board view — shares the fill slot with the list (Layouts skip
+        // invisible children). Pure view; every write goes through the
+        // panel so the board and the list stay in lockstep.
+        KanbanBoard {
+            id: board
+            visible: root.viewMode === "board"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            items: root._sortedRows
+            metadataByPath: root._metadataByPath
+            trackedSet: root._trackedSet
+            laneColumn: root.laneColumn
+            selectedItemPath: root.selectedItemPath
+            onCardClicked: (path) => {
+                root.selectedItemPath = path
+                root.itemSelected(path)
+            }
+            onCardActivated: (path) => root.itemActivated(path)
+            onCardContextMenu: (path, name) => {
+                root._menuItem = { path: path, name: name }
+                itemMenu.popup()
+            }
+            onStarToggled: (path) => {
+                Subscription.set_item_tracked(
+                    root.jobPath, path, root._basename(root.folderPath),
+                    !root._isTracked(path))
+            }
+            onLaneDropRequested: (paths, valueJson) => {
+                var folderName = root._basename(root.folderPath)
+                if (root.boardColumn === "__tracked__") {
+                    // tracked_items_json fires per write and refreshes
+                    // _trackedSet, which re-partitions the lanes.
+                    var on = (valueJson === "true")
+                    for (var t = 0; t < paths.length; ++t)
+                        Subscription.set_item_tracked(root.jobPath, paths[t], folderName, on)
+                    return
+                }
+                var items = []
+                for (var i = 0; i < paths.length; ++i) {
+                    items.push({ jobPath: root.jobPath, itemPath: paths[i],
+                                 folderName: folderName,
+                                 // Explicit: the Rust side defaults a missing
+                                 // isTracked to true, which would silently
+                                 // track untracked items.
+                                 isTracked: root._isTracked(paths[i]) })
+                }
+                Subscription.bulk_set_item_metadata_field(
+                    JSON.stringify(items), root.boardColumn, valueJson)
+                Qt.callLater(root._refreshMetadataAndColumns)
+            }
+        }
+
         // ── Bottom action row ────────────────────────────────────────
         // Full-flush FlatButtons: Add Item + Manage Metadata. Tonal
         // `toolbar` fill matches the FileBrowser pane footer — both
@@ -1055,6 +1265,19 @@ Rectangle {
         // component); the built-in `closed` signal works and the
         // close-time refresh is good enough UX.
         onClosed: root._refreshMetadataAndColumns()
+    }
+
+    // ── Column header right-click (board entry) ──────────────────────
+    // Root scope, not per header delegate: _refreshColumns tears the
+    // header delegates down, and a menu owned by one would die with it.
+    UfbMenu {
+        id: columnHeaderMenu
+        property var column: null
+        MenuItem {
+            text: qsTr("Show as board grouped by \u201c%1\u201d")
+                .arg(columnHeaderMenu.column ? columnHeaderMenu.column.columnName : "")
+            onTriggered: if (columnHeaderMenu.column) root._enterBoard(columnHeaderMenu.column.columnName)
+        }
     }
 
     // ── Right-click context menu ─────────────────────────────────────

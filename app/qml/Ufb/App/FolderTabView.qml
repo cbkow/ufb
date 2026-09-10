@@ -299,6 +299,10 @@ Item {
             // values; switching folder tabs resets to 50/50.
             SplitView.preferredWidth: outerSplit.width / 2
             SplitView.minimumWidth: 180
+            // Board mode takes the whole tab: the right-hand browsers
+            // hide (below) and the panel becomes the fill item. Back in
+            // list mode the preferredWidth above applies again.
+            SplitView.fillWidth: itemList.viewMode === "board"
 
             onItemSelected: (itemPath) => root._onItemSelected(itemPath)
             onItemActivated: (itemPath) => root._onItemSelected(itemPath)
@@ -310,6 +314,10 @@ Item {
         // avoids destroying / re-creating FileBrowsers as mode flips.
         Item {
             id: rightHost
+            // Hidden while the item panel shows its board; the browsers
+            // keep navigating on card clicks so they are current when
+            // the list comes back.
+            visible: itemList.viewMode !== "board"
             SplitView.fillWidth: true
             SplitView.minimumWidth: 320
 

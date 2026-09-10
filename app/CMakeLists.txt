@@ -113,6 +113,7 @@ qt_add_qml_module(ufb
         qml/Ufb/App/JobView.qml
         qml/Ufb/App/FolderTabView.qml
         qml/Ufb/App/ItemListPanel.qml
+        qml/Ufb/App/KanbanBoard.qml
         qml/Ufb/App/TrackerView.qml
         qml/Ufb/App/ColumnEditor.qml
         qml/Ufb/App/ColumnManagerDialog.qml
