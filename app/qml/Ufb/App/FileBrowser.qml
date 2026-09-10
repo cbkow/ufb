@@ -3209,6 +3209,7 @@ Rectangle {
                 boundsBehavior: Flickable.StopAtBounds
                 topMargin: Theme.dim.listTopPad
                 ScrollBar.vertical: UfbScrollBar {}
+                Keys.onPressed: (event) => root._handleTreeKey(event)
 
                 TapHandler {
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -3594,11 +3595,81 @@ Rectangle {
         }
     }
 
+    // ── Tree keyboard handler ────────────────────────────────────────
+    // The tree keeps its own cursor (treeCurrentPath) over the flat
+    // treeModel, so the list/grid handler's index arithmetic does not
+    // apply. Up/Down/Home/End walk the visible rows, Return mirrors the
+    // row double-click, Space / Escape defer to _handleKey,
+    // whose branches already understand tree mode.
+    function _handleTreeKey(event) {
+        var cur = root._treeIndexOfPath(root.treeCurrentPath)
+        var n = -1
+        if (event.key === Qt.Key_Down)      n = Math.min(treeModel.count - 1, Math.max(0, cur + 1))
+        else if (event.key === Qt.Key_Up)   n = Math.max(0, cur - 1)
+        else if (event.key === Qt.Key_Home) n = 0
+        else if (event.key === Qt.Key_End)  n = treeModel.count - 1
+        if (n >= 0 && treeModel.count > 0) {
+            var path = treeModel.get(n).path
+            if (event.modifiers & Qt.ShiftModifier && root.treeCurrentPath.length > 0) {
+                root._treeSelectRange(root.treeCurrentPath, path)
+            } else {
+                root.treeCurrentPath = path
+                root._setTreeSelection([path])
+            }
+            entryTree.positionViewAtIndex(n, ListView.Contain)
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (cur >= 0) {
+                var node = treeModel.get(cur)
+                if (node.isDir) {
+                    if (node.expanded) tree.collapse(node.path)
+                    else tree.expand(node.path)
+                } else {
+                    FileOps.open_file(node.path)
+                }
+            }
+            event.accepted = true
+            return
+        }
+        if (event.key === Qt.Key_Right || event.key === Qt.Key_Left) {
+            // Disclosure: Right expands / Left collapses the current dir.
+            if (cur >= 0) {
+                var d = treeModel.get(cur)
+                if (d.isDir) {
+                    if (event.key === Qt.Key_Right && !d.expanded) tree.expand(d.path)
+                    if (event.key === Qt.Key_Left && d.expanded) tree.collapse(d.path)
+                }
+            }
+            event.accepted = true
+            return
+        }
+        // (Ctrl+A stays list-only: selectAll works on entriesModel.)
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Escape) {
+            root._handleKey(event)
+        }
+    }
+
     /// Advance the cursor to the next previewable (non-directory) entry in
     /// `dir` (+1 / -1) and return its path, or "" at an edge. Used by the
-    /// lightbox's Left/Right media navigation. List/grid only for now.
+    /// lightbox's Left/Right media navigation. In tree mode it walks the
+    /// visible rows (expanded folders' files included).
     function previewStep(dir) {
-        if (root.viewMode === "tree") return ""
+        if (root.viewMode === "tree") {
+            var t = root._treeIndexOfPath(root.treeCurrentPath) + dir
+            while (t >= 0 && t < treeModel.count) {
+                var tn = treeModel.get(t)
+                if (tn && !tn.isDir) {
+                    root.treeCurrentPath = tn.path
+                    root._setTreeSelection([tn.path])
+                    entryTree.positionViewAtIndex(t, ListView.Contain)
+                    return tn.path
+                }
+                t += dir
+            }
+            return ""
+        }
         var n = root.currentIndex + dir
         while (n >= 0 && n < entriesModel.count) {
             var e = entriesModel.get(n)
