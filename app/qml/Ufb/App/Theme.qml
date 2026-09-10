@@ -66,7 +66,7 @@ QtObject {
         // Logo yellow (assets/icons/ufb*.svg). Used sparingly for
         // identity — the sidebar's bookmark / job / tracker glyphs —
         // never for state or actions (that's accent / success / warning).
-        readonly property color brand:        "#e8c21f"
+        readonly property color brand:        "#d9bd57"
         // Sidebar section identities: the brand yellow marks
         // Subscriptions (the jobs); Bookmarks and Trackers share a warm
         // neutral so only the jobs carry colour (green is taken by the
