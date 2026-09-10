@@ -2005,51 +2005,88 @@ Rectangle {
             color: Theme.colors.bg
 
             // Breadcrumb mode.
+            //
+            // Two zones: a clipping crumb area that takes the slack, and
+            // a fixed-width trailing tail that is ALWAYS empty and
+            // clickable. A long path used to push the crumbs across the
+            // whole row and leave nowhere to click for "edit the whole
+            // path"; now the crumbs clip on the LEFT (the current folder
+            // stays visible at the right, like Finder) and the tail is
+            // reserved.
             RowLayout {
                 anchors.fill: parent
                 spacing: 0
                 visible: !root._pathEditing
 
-                Repeater {
-                    id: crumbsRepeater
-                    model: root._pathSegments
-                    delegate: RowLayout {
-                        required property var modelData
-                        required property int index
+                Item {
+                    id: crumbsClip
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+
+                    // Behind the crumbs: any empty space inside the crumb
+                    // area is also click-to-edit (short paths).
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.IBeamCursor
+                        onClicked: root._beginPathEdit()
+                    }
+
+                    Row {
+                        id: crumbsRow
                         spacing: 0
-                        readonly property bool isLast:
-                            index === root._pathSegments.length - 1
-                        FlatButton {
-                            text: parent.modelData.name
-                            tooltip: parent.modelData.path
-                            padding: 6
-                            // No `checked` on the last crumb - that
-                            // used to draw an accent border (FlatButton
-                            // line 74), which read as a box around the
-                            // tail of the trail. The last crumb is
-                            // already the current folder; no further
-                            // marker needed.
-                            onClicked: {
-                                root.activated()
-                                root.dir.navigate_to(parent.modelData.path)
+                        height: parent.height
+                        // Right-anchor once the trail overflows so the
+                        // tail of the path (current folder) is the part
+                        // that stays visible.
+                        x: Math.min(0, crumbsClip.width - width)
+
+                        Repeater {
+                            id: crumbsRepeater
+                            model: root._pathSegments
+                            delegate: Row {
+                                required property var modelData
+                                required property int index
+                                spacing: 0
+                                height: crumbsRow.height
+                                readonly property bool isLast:
+                                    index === root._pathSegments.length - 1
+                                FlatButton {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: parent.modelData.name
+                                    tooltip: parent.modelData.path
+                                    padding: 6
+                                    // No `checked` on the last crumb - that
+                                    // used to draw an accent border (FlatButton
+                                    // line 74), which read as a box around the
+                                    // tail of the trail. The last crumb is
+                                    // already the current folder; no further
+                                    // marker needed.
+                                    onClicked: {
+                                        root.activated()
+                                        root.dir.navigate_to(parent.modelData.path)
+                                    }
+                                }
+                                Label {
+                                    visible: !parent.isLast
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "›"
+                                    color: Theme.colors.textMuted
+                                    font.pixelSize: Theme.font.sizeBody
+                                    verticalAlignment: Text.AlignVCenter
+                                    width: 12
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
                             }
-                        }
-                        Label {
-                            visible: !parent.isLast
-                            text: "›"
-                            color: Theme.colors.textMuted
-                            font.pixelSize: Theme.font.sizeBody
-                            verticalAlignment: Text.AlignVCenter
-                            Layout.preferredWidth: 12
-                            horizontalAlignment: Text.AlignHCenter
                         }
                     }
                 }
-                // Trailing fillWidth spacer doubles as the click-to-edit
-                // affordance. I-beam cursor signals the implicit
-                // "click here to type a path" gesture.
+                // Reserved trailing tail — never covered by crumbs. I-beam
+                // cursor signals the implicit "click here to type a path"
+                // gesture.
                 Item {
-                    Layout.fillWidth: true
+                    Layout.preferredWidth: Theme.dim.pathBarTail
+                    Layout.minimumWidth: Theme.dim.pathBarTail
                     Layout.fillHeight: true
                     MouseArea {
                         anchors.fill: parent

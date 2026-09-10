@@ -116,6 +116,9 @@ QtObject {
         readonly property int listRowHeight:     24   // browser list + tree
         readonly property int listRowHeightSearch: 36 // list row with parent-path subtitle
         readonly property int itemRowHeight:     28   // project item panel
+        // Breadcrumb path bar: width of the always-empty, click-to-edit
+        // tail on the right that long paths can never cover.
+        readonly property int pathBarTail:       48
 
         // Radii — squared by default; small radius reserved for pills.
         readonly property int radius:            0
