@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "audio_sync_servo.h"
+#include "fractional_resampler.h"
 #include "i_audio_source.h"
 
 #include <QObject>
@@ -22,7 +24,9 @@
 #include <QtQmlIntegration>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
+#include <vector>
 
 namespace ufbplayer {
 
@@ -117,12 +121,12 @@ public:
     QVariantList audioChannelPeaks() const;
     QStringList  audioChannelNames() const;
 
-    // Drift-correction tick. Caller passes the master clock's
-    // current position in seconds (the wall-clock-driven video
-    // clock). If audio's playout position diverges by more than
-    // the drift threshold AND a seek-cooldown has elapsed,
-    // re-seeks the audio decoder to videoPos. No-op otherwise so
-    // the codec stays pristine between corrections.
+    // Sync tick. Caller passes the master clock's current position in
+    // seconds (the video clock, or AudioPreview's own timer). Inside a
+    // ~40 ms band the PI servo trims the render callback's consumption
+    // ratio by up to ±0.2 % (inaudible) so drift converges to ~0 with
+    // no seeks; beyond it the old re-seek tiers remain (soft with a
+    // 1 s cooldown, immediate past 1 s). Call at ~30 Hz or per frame.
     Q_INVOKABLE void update(double videoPositionSeconds);
 
 signals:
@@ -135,6 +139,11 @@ private:
     static void dataCallback(void *device, float *output,
                              uint32_t frameCount, void *userData);
     void processAudio(float *output, uint32_t frameCount);
+    // Re-anchor the playout-position estimate at `srcSec` (source
+    // seconds) and reset the servo. Called from seek(), and from
+    // open()/close() because UFB's QML resumes without a seek after
+    // a source change (QCView always seeks before play).
+    void resetAnchor(double srcSec);
 
     bool                              m_initialized = false;
     // IAudioSource so the same player drives single-stream
@@ -151,19 +160,46 @@ private:
     std::atomic<float>                m_volume{1.0f};
     std::atomic<bool>                 m_muted{false};
 
-    // Audio's playout position is reconstructed from
-    //   playStartPos + (samplesAtPlayStart → samplesNow) / sampleRate
-    // playStartPos snapshots the seek target at the moment play()
-    // started, so the math survives subsequent seeks (each seek
-    // resets both anchors).
-    std::atomic<double>               m_playStartPos{0.0};
-    std::atomic<uint64_t>             m_playStartSamples{0};
+    // ---- Servo state (ported from QCView) ----
+    // Audio playout position is reconstructed in SOURCE seconds:
+    //   audioSrcPos = m_anchorSrcSec
+    //               + srcFramesConsumed / sampleRate
+    //               - device bufferLatencySeconds() × ratio
+    // The anchor is owned by seek() / resetAnchor() (play() does not
+    // re-anchor: consumption simply pauses with the device while
+    // stopped, so the estimate stays valid across pause/play).
+    // Consumption counts REAL ring frames drained by the render
+    // callback — silence padding on underrun does not advance it, and
+    // while a decoder seek is pending the callback outputs silence
+    // without consuming, so pre-flush frames never count against a
+    // fresh anchor.
+    double                            m_anchorSrcSec = 0.0;   // UI thread
+    std::atomic<uint64_t>             m_srcFramesConsumed{0};
+
+    // Controller runs on the UI thread in update(); the resulting
+    // ratio crosses to the render callback through this atomic.
+    AudioSyncServo                    m_servo;                // UI thread
+    std::atomic<float>                m_servoRatio{1.0f};
+
+    // Render-callback-only: fractional resampler + its source scratch
+    // (sized once in initialize() from the device's real buffer frame
+    // count — WASAPI can request the full buffer in one callback).
+    FractionalResampler               m_servoResampler;
+    std::vector<float>                m_servoScratch;
+
+    // dt source for the servo's PI terms (update cadence is
+    // irregular). UI thread only.
+    std::chrono::steady_clock::time_point m_lastServoUpdate{};
+    bool                              m_lastServoUpdateValid = false;
+    int                               m_servoLogCounter = 0;
 
     // A/V sync offset in milliseconds. Applied at seek() — the
     // decoder is told to fetch samples for `videoTime - offsetMs/1000`
-    // while m_playStartPos stays anchored at videoTime so the drift
-    // loop in update() compares against the user-visible video clock
-    // unmodified. End result: audio plays `offsetMs` later than video
+    // and the anchor lands in that same source-seconds domain;
+    // update() compares against `videoPos - offset` so both sides of
+    // the drift subtraction stay in one clock domain, which makes the
+    // offset take effect continuously rather than only on the next
+    // seek. End result: audio plays `offsetMs` later than video
     // (positive offset = compensates for video display + pipeline lag).
     std::atomic<int>                  m_syncOffsetMs{0};
 };

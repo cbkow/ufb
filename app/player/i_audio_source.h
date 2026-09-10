@@ -78,6 +78,13 @@ public:
     // AudioPlayer's drift-correction cooldown.
     virtual double secondsSinceLastSeek() const = 0;
 
+    // True between seek() and the decode thread's flushAndSeek():
+    // the ring still holds pre-flush audio. AudioPlayer's render
+    // callback outputs silence WITHOUT consuming while this is set so
+    // those frames never count against the fresh position anchor, and
+    // update() skips the servo tick.
+    virtual bool seekPending() const = 0;
+
     // ---- Routing ----
     // Per-clip channel routing mode (ufbplayer::AudioRoutingMode cast to
     // int: 0 = Auto, 1 = Downmix5_1, 2 = Stereo7_8). Setter is

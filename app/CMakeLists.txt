@@ -50,6 +50,8 @@ qt_add_executable(ufb
     # itself is a QML element — see the qt_add_qml_module SOURCES below.
     player/audio_routing.h
     player/audio_ring_buffer.h
+    player/audio_sync_servo.h       # A/V sync PI controller (ported from QCView)
+    player/fractional_resampler.h   # RT-safe Catmull-Rom drain for the servo
     player/i_audio_source.h
     player/audio_decoder.cpp
     player/audio_decoder.h

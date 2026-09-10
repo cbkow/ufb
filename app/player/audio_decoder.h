@@ -84,6 +84,7 @@ public:
     // a too-frequent loop can thrash. Returns a large value if no
     // seek has happened yet.
     double secondsSinceLastSeek() const override;
+    bool   seekPending() const override { return m_seekRequested.load(); }
 
     // Per-clip channel routing mode. `mode` matches the
     // ufbplayer::AudioRoutingMode enum in media_item.h (0 = Auto, 1 =

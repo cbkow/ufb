@@ -78,6 +78,7 @@ public:
     const AudioFormat &format() const override { return m_outputFormat; }
 
     double secondsSinceLastSeek() const override;
+    bool   seekPending() const override { return m_seekRequested.load(); }
 
     void setRoutingMode(int mode) override;
     int  routingMode() const override { return m_routingMode.load(); }

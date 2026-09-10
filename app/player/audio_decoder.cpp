@@ -36,6 +36,13 @@ static_assert(static_cast<int>(AudioRoutingMode::Stereo7_8)  == 2,
 
 namespace {
 
+// Ring capacity + producer depth target. 192,000 B = ~500 ms of
+// 48 kHz stereo f32; depth target 38,400 B = ~100 ms. Values match
+// MultiStreamAudioDecoder's policy so both decoder shapes present
+// the same latency profile to the sync servo.
+constexpr std::size_t kRingBytes         = 192000;
+constexpr std::size_t kBackPressureBytes = 38400;
+
 // Build a 2×N output-from-input downmix matrix per routing mode +
 // source channel count. Returns nullopt when no custom matrix is
 // needed (FFmpeg's default swr behavior is correct: mono→stereo,
@@ -211,7 +218,10 @@ bool AudioDecoder::open(const QString &path)
         return false;
     }
     m_hasAudio = true;
-    m_ring = std::make_unique<AudioRingBuffer>();
+    // ~500 ms capacity (matches MultiStreamAudioDecoder's policy) —
+    // the old 2 MB default kept ~5.5 s buffered, which is how much
+    // stale audio a mute or a missed sync could play back.
+    m_ring = std::make_unique<AudioRingBuffer>(kRingBytes);
     m_isOpen = true;
     qInfo("AudioDecoder: opened %s — %d Hz, %d ch, %.2fs",
           qPrintable(path), m_sourceSampleRate, m_sourceChannels, m_duration);
@@ -569,8 +579,9 @@ void AudioDecoder::decodeThreadFn()
                 m_seekRequested = false;
             }
         }
-        // Back-pressure: ring near-full.
-        if (m_ring->availableWrite() < 8192) {
+        // Back-pressure: depth target rather than near-full — queue
+        // depth is the producer-side latency the servo has to absorb.
+        if (m_ring->availableRead() > kBackPressureBytes) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
