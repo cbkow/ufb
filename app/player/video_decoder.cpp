@@ -2,6 +2,7 @@
 
 #include "decoder_cleanup_queue.h"
 #include "scrub_decoder.h"
+#include "sws_rgba_image.h"
 #include <memory>
 
 #include <QDebug>
@@ -1031,13 +1032,13 @@ void VideoDecoder::publishCpuFrame(AVFrame *frame)
         m_loggedCpuFormat = true;
     }
 
-    QImage rgba(frame->width, frame->height, QImage::Format_RGBA8888);
-    uint8_t *dst[4] = { rgba.bits(), nullptr, nullptr, nullptr };
-    int dstStride[4] = { static_cast<int>(rgba.bytesPerLine()), 0, 0, 0 };
-
-    sws_scale(m_sws,
-              frame->data, frame->linesize, 0, frame->height,
-              dst, dstStride);
+    // Padded-destination helper — a bare QImage overflows on odd widths
+    // (see sws_rgba_image.h).
+    QImage rgba = swsFrameToRgbaImage(m_sws, frame);
+    if (rgba.isNull()) {
+        qWarning("VideoDecoder: sws_scale failed; frame dropped");
+        return;
+    }
 
     const int64_t pts = framePresentationPts(frame);
     // Stamp the FrameHandle with PTS in microseconds — common

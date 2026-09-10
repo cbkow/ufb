@@ -121,11 +121,15 @@ private:
 
     // `blend` enables straight-alpha "over" compositing so formats that
     // carry real alpha (ProRes 4444 → AYUV on macOS, the Vulkan YUV
-    // compositor on Windows) blend against the cleared backdrop instead
-    // of writing transparent pixels as opaque RGB (which read as jagged,
-    // un-composited edges). Opaque formats emit alpha=1 so the blend is a
-    // no-op; the CPU passthrough pipeline keeps blend OFF so a stray
-    // alpha=0 from a software frame can never make normal video vanish.
+    // compositor on Windows, and yuva*/rgba software frames on the CPU
+    // path — every ProRes scrub frame on Windows is one) blend against
+    // the cleared backdrop instead of writing transparent pixels as
+    // opaque RGB (which read as jagged, un-composited edges). Opaque
+    // formats emit alpha=1 so the blend is a no-op. The CPU path used to
+    // keep blend OFF out of fear that a stray alpha=0 could blank normal
+    // video; swscale always writes alpha=255 for alpha-less sources, so
+    // that fear was unfounded and the opaque draw was what dropped alpha
+    // the moment a 4444 clip was scrubbed.
     std::unique_ptr<QRhiGraphicsPipeline> makePipeline(
         QRhi *r, const char *frag, QRhiShaderResourceBindings *srb,
         bool blend = false)
@@ -232,7 +236,7 @@ private:
                 m_srbCpu->create();
                 m_pipeCpu = makePipeline(
                     r, ":/ufb/player/shaders/passthrough.frag.qsb",
-                    m_srbCpu.get());
+                    m_srbCpu.get(), /*blend*/ true);   // yuva/rgba CPU frames
             }
             const QImage up = (img.format() == QImage::Format_RGBA8888)
                                   ? img

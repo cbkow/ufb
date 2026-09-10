@@ -26,7 +26,6 @@ work is incremental polish under the **1.0.x** series.
 | Rust↔Qt bridge (cxx-qt QObjects exposed to QML) | `bindings/` |
 | NAS mount + VFS + credential store + SMB session | Standalone Rust agent (`agent/`) launched as a child process |
 | Native thumbnails (PSD/EXR/PDF/video/system icons) | C++ in `app/thumbnails/` (psd_sdk, OpenEXR, PDFium, FFmpeg) |
-| Native credential prompt + store | Win32 `CredUIPromptForWindowsCredentialsW` (`app/CredentialPrompt.cpp`) / macOS Keychain + NetFS auth |
 
 ## Requirements
 

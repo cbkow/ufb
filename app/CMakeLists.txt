@@ -36,6 +36,7 @@ qt_add_executable(ufb
     player/timecode_formatter.h
     player/scrub_decoder.cpp
     player/scrub_decoder.h
+    player/sws_rgba_image.h
     # Audio subsystem (ported from QCView, namespace ufbplayer). AudioPlayer
     # itself is a QML element — see the qt_add_qml_module SOURCES below.
     player/audio_routing.h
