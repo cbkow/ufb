@@ -325,7 +325,7 @@ Rectangle {
                             ? model.icon
                             : (model.isProjectFolder ? "briefcase" : "star")
                         size: Theme.icon.sizeToolbar
-                        color: Theme.colors.textMuted
+                        color: Theme.colors.brand
                     }
                     Label {
                         Layout.fillWidth: true
@@ -440,7 +440,7 @@ Rectangle {
                     Icon {
                         name: "clipboard-text"
                         size: Theme.icon.sizeToolbar
-                        color: Theme.colors.textMuted
+                        color: Theme.colors.brand
                         Layout.alignment: Qt.AlignVCenter
                     }
                     Label {
@@ -522,7 +522,7 @@ Rectangle {
                 Icon {
                     name: "list-checks"
                     size: Theme.icon.sizeToolbar
-                    color: Theme.colors.textMuted
+                    color: Theme.colors.brand
                 }
                 Label {
                     text: qsTr("All Tracked")
@@ -552,7 +552,7 @@ Rectangle {
                 Icon {
                     name: "stack"
                     size: Theme.icon.sizeToolbar
-                    color: Theme.colors.textMuted
+                    color: Theme.colors.brand
                 }
                 Label {
                     text: qsTr("Transcode Queue")

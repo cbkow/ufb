@@ -63,6 +63,10 @@ QtObject {
         // future visual pass wants to re-dim selections, change
         // this one line.
         readonly property color accentSelected: accent
+        // Logo yellow (assets/icons/ufb*.svg). Used sparingly for
+        // identity — the sidebar's bookmark / job / tracker glyphs —
+        // never for state or actions (that's accent / success / warning).
+        readonly property color brand:        "#e8c21f"
         readonly property color success:      "#4cb050"
         readonly property color warning:      "#f5a623"
         readonly property color error:        "#c04040"
