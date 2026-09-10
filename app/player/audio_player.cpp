@@ -19,6 +19,7 @@ extern "C" {
 #include <QFileInfo>
 #include <QtGlobal>
 #include <QtLogging>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -119,6 +120,8 @@ bool AudioPlayer::initialize()
         const std::size_t maxFrames =
             static_cast<std::size_t>(m_device->bufferFrameCount()) + 16;
         m_servoScratch.assign(maxFrames * 2 * 2, 0.0f);
+        m_servoCarry.assign(kServoCarryMax * 2, 0.0f);
+        m_servoCarryFrames = 0;
     }
 #endif
     m_initialized = true;
@@ -198,6 +201,10 @@ void AudioPlayer::resetAnchor(double srcSec)
 {
     m_anchorSrcSec = srcSec;
     m_srcFramesConsumed.store(0, std::memory_order_relaxed);
+    // Carried look-ahead frames belong to the pre-seek stream; the
+    // render callback drops them (and the resampler history) on its
+    // next pass rather than us touching render-thread state here.
+    m_servoCarryInvalidate.store(true, std::memory_order_release);
     m_servo.reset();
     m_servoRatio.store(1.0f, std::memory_order_relaxed);
     m_lastServoUpdateValid = false;
@@ -446,14 +453,33 @@ void AudioPlayer::processAudio(float *output, uint32_t frameCount)
         std::memset(output, 0, outBytes);
         return;
     }
-    // read() pads underrun with silence; count only REAL frames —
-    // the stream doesn't advance for the padded region, and the
-    // position estimate must not either.
+    if (m_servoCarryInvalidate.exchange(false, std::memory_order_acq_rel)) {
+        m_servoCarryFrames = 0;
+        m_servoResampler.reset();
+    }
+    // Source window = look-ahead frames carried from the previous
+    // callback + fresh frames from the ring. read() pads underrun with
+    // silence; count only REAL frames — the stream doesn't advance for
+    // the padded region, and the position estimate must not either.
+    float *scratch = m_servoScratch.data();
+    const size_t carry = std::min(m_servoCarryFrames, srcNeeded);
+    if (carry)
+        std::memcpy(scratch, m_servoCarry.data(), carry * 2 * sizeof(float));
+    const size_t fresh = srcNeeded - carry;
     const size_t framesRead =
-        m_decoder->read(m_servoScratch.data(), srcNeeded);
-    m_servoResampler.process(m_servoScratch.data(), srcNeeded,
-                             output, frameCount, ratio);
-    m_srcFramesConsumed.fetch_add(framesRead, std::memory_order_relaxed);
+        fresh ? m_decoder->read(scratch + carry * 2, fresh) : 0;
+    const size_t realFrames = carry + framesRead;
+    const size_t advanced = m_servoResampler.process(
+        scratch, srcNeeded, output, frameCount, ratio);
+    // Frames past `advanced` were read only as interpolation look-ahead;
+    // keep the real ones for the next callback instead of dropping them.
+    const size_t consumedReal = std::min(advanced, realFrames);
+    const size_t newCarry = std::min(realFrames - consumedReal, kServoCarryMax);
+    if (newCarry)
+        std::memcpy(m_servoCarry.data(), scratch + consumedReal * 2,
+                    newCarry * 2 * sizeof(float));
+    m_servoCarryFrames = newCarry;
+    m_srcFramesConsumed.fetch_add(consumedReal, std::memory_order_relaxed);
 
     // Muted AFTER consuming: the stream keeps advancing with the
     // clock, so unmute plays current audio, not a stale buffer.

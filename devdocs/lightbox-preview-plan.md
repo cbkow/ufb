@@ -352,6 +352,54 @@ minimal — these are decode/audio-layer units).
 
 Append newest entries at the top. Each milestone updates this as part of its commit.
 
+### 2026-09-10 — macOS session: 1.2.0 verified on Mac + audio servo carry fix
+Followed `devdocs/macos-session-primer-2026-09-10.md`. FFmpeg 9.0.1 rebuilt
+from source (`rm -rf external/ffmpeg /tmp/ufb-ffmpeg-build` first — the
+setup script keeps an existing tree); all three `scripts/ffmpeg-patches/`
+applied cleanly on the release tarball. The tree compiled on clang with
+**zero source changes**; the bundle carries the 9.0 majors (avcodec 63,
+avformat 63, avutil 61, avfilter 12, swscale 10, swresample 7) — clear
+stale `libav*`/`libsw*` from `UFB.app/Contents/Frameworks` before the first
+build, the copy step only adds. Verification (synthetic clips from the
+vendored ffmpeg + real job EXRs; driven by a throwaway QML harness that
+opened the lightbox from argv and `grabToImage`'d it — see the session
+memory for the recipe):
+- ProRes 4444 alpha: VideoToolbox zero-copy (`y416`), composites over the
+  panel both playing and after Q/E steps (scrub path). H.264 / HEVC via VT
+  `420v`. Portrait 1080-wide: step, reverse-step, fast-seek to tail, no crash.
+- Rotation 90 / 180 / 270 all distinct and correct (FFmpeg's
+  `-display_rotation` is CCW-positive: 90 puts the source top-left at the
+  bottom-left); SAR 4:3 un-squeezes to 16:9.
+- Animated GIF → CPU `bgra`, animated WebP (`webp_anim`) → CPU `argb`, both
+  with a frame count (19 / 2 s @ 10 fps); static GIF / WebP stay on the
+  image preview. `libqgif` / `libqwebp` are in `PlugIns/imageformats`.
+- Blender single-layer EXR previews via `ViewLayer.Combined`; the
+  multi-layer HeadTrack file shows the six-layer contact sheet.
+- Minimize with a video playing closes the lightbox; still closed on restore.
+- WAV audio-only plays to the tail, no seek thrash. `Add Note` Rust test
+  passes on mac.
+- **Audio servo (shared bug, fixed here):** the servo could not hold —
+  drift crept ~25 ms per 10 s and re-seeked every 10–15 s (ProRes and
+  H.264 alike). Root cause in `AudioPlayer::processAudio`:
+  `FractionalResampler::sourceFramesNeeded()` asks for one frame more than
+  `process()` advances past (Catmull-Rom look-ahead), the ring read is
+  destructive, and the caller counted every frame read as consumed — one
+  source sample dropped per callback. At CoreAudio's 512-frame callbacks
+  that is +0.195 %, i.e. the servo's whole ±0.2 % authority (a standalone
+  ramp test showed 199 discontinuities in 200 callbacks, read/advanced =
+  1.00195). Fix: carry the un-advanced look-ahead frames into the next
+  callback (`m_servoCarry`, invalidated by `resetAnchor()` through an
+  atomic flag the render thread honours) and count `process()`'s advance.
+  After the fix both clips run 18 s+ with no re-seeks past the start-up
+  settle, ratio within ±0.001. **QCView-Player has the identical code**
+  (`src/audio/audio_player.cpp` + `fractional_resampler.h`) and the same
+  defect; Windows WASAPI callback sizes differ so it showed less there.
+- Observed, not changed (shared behaviour): start-up does a −63 ms re-seek
+  at `target=−0.042` (currentFrame is −1 before the first frame publishes)
+  and then one ±46 ms re-seek pair inside the first ~2 s of every clip
+  before settling. A `target < 0` guard plus a warm-up grace in
+  `AudioPlayer::update` would remove two audible jumps per clip.
+
 ### 2026-09-10 — QCView catch-up (Windows session; macOS unverified)
 QCView-Player moved a long way after the June 2 fork (FFmpeg 9.0.1, Vulkan
 stability, zero-copy D3D11VA, audio servo). Ported the lightbox-relevant

@@ -186,6 +186,18 @@ private:
     // count — WASAPI can request the full buffer in one callback).
     FractionalResampler               m_servoResampler;
     std::vector<float>                m_servoScratch;
+    // Look-ahead carry: sourceFramesNeeded() asks for 1–2 frames more
+    // than process() advances past (Catmull-Rom needs p2/p3 beyond the
+    // last output sample). The ring read is destructive, so without a
+    // carry those frames were dropped every callback — one skipped
+    // sample per 512-frame CoreAudio callback = the stream (and the
+    // consumption counter) running 0.2 % fast, which ate the servo's
+    // entire ±0.2 % authority and forced a re-seek every ~10 s. Render
+    // thread only; resetAnchor() invalidates it via the atomic flag.
+    static constexpr std::size_t      kServoCarryMax = 8;
+    std::vector<float>                m_servoCarry;
+    std::size_t                       m_servoCarryFrames = 0;
+    std::atomic<bool>                 m_servoCarryInvalidate{false};
 
     // dt source for the servo's PI terms (update cadence is
     // irregular). UI thread only.
