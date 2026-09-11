@@ -10,6 +10,33 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.2.0</title>
+      <sparkle:version>1.2.0</sparkle:version>
+      <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.2.0</h2>
+<p><b>macOS installs as a signed package now.</b> This release replaces the drag-install disk image with a notarized .pkg, and future macOS updates install themselves from inside UFB (you will be asked for your password). An <i>Uninstall UFB.command</i> ships alongside the app. UFB no longer registers itself as a login item on macOS.</p>
+<p><b>Preview player</b></p>
+<ul>
+  <li>FFmpeg 9.0.1 with DNxHR 444, MXF RGBA and ProRes RAW tagging fixes</li>
+  <li>Continuous audio/video sync: no more periodic audio jumps during playback</li>
+  <li>Rotated (phone) clips display upright; anamorphic clips un-squeeze; RGB legal range expands correctly</li>
+  <li>Alpha stays composited while scrubbing ProRes 4444; odd-width clips no longer crash on step</li>
+  <li>Animated GIF and WebP open in the video player with a frame count</li>
+  <li>Filename caption on video; minimizing or hiding the window closes the preview</li>
+  <li>Single-layer Blender EXRs preview through their named layer</li>
+  <li>Windows: zero-copy D3D11VA decode for H.264, HEVC, AV1 and VP9</li>
+</ul>
+<p><b>Browser</b></p>
+<ul>
+  <li>Kanban board view for the folder item panel</li>
+  <li>Tree view: Space previews, the lightbox steps through rows</li>
+  <li>"Add Note" creates a real minNotes document</li>
+  <li>Sidebar tones, list row rhythm, breadcrumb tail and column-resize fixes; revised 3D and AE project templates</li>
+</ul>]]></description>
+      <pubDate>Fri, 11 Sep 2026 07:53:22 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.2.0/UFB-1.2.0-x64.exe" type="application/octet-stream" sparkle:edSignature="gZi7hGNp5Bt0XSE4b11XY/nl9clPVOd/GrgVAY5VRid8chsGFywyCsGZGSVVtIMugT9/afOk2zlnSV5znM/ZCA==" length="187473498" />
+    </item>
+    <item>
       <title>Version 1.1.6</title>
       <sparkle:version>1.1.6</sparkle:version>
       <sparkle:shortVersionString>1.1.6</sparkle:shortVersionString>
