@@ -16,9 +16,20 @@
 
 pragma Singleton
 import QtQuick
+import "PhosphorIcons.js" as PhosphorIcons
 
 QtObject {
     id: theme
+
+    /// image:// URL for a Phosphor icon, for controls that take an
+    /// `icon.source` (MenuItem / Action / Button) instead of hosting an
+    /// Icon element. Backed by the C++ ufb-glyph provider; tinted by
+    /// the control's icon.color. Unknown names yield "" (no icon).
+    function glyphUrl(name) {
+        var ch = PhosphorIcons.code[name]
+        if (!ch) return ""
+        return "image://ufb-glyph/" + ch.charCodeAt(0).toString(16)
+    }
 
     // ── Color palette ────────────────────────────────────────────────
     readonly property QtObject colors: QtObject {

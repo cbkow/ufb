@@ -418,7 +418,7 @@ ApplicationWindow {
     ///   0..F-1            = filesTabs[0..F-1]   (DualBrowserViews)
     ///   F..F+J-1          = openJobs[0..J-1]    (JobViews)
     ///   F+J               = aggregated TrackerView (always present)
-    ///   F+J+1             = TranscodeQueue          (always present)
+    ///   F+J+1             = TaskQueue               (always present)
     /// The tab-strip controls (`*TabOpen`) gate which pills show in
     /// the visual tab bar; the underlying StackLayout slots are
     /// fixed and the index helpers below resolve to those slots.
@@ -746,6 +746,16 @@ ApplicationWindow {
         interval: 3500
         onTriggered: window._lastOpStatus = ""
     }
+    /// Background jobs (transcode / extract / zip) in footer-chip
+    /// shape. Their completions reuse _lastOpStatus so "Extracted
+    /// sample.zip" lingers exactly like "3 file(s) copied".
+    TaskJobsModel {
+        id: taskJobs
+        onCompleted: (message) => {
+            window._lastOpStatus = message
+            _opStatusTimer.restart()
+        }
+    }
     Connections {
         target: FileOps
         function onActive_ops_jsonChanged() {
@@ -758,7 +768,7 @@ ApplicationWindow {
                              : prev.operation === "move"   ? qsTr("moved")
                              : prev.operation === "delete" ? qsTr("deleted")
                              : qsTr("done")
-                    window._lastOpStatus = qsTr("✓ %1 %2 file(s)")
+                    window._lastOpStatus = qsTr("%1 %2 file(s)")
                         .arg(prev.itemsTotal || prev.itemsDone || 0)
                         .arg(verb)
                     _opStatusTimer.restart()
@@ -969,7 +979,9 @@ ApplicationWindow {
         trackerTabOpen = false
     }
 
-    /// Open or focus the Transcode Queue top-level tab.
+    /// Open or focus the Task Queue top-level tab (transcode +
+    /// archive jobs; the property names keep the original
+    /// "transcode" spelling for tab-state compatibility).
     function openTranscodeTab() {
         if (!transcodeTabOpen) transcodeTabOpen = true
         // Tab sits at openJobs.count + 1 (Files) + maybe Tracker.
@@ -1167,6 +1179,17 @@ ApplicationWindow {
             onOpenJobRequested: (jobPath, jobName) => window.openJobTab(jobPath, jobName)
             onOpenTrackerRequested: () => window.openTrackerTab()
             onOpenTranscodeRequested: () => window.openTranscodeTab()
+        }
+
+        // Archive jobs (extract / compress) finish on their own
+        // singleton, but every directory view listens for refreshes on
+        // FileOps.dirs_changed only. Re-broadcast so the parent folder
+        // of a finished archive job refreshes like any other file op.
+        Connections {
+            target: Archive
+            function onDirs_changed(dirsJson) {
+                FileOps.notify_dirs_changed(dirsJson)
+            }
         }
 
         ColumnLayout {
@@ -1448,8 +1471,12 @@ ApplicationWindow {
                         sourceComponent: trackerTabComponent
                     }
 
-                    // Transcode Queue tab (singleton — opens via
-                    // Sidebar's "Transcode Queue" entry).
+                    // Task Queue tab (singleton — opens via Sidebar's
+                    // "Task Queue" entry or a footer task chip; queuing
+                    // a job never switches tabs). It wears an
+                    // active-count chip. Internally still the
+                    // "transcode" tab: the persisted tab-state key and
+                    // the index arithmetic below predate archive jobs.
                     Loader {
                         active: window.transcodeTabOpen
                         sourceComponent: transcodeTabComponent
@@ -1534,7 +1561,7 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 6
                         Icon {
-                            name: "film-strip"
+                            name: "stack"
                             size: Theme.icon.sizeToolbar
                             color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
                                 ? Theme.colors.textBright
@@ -1542,13 +1569,31 @@ ApplicationWindow {
                             anchors.verticalCenter: parent.verticalCenter
                         }
                         Label {
-                            text: qsTr("Transcode")
+                            text: qsTr("Tasks")
                             color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
                                 ? Theme.colors.textBright
                                 : Theme.colors.textMuted
                             font.pixelSize: Theme.font.sizeBody
                             font.bold: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
                             anchors.verticalCenter: parent.verticalCenter
+                        }
+                        // Active-job count chip — keeps the queue
+                        // discoverable once the footer chips have gone.
+                        Rectangle {
+                            visible: taskJobs.activeCount > 0
+                            width: Math.max(16, chipLabel.implicitWidth + 8)
+                            height: 16
+                            radius: 8
+                            color: Theme.colors.accent
+                            anchors.verticalCenter: parent.verticalCenter
+                            Label {
+                                id: chipLabel
+                                anchors.centerIn: parent
+                                text: taskJobs.activeCount
+                                color: Theme.colors.textBright
+                                font.pixelSize: 10
+                                font.bold: true
+                            }
                         }
                     }
                     Rectangle {
@@ -1726,7 +1771,6 @@ ApplicationWindow {
                         // Shared inner-split default (Option A).
                         // 0 means "use 50/50".
                         initialLeftPaneWidth: window._filesLeftWidth
-                        onOpenTranscodeQueueRequested: window.openTranscodeTab()
                         onOpenInNewTabRequested: (path) => window.addFilesTab(path)
                         // Persist on pane navigation. Debounced via the
                         // shared timer so a chain of clicks doesn't
@@ -1761,7 +1805,6 @@ ApplicationWindow {
                     model: openJobs
                     delegate: JobView {
                         onOpenInNewTabRequested: (path) => window.addFilesTab(path)
-                        onOpenTranscodeQueueRequested: window.openTranscodeTab()
                     }
                 }
 
@@ -1779,10 +1822,10 @@ ApplicationWindow {
                     onGoToItemRequested: (jp, jn, fn, ip) => window.goToTrackedItem(jp, jn, fn, ip)
                 }
 
-                // Transcode Queue — same reasoning. Direct embed so
-                // StackLayout sizes it correctly when its tab is
-                // selected.
-                TranscodeQueue {
+                // Task Queue (transcode + archive jobs) — same
+                // reasoning. Direct embed so StackLayout sizes it
+                // correctly when its tab is selected.
+                TaskQueue {
                     // "Open in Browser" — switch to the most-recent
                     // Files tab and navigate its active pane to the
                     // output file's parent folder, with the file
@@ -1870,12 +1913,13 @@ ApplicationWindow {
                         id: chipRow
                         anchors.centerIn: parent
                         spacing: 4
-                        Label {
-                            text: modelData.operation === "copy"   ? "📋"
-                                : modelData.operation === "move"   ? "✂️"
-                                : modelData.operation === "delete" ? "🗑️"
-                                : "⏳"
-                            font.pixelSize: Theme.font.sizeTiny
+                        Icon {
+                            name: modelData.operation === "copy"   ? "copy"
+                                : modelData.operation === "move"   ? "scissors"
+                                : modelData.operation === "delete" ? "trash"
+                                : "hourglass"
+                            size: 11
+                            color: Theme.colors.text
                         }
                         Label {
                             text: qsTr("%1 / %2")
@@ -1909,11 +1953,164 @@ ApplicationWindow {
                     }
                 }
             }
-            Label {
-                visible: window._activeOps.length === 0 && window._lastOpStatus.length > 0
-                text: window._lastOpStatus
-                color: Theme.colors.textSubtle
-                font.pixelSize: Theme.font.sizeSmall
+            // ── Background-task chips ───────────────────────────────
+            // Same chip idiom for transcode / extract / zip jobs, one
+            // per job, capped at three plus a "+N" overflow chip.
+            // Clicking any chip opens the Tasks tab. Failures get an
+            // error-tinted chip that stays until clicked.
+            Repeater {
+                model: taskJobs.active.slice(0, 3)
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.preferredHeight: 16
+                    Layout.preferredWidth: taskChipRow.implicitWidth + 12
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 8
+                    color: taskChipMa.containsMouse
+                        ? Theme.colors.surfaceHover : Theme.colors.accentMuted
+                    RowLayout {
+                        id: taskChipRow
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Icon {
+                            name: modelData.kind === "transcode" ? "film-strip"
+                                : modelData.kind === "compress"  ? "file-zip"
+                                : "file-archive"
+                            size: 11
+                            color: Theme.colors.text
+                        }
+                        Label {
+                            text: modelData.title
+                            color: Theme.colors.text
+                            font.pixelSize: Theme.font.sizeTiny
+                            elide: Text.ElideMiddle
+                            Layout.preferredWidth: Math.min(implicitWidth, 110)
+                        }
+                        Rectangle {
+                            Layout.preferredWidth: 60
+                            Layout.preferredHeight: 4
+                            radius: 2
+                            color: Theme.colors.toolbarAlt
+                            Rectangle {
+                                height: parent.height
+                                width: parent.width * Math.max(0,
+                                    Math.min(1, (modelData.progress || 0) / 100))
+                                radius: 2
+                                color: Theme.colors.accent
+                            }
+                        }
+                        Label {
+                            text: Math.round(modelData.progress || 0) + "%"
+                            color: Theme.colors.textMuted
+                            font.pixelSize: Theme.font.sizeTiny
+                            font.family: Theme.font.mono
+                            Layout.preferredWidth: 28
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                    MouseArea {
+                        id: taskChipMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: window.openTranscodeTab()
+                        ToolTip.text: qsTr("%1 %2 — open Tasks")
+                            .arg(modelData.verb).arg(modelData.title)
+                        ToolTip.visible: containsMouse
+                        ToolTip.delay: 500
+                    }
+                }
+            }
+            Rectangle {
+                visible: taskJobs.active.length > 3
+                Layout.preferredHeight: 16
+                Layout.preferredWidth: moreLabel.implicitWidth + 12
+                Layout.alignment: Qt.AlignVCenter
+                radius: 8
+                color: moreMa.containsMouse
+                    ? Theme.colors.surfaceHover : Theme.colors.accentMuted
+                Label {
+                    id: moreLabel
+                    anchors.centerIn: parent
+                    text: qsTr("+%1").arg(taskJobs.active.length - 3)
+                    color: Theme.colors.text
+                    font.pixelSize: Theme.font.sizeTiny
+                    font.family: Theme.font.mono
+                }
+                MouseArea {
+                    id: moreMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: window.openTranscodeTab()
+                    ToolTip.text: qsTr("%1 more queued — open Tasks")
+                        .arg(taskJobs.active.length - 3)
+                    ToolTip.visible: containsMouse
+                    ToolTip.delay: 500
+                }
+            }
+            Repeater {
+                model: taskJobs.failed
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.preferredHeight: 16
+                    Layout.preferredWidth: failChipRow.implicitWidth + 12
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 8
+                    color: failChipMa.containsMouse
+                        ? Theme.colors.error
+                        : Qt.rgba(Theme.colors.error.r, Theme.colors.error.g,
+                                  Theme.colors.error.b, 0.35)
+                    RowLayout {
+                        id: failChipRow
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Icon {
+                            name: "x"
+                            size: 11
+                            color: Theme.colors.textBright
+                        }
+                        Label {
+                            text: modelData.title
+                            color: Theme.colors.textBright
+                            font.pixelSize: Theme.font.sizeTiny
+                            elide: Text.ElideMiddle
+                            Layout.preferredWidth: Math.min(implicitWidth, 140)
+                        }
+                    }
+                    MouseArea {
+                        id: failChipMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            taskJobs.acknowledge(modelData.id)
+                            window.openTranscodeTab()
+                        }
+                        ToolTip.text: modelData.error.length > 0
+                            ? qsTr("%1 — click to open Tasks").arg(modelData.error)
+                            : qsTr("Failed — click to open Tasks")
+                        ToolTip.visible: containsMouse
+                        ToolTip.delay: 300
+                    }
+                }
+            }
+            RowLayout {
+                visible: window._activeOps.length === 0
+                    && taskJobs.active.length === 0
+                    && window._lastOpStatus.length > 0
+                spacing: 4
+                Icon {
+                    name: "check"
+                    size: 11
+                    color: Theme.colors.success
+                    Layout.alignment: Qt.AlignVCenter
+                }
+                Label {
+                    text: window._lastOpStatus
+                    color: Theme.colors.textSubtle
+                    font.pixelSize: Theme.font.sizeSmall
+                }
             }
 
             Rectangle {

@@ -21,6 +21,7 @@ pub mod local_mounts;
 pub mod runtime;
 
 pub mod services {
+    pub mod archive;
     pub mod backup;
     pub mod bookmarks;
     pub mod columns;

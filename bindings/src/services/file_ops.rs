@@ -285,6 +285,12 @@ pub mod qobject {
         /// how cross-pane moves and sidebar-drop targets stay in sync.
         #[qsignal]
         fn dirs_changed(self: Pin<&mut FileOps>, dirs_json: QString);
+
+        /// Re-broadcast `dirs_changed` on behalf of another service
+        /// (Archive jobs finish on their own QObject; views only listen
+        /// here). `dirs_json` is a JSON array of directory paths.
+        #[qinvokable]
+        fn notify_dirs_changed(self: Pin<&mut FileOps>, dirs_json: QString);
     }
 
     // Threading lets the FileOpsEvents forwarder (running on tokio
@@ -305,6 +311,10 @@ impl Default for FileOpsRust {
 }
 
 impl qobject::FileOps {
+    fn notify_dirs_changed(self: Pin<&mut qobject::FileOps>, dirs_json: cxx_qt_lib::QString) {
+        self.dirs_changed(dirs_json);
+    }
+
     fn to_uri_list(self: &qobject::FileOps, paths_json: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
         let paths: Vec<String> = serde_json::from_str(&paths_json.to_string()).unwrap_or_default();
         // RFC 2483 text/uri-list: each URI on its own line terminated

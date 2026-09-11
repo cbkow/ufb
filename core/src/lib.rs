@@ -59,6 +59,7 @@ pub mod mount_client;
 pub mod shell_context_menu;
 pub mod sync_aware;
 pub mod transcode;
+pub mod archive;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

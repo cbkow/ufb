@@ -18,7 +18,9 @@
 // "not responding". Three minidumps of a hung 1.1.3 showed exactly
 // that cycle at constant stack depth. With every delegate instantiated
 // contentHeight is exact and the loop cannot start; an overflowing
-// menu simply scrolls. Native menus (macOS) never enter this path.
+// menu simply scrolls. Applies on both OSes: the FluentWinUI3 style
+// never requests native menus, so macOS renders these too (which is
+// also why UfbMenuItem's icons and styling work identically there).
 //
 // The contentItem below is the FluentWinUI3 style's own, verbatim,
 // plus `cacheBuffer`. If the style's Menu.qml changes its contentItem

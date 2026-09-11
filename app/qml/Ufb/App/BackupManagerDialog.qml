@@ -145,10 +145,10 @@ Dialog {
                         anchors.rightMargin: 8
                         spacing: 8
 
-                        Label {
-                            text: "📦"
+                        Icon {
+                            name: "package"
+                            size: 14
                             color: Theme.colors.accent
-                            font.pixelSize: 14
                         }
                         ColumnLayout {
                             Layout.fillWidth: true

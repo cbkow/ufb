@@ -83,6 +83,30 @@ impl TranscodeEvents for NoopTranscodeEvents {
 pub type TranscodeEventsArc = Arc<dyn TranscodeEvents>;
 
 // ----------------------------------------------------------------------------
+// ArchiveEvents — emitted by core/src/archive.rs
+// ----------------------------------------------------------------------------
+
+use crate::archive::ArchiveJob;
+
+pub trait ArchiveEvents: Send + Sync + 'static {
+    /// Job state changed (Queued → Processing → Completed, or any →
+    /// Cancelled / Failed). A Completed job carries `changed_dirs`.
+    fn job_updated(&self, job: &ArchiveJob);
+
+    /// Progress tick — throttled to a few per second while 7-Zip runs.
+    fn progress(&self, job: &ArchiveJob);
+}
+
+pub struct NoopArchiveEvents;
+
+impl ArchiveEvents for NoopArchiveEvents {
+    fn job_updated(&self, _: &ArchiveJob) {}
+    fn progress(&self, _: &ArchiveJob) {}
+}
+
+pub type ArchiveEventsArc = Arc<dyn ArchiveEvents>;
+
+// ----------------------------------------------------------------------------
 // MountEvents — emitted by core/src/mount_client.rs
 // ----------------------------------------------------------------------------
 

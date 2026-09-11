@@ -647,20 +647,30 @@ Item {
                 }).filter(function(s) { return s.length > 0 })
             }
             readonly property var linkArr: _parseLinks(cell.value)
-            Label {
+            Row {
                 anchors.fill: parent
                 anchors.leftMargin: 4
                 anchors.rightMargin: 4
-                verticalAlignment: Text.AlignVCenter
-                text: linksRoot.linkArr.length === 0
-                    ? ""
-                    : (linksRoot.linkArr.length === 1
-                        ? "🔗 " + linksRoot.linkArr[0]
-                        : qsTr("🔗 %1 links").arg(linksRoot.linkArr.length))
-                color: cell.selected ? "#9cc9ff" : "#5b8ed1"
-                font.pixelSize: 11
-                font.underline: linksRoot.linkArr.length > 0
-                elide: Text.ElideRight
+                spacing: 3
+                visible: linksRoot.linkArr.length > 0
+                Icon {
+                    name: "link"
+                    size: 11
+                    color: cell.selected ? "#9cc9ff" : "#5b8ed1"
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+                Label {
+                    width: parent.width - 14
+                    height: parent.height
+                    verticalAlignment: Text.AlignVCenter
+                    text: linksRoot.linkArr.length === 1
+                        ? linksRoot.linkArr[0]
+                        : qsTr("%1 links").arg(linksRoot.linkArr.length)
+                    color: cell.selected ? "#9cc9ff" : "#5b8ed1"
+                    font.pixelSize: 11
+                    font.underline: true
+                    elide: Text.ElideRight
+                }
             }
             MouseArea {
                 anchors.fill: parent

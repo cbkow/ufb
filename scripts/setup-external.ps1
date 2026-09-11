@@ -139,6 +139,61 @@ if (Test-Path (Join-Path $ufbExifTool 'exiftool.exe')) {
     robocopy (Join-Path $exRoot 'exiftool_files') (Join-Path $ufbExifTool 'exiftool_files') /E /NFL /NDL /NJH /NJS /NP | Out-Null
 }
 
+# ---- 7-Zip (7z.exe + 7z.dll) ------------------------------------
+# Drives the Archive service (extract zip/7z/rar/tar…, compress to
+# zip). The console 7z.exe needs 7z.dll beside it for RAR support —
+# the standalone 7za.exe from the "extra" package reads no RAR, so
+# don't substitute it. Both files are redistributable (LGPL +
+# unRAR restriction; see LICENSES/SevenZip-LICENSE.txt).
+#
+# Source, in order: an installed 7-Zip (Program Files), else the
+# official installer exe unpacked with Windows' built-in tar
+# (libarchive reads 7-Zip's SFX installer), else instructions.
+$sevenZipVersion = '26.03'
+$sevenZipTag = $sevenZipVersion -replace '\.', ''
+$ufb7z = Join-Path $ufbExt '7zip'
+$ufb7zBin = Join-Path $ufb7z 'bin'
+if ((Test-Path (Join-Path $ufb7zBin '7z.exe')) -and (Test-Path (Join-Path $ufb7zBin '7z.dll'))) {
+    Write-Host "[skip] 7-Zip already in external/7zip"
+} else {
+    New-Item -ItemType Directory -Force -Path $ufb7zBin | Out-Null
+    $installed = Join-Path $env:ProgramFiles '7-Zip'
+    $staged = $false
+    if ((Test-Path (Join-Path $installed '7z.exe')) -and (Test-Path (Join-Path $installed '7z.dll'))) {
+        Write-Host "7-Zip: copying 7z.exe + 7z.dll from $installed..."
+        Copy-Item (Join-Path $installed '7z.exe') $ufb7zBin -Force
+        Copy-Item (Join-Path $installed '7z.dll') $ufb7zBin -Force
+        if (Test-Path (Join-Path $installed 'License.txt')) { Copy-Item (Join-Path $installed 'License.txt') $ufb7z -Force }
+        $staged = $true
+    } else {
+        $inst = Join-Path $env:TEMP "7z$sevenZipTag-x64.exe"
+        $url = "https://www.7-zip.org/a/7z$sevenZipTag-x64.exe"
+        Write-Host "7-Zip: downloading $url..."
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $inst -UseBasicParsing -UserAgent 'ufb-setup'
+            $tmp = Join-Path $env:TEMP 'ufb-7zip-extract'
+            if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+            & tar -xf $inst -C $tmp 2>$null
+            if ((Test-Path (Join-Path $tmp '7z.exe')) -and (Test-Path (Join-Path $tmp '7z.dll'))) {
+                Copy-Item (Join-Path $tmp '7z.exe') $ufb7zBin -Force
+                Copy-Item (Join-Path $tmp '7z.dll') $ufb7zBin -Force
+                if (Test-Path (Join-Path $tmp 'License.txt')) { Copy-Item (Join-Path $tmp 'License.txt') $ufb7z -Force }
+                $staged = $true
+            }
+        } catch {
+            Write-Host "7-Zip: download/unpack failed: $_"
+        }
+    }
+    if ($staged) {
+        Write-Host "7-Zip ready in external/7zip/bin"
+    } else {
+        Write-Host "WARN: could not stage 7-Zip. Install it (winget install 7zip.7zip) and re-run,"
+        Write-Host "      or copy 7z.exe + 7z.dll into external\7zip\bin\ by hand."
+        Write-Host "      Without it the Extract / Compress menu items fail at run time."
+    }
+}
+
 # OpenEXR comes from vcpkg, not QCView. QCView's external/openexr
 # only contains import libs - the DLLs are produced per-project via
 # its own build step. vcpkg openexr is a one-time ~5 min install.

@@ -106,7 +106,7 @@ struct TranscodeShared {
 /// the ufb binary; exiftool is a Perl script with a sibling lib/
 /// tree and lives under Contents/Resources/exiftool/ so codesign
 /// --strict doesn't reject Contents/MacOS/lib/ subdirectories.
-fn bundled_tool(name: &str) -> PathBuf {
+pub(crate) fn bundled_tool(name: &str) -> PathBuf {
     let exe_name = if cfg!(target_os = "windows") {
         format!("{}.exe", name)
     } else {

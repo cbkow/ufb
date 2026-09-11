@@ -555,7 +555,7 @@ Rectangle {
                     color: Theme.colors.sidebarTracker
                 }
                 Label {
-                    text: qsTr("Transcode Queue")
+                    text: qsTr("Task Queue")
                     color: Theme.colors.text
                     font.pixelSize: Theme.font.sizeBody
                     Layout.fillWidth: true

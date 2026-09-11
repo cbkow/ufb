@@ -7,6 +7,9 @@
 #include "ShellThumbnail.h"
 
 #include <QAtomicInt>
+#include <QFont>
+#include <QFontDatabase>
+#include <QPainter>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QHash>
@@ -530,4 +533,34 @@ QQuickImageResponse* UfbIconProvider::requestImageResponse(const QString& id,
     };
     QThreadPool::globalInstance()->start(new FetchRunner<decltype(fetch)>(response, fetch));
     return response;
+}
+
+// ── ufb-glyph ─────────────────────────────────────────────────────────
+QImage UfbGlyphProvider::requestImage(const QString& id, QSize* size,
+                                      const QSize& requestedSize) {
+    bool ok = false;
+    const uint cp = id.section(QLatin1Char('/'), 0, 0).toUInt(&ok, 16);
+    // Honour the requested size exactly: QtQuick's IconImage already
+    // scales its sourceSize by the screen's devicePixelRatio, and it
+    // displays a provider image at the returned size — returning a
+    // larger bitmap made menu icons render at 2× (found 2026-09-11).
+    const int px = qBound(8, requestedSize.width() > 0 ? requestedSize.width() : 16, 256);
+    QImage img(px, px, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    if (ok && cp > 0) {
+        // Theme.qml's FontLoader registers the Phosphor TTF under this
+        // family before any menu can open; fall back to the default
+        // font's box glyph rather than crash if it somehow hasn't.
+        QFont font(QStringLiteral("Phosphor"));
+        font.setPixelSize(px);
+        QPainter p(&img);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::TextAntialiasing);
+        p.setFont(font);
+        p.setPen(Qt::white);
+        p.drawText(QRect(0, 0, px, px), Qt::AlignCenter,
+                   QString::fromUcs4(reinterpret_cast<const char32_t*>(&cp), 1));
+    }
+    if (size) *size = img.size();
+    return img;
 }

@@ -59,6 +59,22 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    License: GPL-2.0-or-later
    https://code.videolan.org/videolan/x264
 
+4b. 7-Zip (7zz on macOS; 7z.exe + 7z.dll on Windows)
+   Copyright (C) 1999-2026 Igor Pavlov
+   License: GNU LGPL 2.1 (or later), with the unRAR restriction for
+            the RAR decompression code and BSD-3-Clause for the
+            LZFSE portions
+   File:    SevenZip-LICENSE.txt
+   https://www.7-zip.org
+   Linkage: none — standalone command-line tool spawned as a
+            subprocess by the Archive service (core/src/archive.rs)
+            for "Extract Here" and "Compress to ZIP". Shipped
+            unmodified; macOS builds the universal binary from the
+            official source tarball (scripts/build-external-7zip-
+            mac.sh) solely to pin the deployment target. The unRAR
+            restriction means UFB extracts RAR archives but never
+            creates them.
+
 5. PDFium
    Copyright 2014 The PDFium Authors
    License: BSD-3-Clause (with Apache-2.0 portions)

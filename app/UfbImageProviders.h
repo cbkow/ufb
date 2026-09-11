@@ -15,6 +15,7 @@
 
 #include <QImage>
 #include <QQuickAsyncImageProvider>
+#include <QQuickImageProvider>
 #include <QQuickImageResponse>
 #include <QSize>
 #include <QString>
@@ -59,4 +60,19 @@ class UfbExrLayerProvider final : public QQuickAsyncImageProvider {
 public:
     QQuickImageResponse* requestImageResponse(const QString& id,
                                               const QSize& requestedSize) override;
+};
+
+// image://ufb-glyph/<hex-codepoint> — one Phosphor icon rendered as a
+// white glyph on transparent, for places that need an *image* rather
+// than a Text element: QtQuick.Controls `icon.source` (MenuItem, Action,
+// Button). The controls' IconLabel tints it via icon.color / the
+// palette, so white is the right base. QML resolves names → codepoints
+// (Theme.glyphUrl(name)) so the codepoint table stays in one place
+// (PhosphorIcons.js). Synchronous: glyph rasterisation is microseconds
+// and menus want the image before they open.
+class UfbGlyphProvider final : public QQuickImageProvider {
+public:
+    UfbGlyphProvider() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    QImage requestImage(const QString& id, QSize* size,
+                        const QSize& requestedSize) override;
 };

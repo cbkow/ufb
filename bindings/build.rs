@@ -20,6 +20,7 @@ fn main() {
         .qml_module::<&str, &str>(QmlModule {
             uri: "Ufb.Backend",
             rust_files: &[
+                "src/services/archive.rs",
                 "src/services/backup.rs",
                 "src/services/bookmarks.rs",
                 "src/services/columns.rs",

@@ -119,7 +119,8 @@ qt_add_qml_module(ufb
         qml/Ufb/App/ColumnManagerDialog.qml
         qml/Ufb/App/ColumnTrashDialog.qml
         qml/Ufb/App/BackupManagerDialog.qml
-        qml/Ufb/App/TranscodeQueue.qml
+        qml/Ufb/App/TaskQueue.qml
+        qml/Ufb/App/TaskJobsModel.qml
         qml/Ufb/App/MeshSettingsDialog.qml
         qml/Ufb/App/MountManagerDialog.qml
         qml/Ufb/App/AddBookmarkDialog.qml
@@ -129,6 +130,7 @@ qt_add_qml_module(ufb
         qml/Ufb/App/FileBrowser.qml
         qml/Ufb/App/Sidebar.qml
         qml/Ufb/App/UfbMenu.qml
+        qml/Ufb/App/UfbMenuItem.qml
         qml/Ufb/App/UfbScrollBar.qml
         qml/Ufb/App/PreviewLightbox.qml
         qml/Ufb/App/VideoPreview.qml
@@ -868,6 +870,24 @@ if(WIN32)
         message(STATUS "ufb: external/ffmpeg/bin empty — run scripts/setup-external.ps1")
     endif()
 
+    # 7-Zip console tool for the Archive service (extract / compress
+    # to zip). 7z.exe loads 7z.dll from its own directory, so both
+    # sit next to ufb.exe. bindings/src/services/archive.rs resolves
+    # "7z" via the same bundled_tool helper as ffmpeg.
+    set(_ufb_7zip_bin "${CMAKE_SOURCE_DIR}/external/7zip/bin")
+    if(EXISTS "${_ufb_7zip_bin}/7z.exe" AND EXISTS "${_ufb_7zip_bin}/7z.dll")
+        foreach(_pay 7z.exe 7z.dll)
+            add_custom_command(TARGET ufb POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_ufb_7zip_bin}/${_pay}"
+                    "$<TARGET_FILE_DIR:ufb>/${_pay}"
+                COMMENT "Sync ${_pay} next to ufb.exe"
+            )
+        endforeach()
+    else()
+        message(STATUS "ufb: external/7zip/bin/{7z.exe,7z.dll} missing — run scripts/setup-external.ps1 (archive extract/compress disabled)")
+    endif()
+
     # pdfium.dll next to ufb.exe. windeployqt covers Qt and the vcpkg
     # toolchain app-local-deploys the vcpkg DLLs (OpenEXR, libheif),
     # but pdfium is vendored in external/ — without this sync a fresh
@@ -959,6 +979,22 @@ if(APPLE)
             message(STATUS "ufb: external/ffmpeg/bin/${_tool} missing — run scripts/setup-external-mac.sh")
         endif()
     endforeach()
+
+    # 7-Zip CLI (universal `7zz`, built by scripts/build-external-
+    # 7zip-mac.sh with a macOS 14 minos) → Contents/MacOS/ beside
+    # ffmpeg. Mach-O, so sign-mac-dev.sh's Contents/MacOS sweep signs
+    # it and release-mac.sh's minos gate checks it automatically.
+    set(_ufb_7zip_mac "${CMAKE_SOURCE_DIR}/external/7zip/bin/7zz")
+    if(EXISTS "${_ufb_7zip_mac}")
+        add_custom_command(TARGET ufb POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_ufb_7zip_mac}"
+                "$<TARGET_BUNDLE_CONTENT_DIR:ufb>/MacOS/7zz"
+            COMMENT "Sync 7zz into UFB.app/Contents/MacOS/"
+        )
+    else()
+        message(STATUS "ufb: external/7zip/bin/7zz missing — run scripts/setup-external-mac.sh (archive extract/compress disabled)")
+    endif()
 
     set(_ufb_exiftool_mac "${CMAKE_SOURCE_DIR}/external/exiftool")
     if(EXISTS "${_ufb_exiftool_mac}/exiftool")

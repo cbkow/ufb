@@ -7,6 +7,9 @@
 #   external/ffmpeg/    ffmpeg darwin libs + ffmpeg/ffprobe binaries
 #                       (built from source — see
 #                       scripts/build-external-ffmpeg-mac.sh)
+#   external/7zip/      7zz universal CLI built from source (see
+#                       scripts/build-external-7zip-mac.sh) for the
+#                       archive extract / compress-to-zip jobs
 #   external/exiftool/  exiftool standalone Perl distribution from
 #                       exiftool.org (mirrors the Windows pattern in
 #                       scripts/setup-external.ps1; on macOS the
@@ -114,6 +117,17 @@ if [[ ! -f "$EXIFTOOL_DIR/exiftool" ]]; then
     fi
 else
     echo "[setup] exiftool already present"
+fi
+
+# ---- 7-Zip (built from source) ------------------------------
+# One universal `7zz` for the Archive service. Built rather than
+# downloaded so the Mach-O carries a macOS 14 minos — see the
+# script header for why the official prebuilt can't ship.
+if [[ ! -x "$EXTERNAL/7zip/bin/7zz" ]]; then
+    echo "[setup] building 7-Zip from source (~2 min)..."
+    bash "$REPO_ROOT/scripts/build-external-7zip-mac.sh"
+else
+    echo "[setup] 7-Zip already built"
 fi
 
 # ---- Qt 6.11.0 header patch (QTBUG-145239) -----------------

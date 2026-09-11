@@ -24,10 +24,6 @@ Item {
     /// browser does.
     signal openInNewTabRequested(string path)
 
-    /// Bubbled up from FolderTabView's FileBrowsers "Transcode to MP4"
-    /// menu item. Main connects this to openTranscodeTab so the queue
-    /// tab surfaces with the just-queued job visible.
-    signal openTranscodeQueueRequested()
 
     /// List of {name, path} for top-level subfolders of jobPath, in
     /// alphabetical order. Fetched via a private Directory probe.
@@ -513,7 +509,6 @@ Item {
                 tabPath: root._activeFolderPath
                 jobPath: root.jobPath
                 onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-                onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
             }
 
             // Tracker tab — slice A: read-only listing of tracked

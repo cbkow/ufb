@@ -173,6 +173,15 @@ Source: "{#ReleaseDir}\ffprobe.exe";       DestDir: "{app}"; Flags: ignoreversio
 Source: "{#ReleaseDir}\exiftool.exe";      DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\exiftool_files\*";  DestDir: "{app}\exiftool_files"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 
+; 7-Zip console tool for the Archive service (extract zip/7z/rar/tar,
+; compress to zip). 7z.exe loads 7z.dll from its own folder, so both
+; ship next to ufb.exe; bindings/src/services/archive.rs resolves "7z"
+; there first. Sourced from external/7zip/bin via the cmake POST_BUILD
+; copy (setup-external.ps1 stages it from an installed 7-Zip or the
+; official installer).
+Source: "{#ReleaseDir}\7z.exe";             DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+Source: "{#ReleaseDir}\7z.dll";             DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+
 ; Icons
 Source: "{#IconsDir}\32x32.png"; DestDir: "{app}\icons"; Flags: ignoreversion; Components: core
 Source: "{#IconsDir}\icon.ico";  DestDir: "{app}\icons"; Flags: ignoreversion; Components: core

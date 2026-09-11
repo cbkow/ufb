@@ -65,10 +65,6 @@ Item {
     /// JobView re-emits to Main, which spawns a new Files tab.
     signal openInNewTabRequested(string path)
 
-    /// Bubbled up from FileBrowser's "Transcode to MP4" menu item.
-    /// JobView re-emits to Main, which surfaces the Transcode Queue
-    /// tab so the user sees the job they just queued.
-    signal openTranscodeQueueRequested()
 
     /// Right-pane Directories. In Mode B only `rightDir` is used;
     /// in Mode C `topDir` is the project subdir, `bottomDir` the
@@ -361,7 +357,6 @@ Item {
                 active: root.activeBrowser === rightBrowser
                 onActivated: root.activeBrowser = rightBrowser
                 onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-                onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
             }
 
             // ── Mode C ─────────────────────────────────────────────
@@ -412,7 +407,6 @@ Item {
                     active: root.activeBrowser === topBrowser
                     onActivated: root.activeBrowser = topBrowser
                     onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-                    onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
                 }
                 // Bottom pane. For AE tabs a renders/proxies subtab
                 // strip sits above the browser (same styling as the
@@ -490,7 +484,6 @@ Item {
                             active: root.activeBrowser === bottomBrowser
                             onActivated: root.activeBrowser = bottomBrowser
                             onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-                            onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
                         }
                     }
                 }

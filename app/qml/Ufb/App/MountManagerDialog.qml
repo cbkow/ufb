@@ -399,13 +399,24 @@ Dialog {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 1
-                            Label {
-                                text: (modelData.enabled === false ? "🚫 " : "")
-                                    + (modelData.displayName || modelData.id || "?")
-                                color: Theme.colors.text
-                                font.pixelSize: 12
-                                font.bold: true
-                                elide: Text.ElideRight
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 4
+                                Icon {
+                                    visible: modelData.enabled === false
+                                    name: "prohibit"
+                                    size: 12
+                                    color: Theme.colors.textMuted
+                                    Layout.alignment: Qt.AlignVCenter
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: modelData.displayName || modelData.id || "?"
+                                    color: Theme.colors.text
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    elide: Text.ElideRight
+                                }
                             }
                             Label {
                                 text: modelData.nasSharePath || ""

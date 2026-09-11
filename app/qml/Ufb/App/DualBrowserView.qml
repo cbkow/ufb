@@ -21,8 +21,6 @@ Item {
     /// sidebar clicks; each FileBrowser flips it on activation.
     property var activePane: leftPane
 
-    /// Bubbled up from FileBrowser's "Transcode to MP4" menu item.
-    signal openTranscodeQueueRequested()
     /// Bubbled up from FileBrowser's "Open in New Tab" menu item.
     /// Main spawns a new Files tab and seeds it with `path`.
     signal openInNewTabRequested(string path)
@@ -180,7 +178,6 @@ Item {
                 root.activePane = rightPane
             }
             onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-            onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
         }
 
         FileBrowser {
@@ -209,7 +206,6 @@ Item {
                 root.activePane = leftPane
             }
             onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
-            onOpenTranscodeQueueRequested: root.openTranscodeQueueRequested()
         }
     }
 }

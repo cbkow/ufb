@@ -207,9 +207,6 @@ Rectangle {
     /// through DualBrowserView to Main, which spawns a new Files
     /// tab and seeds it with this path.
     signal openInNewTabRequested(string path)
-    /// Surfaces the workspace's Transcode Queue tab. Emitted by the
-    /// "Transcode to MP4" file-context-menu item below.
-    signal openTranscodeQueueRequested()
     /// Hide the editable path field (kept in DualBrowserView, hidden
     /// in FolderTabView panes where the selected item already
     /// conveys location and the toolbar is crowded).
@@ -430,6 +427,29 @@ Rectangle {
             if (_isVideoPath(sel[i])) out.push(sel[i])
         }
         return out
+    }
+    /// Archive gating for "Extract Here". The extension list is owned
+    /// by core::archive::ARCHIVE_EXTENSIONS and read once here, so the
+    /// per-selection check (re-evaluated on every selection change,
+    /// like _selectionContainsVideo) never crosses into Rust.
+    readonly property var _archiveExtensions: Archive.archive_extensions().split(",")
+    function _isArchivePath(p) {
+        if (!p) return false
+        var slash = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))
+        var dot = p.lastIndexOf(".")
+        if (dot <= slash + 1) return false
+        return _archiveExtensions.indexOf(p.substring(dot + 1).toLowerCase()) >= 0
+    }
+    function _selectedArchivePaths() {
+        var sel = selectedPaths()
+        var out = []
+        for (var i = 0; i < sel.length; ++i) {
+            if (_isArchivePath(sel[i])) out.push(sel[i])
+        }
+        return out
+    }
+    function _selectionContainsArchive() {
+        return _selectedArchivePaths().length > 0
     }
     function _selectionContainsVideo() {
         return _selectedVideoPaths().length > 0
@@ -1094,13 +1114,15 @@ Rectangle {
         // every popup via aboutToShow.
         property bool _pasteAvailable: false
         onAboutToShow: _pasteAvailable = root._clipboardHasPaths()
-        MenuItem { action: openAction }
-        MenuItem {
+        UfbMenuItem { iconName: "arrow-square-out"; action: openAction }
+        UfbMenuItem {
+            iconName: "columns"
             action: openInOtherBrowserAction
             visible: root.allowOpenInOtherBrowser
             height: visible ? implicitHeight : 0
         }
-        MenuItem {
+        UfbMenuItem {
+            iconName: "arrow-line-left"
             text: qsTr("Open in Left Browser")
             visible: root.allowOpenInMainBrowser
             height: visible ? implicitHeight : 0
@@ -1109,7 +1131,8 @@ Rectangle {
                     Window.window.openPathInBrowser("left", root._menuEntry.path)
             }
         }
-        MenuItem {
+        UfbMenuItem {
+            iconName: "arrow-line-right"
             text: qsTr("Open in Right Browser")
             visible: root.allowOpenInMainBrowser
             height: visible ? implicitHeight : 0
@@ -1118,29 +1141,30 @@ Rectangle {
                     Window.window.openPathInBrowser("right", root._menuEntry.path)
             }
         }
-        MenuItem { action: openInNewTabAction }
+        UfbMenuItem { iconName: "browsers"; action: openInNewTabAction }
         // "Sync as Job…" is folder-only (project-folder heuristic
         // deferred — show on every directory for now).
-        MenuItem {
+        UfbMenuItem {
+            iconName: "briefcase"
             action: syncAsJobAction
             visible: root._menuEntry && root._menuEntry.isDir
             height: visible ? implicitHeight : 0
         }
         MenuSeparator {}
-        MenuItem { action: cutAction; enabled: root._currentSelectionCount > 0 }
-        MenuItem { action: copyAction; enabled: root._currentSelectionCount > 0 }
-        MenuItem { action: pasteAction; enabled: fileMenu._pasteAvailable }
+        UfbMenuItem { iconName: "scissors"; action: cutAction; enabled: root._currentSelectionCount > 0 }
+        UfbMenuItem { iconName: "copy"; action: copyAction; enabled: root._currentSelectionCount > 0 }
+        UfbMenuItem { iconName: "clipboard-text"; action: pasteAction; enabled: fileMenu._pasteAvailable }
         MenuSeparator {}
-        MenuItem { action: renameAction; enabled: root._currentSelectionCount === 1 }
-        MenuItem { action: deleteAction; enabled: root._currentSelectionCount > 0 }
+        UfbMenuItem { iconName: "pencil-simple"; action: renameAction; enabled: root._currentSelectionCount === 1 }
+        UfbMenuItem { iconName: "trash"; action: deleteAction; enabled: root._currentSelectionCount > 0 }
         MenuSeparator {}
-        MenuItem { action: copyPathAction }
-        MenuItem { action: copyFilenameAction }
-        MenuItem { action: copyUfbLinkAction }
-        MenuItem { action: copyUnionLinkAction }
+        UfbMenuItem { iconName: "path"; action: copyPathAction }
+        UfbMenuItem { iconName: "text-t"; action: copyFilenameAction }
+        UfbMenuItem { iconName: "link"; action: copyUfbLinkAction }
+        UfbMenuItem { iconName: "link-simple"; action: copyUnionLinkAction }
         MenuSeparator {}
-        MenuSeparator {}
-        MenuItem {
+        UfbMenuItem {
+            iconName: "film-strip"
             text: qsTr("Transcode to MP4")
             visible: root._selectionContainsVideo()
             height: visible ? implicitHeight : 0
@@ -1148,12 +1172,44 @@ Rectangle {
                 var paths = root._selectedVideoPaths()
                 if (paths.length === 0) return
                 Transcode.add_jobs(JSON.stringify(paths))
-                root.openTranscodeQueueRequested()
+            }
+        }
+        // Archive items. Neither switches tabs: progress shows in the
+        // toolbar pill (TaskProgressPill) and the result gets selected
+        // here when it lands in this folder (see the Archive
+        // Connections below). Extract only offers itself when the
+        // selection holds at least one archive; Compress takes any
+        // selection (files, folders, or a mix) and zips it beside them.
+        UfbMenuItem {
+            iconName: "file-archive"
+            text: {
+                var n = root._selectedArchivePaths().length
+                return n > 1 ? qsTr("Extract %1 Archives Here").arg(n)
+                             : qsTr("Extract Here")
+            }
+            visible: root._selectionContainsArchive()
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var paths = root._selectedArchivePaths()
+                if (paths.length === 0) return
+                Archive.add_extract_jobs(JSON.stringify(paths))
+            }
+        }
+        UfbMenuItem {
+            iconName: "file-zip"
+            text: root._currentSelectionCount > 1
+                ? qsTr("Compress %1 Items to ZIP").arg(root._currentSelectionCount)
+                : qsTr("Compress to ZIP")
+            enabled: root._currentSelectionCount > 0
+            onTriggered: {
+                var paths = root.selectedPaths()
+                if (paths.length === 0) return
+                Archive.add_compress_job(JSON.stringify(paths))
             }
         }
         MenuSeparator {}
-        MenuItem { action: revealAction }
-        MenuItem { action: showShellMenuAction }
+        UfbMenuItem { iconName: "folder-simple"; action: revealAction }
+        UfbMenuItem { iconName: "dots-three-outline"; action: showShellMenuAction }
     }
 
     UfbMenu {
@@ -1161,22 +1217,23 @@ Rectangle {
         // Same Paste-availability story as fileMenu — see comment there.
         property bool _pasteAvailable: false
         onAboutToShow: _pasteAvailable = root._clipboardHasPaths()
-        MenuItem { action: newFolderAction }
-        MenuItem { action: newUfbFolderAction }
-        MenuItem { action: newDateFolderAction }
-        MenuItem { action: newTimeFolderAction }
-        MenuItem {
+        UfbMenuItem { iconName: "folder-simple-plus"; action: newFolderAction }
+        UfbMenuItem { iconName: "folder-simple-star"; action: newUfbFolderAction }
+        UfbMenuItem { iconName: "calendar-plus"; action: newDateFolderAction }
+        UfbMenuItem { iconName: "clock"; action: newTimeFolderAction }
+        UfbMenuItem {
+            iconName: "note-pencil"
             action: addNoteAction
             visible: root.allowAddNote
             height: visible ? implicitHeight : 0
         }
         MenuSeparator {}
-        MenuItem { action: pasteAction; enabled: bgMenu._pasteAvailable }
+        UfbMenuItem { iconName: "clipboard-text"; action: pasteAction; enabled: bgMenu._pasteAvailable }
         MenuSeparator {}
-        MenuItem { action: copyCurrentPathAction }
-        MenuItem { action: copyCurrentUfbLinkAction }
+        UfbMenuItem { iconName: "path"; action: copyCurrentPathAction }
+        UfbMenuItem { iconName: "link"; action: copyCurrentUfbLinkAction }
         MenuSeparator {}
-        MenuItem { action: refreshAction }
+        UfbMenuItem { iconName: "arrows-clockwise"; action: refreshAction }
     }
 
     // ── Modal dialogs ────────────────────────────────────────────────
@@ -1720,6 +1777,21 @@ Rectangle {
     // an affected directory reload in place (state-preserving). This is
     // what makes cross-pane moves and sidebar-bookmark drops refresh the
     // right pane instantly, without the timer guesswork.
+    // A finished archive job whose output lives in this folder gets
+    // selected once the dirs_changed refresh (next Connections) has
+    // rebuilt the listing — the same select-after-load hint deep links
+    // use. job_completed is emitted before dirs_changed, so the hint
+    // is in place by the time refreshEntries runs.
+    Connections {
+        target: Archive
+        function onJob_completed(outputPath) {
+            if (!root.dir || root.dir.current_path.length === 0) return
+            if (ListingState.dirInSet(root.dir.current_path,
+                                      [root._parentDir(outputPath)])) {
+                root.selectAfterLoadPath = outputPath
+            }
+        }
+    }
     Connections {
         target: FileOps
         function onDirs_changed(dirsJson) {

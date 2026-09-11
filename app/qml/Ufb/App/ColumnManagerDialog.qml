@@ -267,10 +267,10 @@ Dialog {
                         anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         spacing: 6
-                        Label {
-                            text: "📌"
+                        Icon {
+                            name: "push-pin"
+                            size: 11
                             color: Theme.colors.accent
-                            font.pixelSize: 11
                             Layout.alignment: Qt.AlignVCenter
                         }
                         ColumnLayout {

@@ -396,6 +396,9 @@ int main(int argc, char *argv[])
     engine.addImageProvider(QStringLiteral("ufb-pdf"), new UfbPdfProvider);
     engine.addImageProvider(QStringLiteral("ufb-exr-layer"), new UfbExrLayerProvider);
     engine.addImageProvider(QStringLiteral("ufb-icons"),  new UfbIconProvider);
+    // image://ufb-glyph/<hex-codepoint> — Phosphor glyph as an image
+    // for QtQuick.Controls icon.source (menu items). See Theme.glyphUrl.
+    engine.addImageProvider(QStringLiteral("ufb-glyph"),  new UfbGlyphProvider);
     qInfo("ufb: image providers registered (ufb-thumbs, ufb-icons)");
 
     // Pick up a single argv path/URI argument and expose it to QML
