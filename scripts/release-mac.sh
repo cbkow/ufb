@@ -3,16 +3,18 @@
 #
 #   1. cargo build --release         (Rust agent + bindings)
 #   2. cmake --build release          (UFB.app)
-#   3. xcodebuild Release             (UFBTray.app + FinderSync.appex)
+#   3. xcodebuild Release             (UFBFinderSync.appex, embedded)
 #   4. scripts/sign-mac-dev.sh        (Developer ID + hardened runtime,
 #                                      stages ufb-agent.app from binary)
-#   5. scripts/build-mac-dmg.sh       (UDZO DMG, signed)
-#   6. scripts/notarize-mac-dmg.sh    (Apple notary, --wait, staple)
+#   5. scripts/notarize-mac.sh        (both bundles: notarize + staple)
+#   6. scripts/build-mac-pkg.sh       (installer pkg, Developer ID Installer)
+#   7. scripts/notarize-mac.sh        (the pkg: notarize + staple)
+#   8. scripts/make-appcast.sh        (signed enclosure -> docs/appcast-mac.xml)
 #
-# Output: dist/UFB-<version>-<arch>.dmg
+# Output: dist/UFB-<version>-<arch>.pkg   (DMG retired in 1.2.0)
 #
-# Time: typically 12–20 min — most of it is Apple's notary queue
-# in step (6). Steps (1)–(5) take 2–4 min on an M1.
+# Time: typically 15–30 min — most of it is Apple's notary queue,
+# twice (bundles, then pkg). Steps (1)–(4) take 2–4 min on an M1.
 #
 # Env:
 #   UFB_BUILD_PRESET=mac-release   (default, set explicitly to override)
@@ -20,7 +22,7 @@
 #   UFB_NOTARY_PROFILE=AC_PASSWORD
 #
 # Use this for actual releases; for dev iteration on signing or
-# DMG layout, run the individual scripts.
+# pkg layout, run the individual scripts.
 
 set -euo pipefail
 
@@ -55,7 +57,7 @@ export MACOSX_DEPLOYMENT_TARGET="$UFB_MACOS_MIN"
 # through to Homebrew — whose bottles target the *host* macOS and made
 # the shipped app host-OS-only. The overlay triplet pins
 # VCPKG_OSX_DEPLOYMENT_TARGET; no-op when already installed.
-echo "[0/6] vcpkg install (libheif + OpenEXR)"
+echo "[0/8] vcpkg install (libheif + OpenEXR)"
 VCPKG_BIN="$(command -v vcpkg || true)"
 [ -z "$VCPKG_BIN" ] && [ -x "${VCPKG_ROOT:-}/vcpkg" ] && VCPKG_BIN="$VCPKG_ROOT/vcpkg"
 [ -z "$VCPKG_BIN" ] && [ -x "$HOME/vcpkg/vcpkg" ] && VCPKG_BIN="$HOME/vcpkg/vcpkg"
@@ -73,7 +75,7 @@ fi
 # ── 1. Cargo (agent + core + bindings) ───────────────────────────────
 # Building the agent here — the bindings are also built but folded
 # into UFB.app's libbindings.a by Corrosion during the cmake step.
-echo "[1/6] cargo build --$CARGO_PROFILE (agent)"
+echo "[1/8] cargo build --$CARGO_PROFILE (agent)"
 (
     cd "$REPO_ROOT/agent"
     if [ "$CARGO_PROFILE" = "release" ]; then
@@ -89,7 +91,7 @@ echo "[1/6] cargo build --$CARGO_PROFILE (agent)"
 # everything into UFB.app/Contents/MacOS/ufb. Reconfigure first so
 # any change in CMakeLists.txt picks up.
 echo ""
-echo "[2/6] cmake (UFB.app) — preset=$PRESET"
+echo "[2/8] cmake (UFB.app) — preset=$PRESET"
 QMAKE="${QMAKE:-$HOME/Qt/6.11.1/macos/bin/qmake}"
 # Explicit build type: on a fresh build dir a bare configure would
 # otherwise land on an empty CMAKE_BUILD_TYPE (unoptimized).
@@ -102,7 +104,7 @@ QMAKE="$QMAKE" cmake --build "$REPO_ROOT/$CMAKE_DIR" --target ufb 2>&1 | tail -3
 # is the only Swift artifact left and it now rides inside UFB.app's
 # own PlugIns/ (sync verdict kept FinderSync badges).
 echo ""
-echo "[3/6] xcodebuild (UFBFinderSync.appex) — config=$XCODE_CFG"
+echo "[3/8] xcodebuild (UFBFinderSync.appex) — config=$XCODE_CFG"
 (
     cd "$REPO_ROOT/macos-helpers"
     xcodegen generate 2>&1 | tail -3
@@ -169,55 +171,66 @@ echo "  OK — all Mach-Os load on macOS $UFB_MACOS_MIN+"
 # all three components Developer-ID, attaches entitlements + the
 # hardened runtime flag.
 echo ""
-echo "[4/6] sign-mac-dev.sh"
+echo "[4/8] sign-mac-dev.sh"
 UFB_BUILD_PRESET="$PRESET" "$REPO_ROOT/scripts/sign-mac-dev.sh" 2>&1 \
     | sed 's/^/  /'
 
-# ── 5. DMG ───────────────────────────────────────────────────────────
+# ── 5. Notarize + staple the bundles ─────────────────────────────────
+# One submission for both apps, stapled in place, so the installed
+# apps validate offline at first launch. The pkg gets its own ticket
+# in step 7. (Apple's queue: 2-15 min per submission.)
 echo ""
-echo "[5/6] build-mac-dmg.sh"
-UFB_BUILD_PRESET="$PRESET" "$REPO_ROOT/scripts/build-mac-dmg.sh" 2>&1 \
+echo "[5/8] notarize-mac.sh (UFB.app + ufb-agent.app)"
+"$REPO_ROOT/scripts/notarize-mac.sh" \
+    "$UFB_APP_BUNDLE" \
+    "$REPO_ROOT/agent/target/$CARGO_PROFILE/ufb-agent.app" 2>&1 \
     | sed 's/^/  /'
 
-# Find the freshly-built DMG so we hand notarytool an explicit path
-# (the dist/ dir may have older artifacts hanging around).
-DMG_PATH="$(ls -t "$REPO_ROOT/dist"/*.dmg 2>/dev/null | head -1)"
-if [ -z "$DMG_PATH" ]; then
-    echo "ERROR: build-mac-dmg.sh didn't produce a DMG." >&2
+# ── 6. Installer package ─────────────────────────────────────────────
+# Signed with the Developer ID *Installer* identity. Replaced the
+# drag-install DMG in 1.2.0 — see scripts/build-mac-pkg.sh.
+echo ""
+echo "[6/8] build-mac-pkg.sh"
+UFB_BUILD_PRESET="$PRESET" "$REPO_ROOT/scripts/build-mac-pkg.sh" 2>&1 \
+    | sed 's/^/  /'
+
+PKG_PATH="$(ls -t "$REPO_ROOT/dist"/*.pkg 2>/dev/null | head -1)"
+if [ -z "$PKG_PATH" ]; then
+    echo "ERROR: build-mac-pkg.sh didn't produce a pkg." >&2
     exit 1
 fi
 
-# ── 6. Notarize + staple ─────────────────────────────────────────────
-# This is the long one (5–15 min). Apple notary service queue is
-# the dominant cost. The staple at the end embeds the ticket so
-# downstream first-launches are fast.
+# ── 7. Notarize + staple the pkg ─────────────────────────────────────
 echo ""
-echo "[6/6] notarize-mac-dmg.sh"
-"$REPO_ROOT/scripts/notarize-mac-dmg.sh" "$DMG_PATH" 2>&1 \
+echo "[7/8] notarize-mac.sh ($(basename "$PKG_PATH"))"
+"$REPO_ROOT/scripts/notarize-mac.sh" "$PKG_PATH" 2>&1 \
     | sed 's/^/  /'
 
-# ── 7. Appcast (Sparkle, informational) ──────────────────────────────
+# ── 8. Appcast (Sparkle, signed pkg enclosure) ───────────────────────
 # Insert this release into docs/appcast-mac.xml — the committed feed
-# GitHub Pages serves at ufbrowser.com. Informational item — no
-# signing needed (notarization is the integrity guarantee). To also
-# update the Windows appcast, run make-appcast.sh again with the
-# Windows-built UFB-<ver>-x64.exe as a 3rd arg (needs sign_update +
-# the private key).
+# GitHub Pages serves at ufbrowser.com. Since 1.2.0 the mac item is a
+# real download: Sparkle fetches the pkg from the GitHub release,
+# verifies the ed25519 sparkle:edSignature, and runs a guided package
+# install. Needs sign_update (Sparkle's bin/) + the private key in the
+# login Keychain — same as the Windows item. To also update the
+# Windows appcast, run make-appcast.sh again with the Windows-built
+# UFB-<ver>-x64.exe as a 3rd arg.
 echo ""
-echo "[7/7] make-appcast.sh (docs/appcast-mac.xml)"
-DMG_VERSION="$(basename "$DMG_PATH" | sed -E 's/^UFB-(.+)-(arm64|x86_64|x64)\.dmg$/\1/')"
-"$REPO_ROOT/scripts/make-appcast.sh" "$DMG_VERSION" "$DMG_PATH" 2>&1 \
+echo "[8/8] make-appcast.sh (docs/appcast-mac.xml)"
+PKG_VERSION="$(basename "$PKG_PATH" | sed -E 's/^UFB-(.+)-(arm64|x86_64|x64)\.pkg$/\1/')"
+"$REPO_ROOT/scripts/make-appcast.sh" "$PKG_VERSION" "$PKG_PATH" 2>&1 \
     | sed 's/^/  /' || echo "  (appcast update skipped/failed — non-fatal)"
 
 echo ""
 echo "=== Release ready ==="
-echo "DMG:     $DMG_PATH"
-echo "Size:    $(du -sh "$DMG_PATH" | cut -f1)"
+echo "PKG:     $PKG_PATH"
+echo "Size:    $(du -sh "$PKG_PATH" | cut -f1)"
 echo "Appcast: $REPO_ROOT/docs/appcast-mac.xml (edited, not yet committed)"
-echo "Publish: gh release create v$DMG_VERSION \"$DMG_PATH\" --title \"UFB $DMG_VERSION\""
+echo "Publish: gh release create v$PKG_VERSION \"$PKG_PATH\" --title \"UFB $PKG_VERSION\""
 echo "         then commit + push docs/appcast-mac.xml (Pages -> ufbrowser.com)"
 echo ""
-echo "Next: drag-test on a fresh machine (or rm + reinstall locally"
-echo "      after \`xattr -d com.apple.quarantine\` to simulate a"
-echo "      Safari download). First launch should now be seconds,"
-echo "      not minutes."
+echo "Next: install-test the pkg here (double-click, or"
+echo "      sudo installer -pkg \"$PKG_PATH\" -target /), then launch"
+echo "      /Applications/UFB/UFB.app. For the Sparkle path, point the"
+echo "      installed app at a local feed: defaults write dev.ufb.app"
+echo "      SUFeedURL file:///path/to/appcast-mac.xml (delete the key after)."

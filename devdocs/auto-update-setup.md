@@ -7,13 +7,17 @@ as the minNotes sister site). macOS uses **Sparkle**; Windows uses
 Release binaries live on **GitHub Releases** — the appcast items point
 at `github.com/cbkow/ufb/releases/download/v<ver>/...`.
 
-> **macOS delivery is informational.** UFB's macOS DMG is a multi-bundle
-> drag-install, which Sparkle can't atomically swap. So the macOS
-> appcast item carries **no enclosure**: Sparkle shows the version +
-> release notes and a button that opens the DMG URL in the browser; the
-> user re-drags. Integrity on macOS comes from Developer-ID +
-> notarization (the `SUPublicEDKey` is dormant unless a future item
-> carries a real download). **Windows is a full signed download**:
+> **Both OSes are full signed downloads since 1.2.0.** macOS ships a
+> signed + notarized installer **pkg** (`scripts/build-mac-pkg.sh`,
+> Developer ID *Installer* identity); the appcast item carries the pkg
+> as its enclosure with an ed25519 `sparkle:edSignature`, and Sparkle
+> runs a guided package install (admin password prompt per update —
+> the price of a root-owned /Applications/UFB layout) then relaunches.
+> Through 1.1.6 the macOS item was *informational* (no enclosure, a
+> button opening the multi-bundle DMG) because Sparkle can't swap a
+> drag-install; those items stay informational in the feed history.
+> 1.1.6 clients already carry `SUPublicEDKey` + Sparkle 2.9.2, so the
+> first pkg release upgrades them automatically. **Windows**:
 > WinSparkle downloads `UFB-<ver>-x64.exe`, verifies the ed25519
 > signature, runs it, relaunches.
 
@@ -72,11 +76,12 @@ in; being HTTPS, no ATS exception is needed.
 ## Release + publish
 
 **macOS** — `scripts/release-mac.sh` builds, signs (incl. Sparkle's
-nested helpers — see `sign-mac-dev.sh`), notarizes, and inserts the
-release into `docs/appcast-mac.xml`. Then:
+nested helpers — see `sign-mac-dev.sh`), notarizes + staples the two
+bundles, builds the pkg, notarizes + staples that, and inserts the
+signed enclosure into `docs/appcast-mac.xml`. Then:
 
 ```sh
-gh release create v<ver> dist/UFB-<ver>-arm64.dmg --title "UFB <ver>"
+gh release create v<ver> dist/UFB-<ver>-arm64.pkg --title "UFB <ver>"
 git add docs/appcast-mac.xml && git commit -m "appcast: <ver> (mac)" && git push
 ```
 
@@ -86,8 +91,10 @@ release, then sign + insert the Windows item (run on the Mac, where the
 private key lives — copy the exe over or use a shared path):
 
 ```sh
-SPARKLE_BIN=external/Sparkle/bin \
-  scripts/make-appcast.sh <ver> dist/UFB-<ver>-arm64.dmg /path/to/UFB-<ver>-x64.exe
+scripts/make-appcast.sh <ver> dist/UFB-<ver>-arm64.pkg /path/to/UFB-<ver>-x64.exe
+# (sign_update is found on PATH or in ../QCView-Player/external/Sparkle/bin;
+#  SPARKLE_BIN=... overrides. Re-running re-signs the mac pkg too — the
+#  sentinel insert is idempotent per version.)
 # -> inserts into docs/appcast-win.xml (enclosure + sparkle:edSignature)
 git add docs/appcast-win.xml && git commit -m "appcast: <ver> (win)" && git push
 ```
@@ -100,11 +107,11 @@ uploaded to the release exactly.
 
 ```
 https://ufbrowser.com/               (GitHub Pages <- docs/)
-├── appcast-mac.xml                  (informational; link -> DMG on Releases)
+├── appcast-mac.xml                  (enclosure + edSignature -> pkg on Releases)
 └── appcast-win.xml                  (enclosure + edSignature -> Releases)
 
 https://github.com/cbkow/ufb/releases/download/v<ver>/
-├── UFB-<ver>-arm64.dmg              (notarized)
+├── UFB-<ver>-arm64.pkg              (Developer ID Installer, notarized, ed25519-signed)
 └── UFB-<ver>-x64.exe                (ed25519-signed)
 ```
 
@@ -112,7 +119,11 @@ https://github.com/cbkow/ufb/releases/download/v<ver>/
 
 - macOS: launch UFB, click **Check for Updates** (bottom status bar).
   With a higher version in `appcast-mac.xml`, Sparkle shows the notice +
-  release notes; the button opens the DMG URL.
+  release notes, downloads the pkg, verifies the signature, asks for an
+  admin password, installs, relaunches. To rehearse before pushing the
+  feed: `defaults write dev.ufb.app SUFeedURL file:///abs/path/docs/appcast-mac.xml`
+  on a machine with the previous version installed, check, then
+  `defaults delete dev.ufb.app SUFeedURL`.
 - Windows: same button → WinSparkle downloads the exe, **verifies the
   signature**, runs the installer, relaunches. Tamper the exe (or use a
   wrong key) → WinSparkle refuses to install.

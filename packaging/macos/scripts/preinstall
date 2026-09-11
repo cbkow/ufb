@@ -1,0 +1,28 @@
+#!/bin/bash
+# UFB installer — preinstall (runs as root, before the payload lands).
+#
+# 1. Stop a running UFB + mount agent so Installer never writes into
+#    a bundle that is mmapped (same thing the Inno installer does on
+#    Windows with taskkill). Sparkle-driven updates arrive with the
+#    GUI already quit, so usually only the agent is up.
+# 2. Replace, don't merge: pre-pkg installs were drag-installed and
+#    user-owned, and Installer's bundle upgrade rules are not worth
+#    reasoning about. Removing the known bundles first makes the pkg
+#    the single source of truth for what is under /Applications/UFB.
+#    (UFBTray.app was retired in 1.0.7 — swept too if still present.)
+#
+# Deliberately NOT here: any per-user work (login items, FinderSync
+# enablement, cache cleanup) — root-side impersonation of the console
+# user is where installers go wrong, and none of it is needed.
+
+pkill -x ufb       2>/dev/null || true
+pkill -x ufb-agent 2>/dev/null || true
+sleep 1
+pkill -9 -x ufb       2>/dev/null || true
+pkill -9 -x ufb-agent 2>/dev/null || true
+
+rm -rf "/Applications/UFB/UFB.app" \
+       "/Applications/UFB/ufb-agent.app" \
+       "/Applications/UFB/UFBTray.app" \
+       "/Applications/UFB/Uninstall UFB.command"
+exit 0

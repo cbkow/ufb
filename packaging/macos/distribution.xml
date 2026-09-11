@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- productbuild Distribution for the UFB macOS installer.
+     @VERSION@ is substituted by scripts/build-mac-pkg.sh from the
+     built UFB.app's CFBundleShortVersionString (no separate pin).
+     Payload lands at /Applications/UFB/{UFB.app, ufb-agent.app,
+     Uninstall UFB.command}; the component package is non-relocatable
+     so Installer can never redirect it onto a dev copy elsewhere. -->
+<installer-gui-script minSpecVersion="2">
+    <title>UFB @VERSION@</title>
+    <organization>dev.ufb</organization>
+    <domains enable_localSystem="true"/>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="arm64"/>
+    <allowed-os-versions>
+        <os-version min="14.0"/>
+    </allowed-os-versions>
+    <choices-outline>
+        <line choice="default">
+            <line choice="dev.ufb.UFB"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="dev.ufb.UFB" visible="false">
+        <pkg-ref id="dev.ufb.UFB"/>
+    </choice>
+    <pkg-ref id="dev.ufb.UFB" version="@VERSION@" onConclusion="none">UFB-core.pkg</pkg-ref>
+</installer-gui-script>
