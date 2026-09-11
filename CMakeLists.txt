@@ -27,7 +27,7 @@ if(CMAKE_HOST_APPLE)
 endif()
 
 project(UFB
-    VERSION 1.2.0
+    VERSION 1.2.1
     DESCRIPTION "Union File Browser (Qt edition)"
     LANGUAGES C CXX
 )
