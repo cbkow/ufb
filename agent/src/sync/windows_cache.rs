@@ -82,7 +82,92 @@ impl CacheIndex {
             domain: mount_id.to_string(),
         };
         index.migrate_blob_layout();
+        index.migrate_path_key_normalize();
         (index, needs_repair)
+    }
+
+    /// One-time migration: collapse the dual path-key format left by the
+    /// pre-fix `rel_from_abs` verbatim-strip bug. Enumerate/read/write rows
+    /// carried a spurious leading `/` (`/job/file`) while create/open rows
+    /// did not (`job/file`), so most files existed as two rows — a real
+    /// (often hydrated) slash row and a size-0 no-slash ghost. Strip the
+    /// leading `/` from every key, keeping the richer row on any collision
+    /// (hydrated first, then larger `nas_size`), and delete the losers'
+    /// blobs. Idempotent — gated on the `path_key_norm` metadata flag.
+    fn migrate_path_key_normalize(&self) {
+        let db = self.db();
+        let done: Option<String> = db
+            .prepare_cached("SELECT value FROM metadata WHERE key='path_key_norm'")
+            .ok()
+            .and_then(|mut s| s.query_row([], |r| r.get(0)).ok());
+        if done.as_deref() == Some("1") {
+            return;
+        }
+
+        let has_slash: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM known_files WHERE path LIKE '/%')",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n != 0)
+            .unwrap_or(false);
+
+        if has_slash {
+            log::info!(
+                "[cache] {}: normalizing path keys (stripping spurious leading '/')",
+                self.domain
+            );
+
+            // Losing rows (a collision's non-preferred duplicate) so their
+            // blobs can be removed. Ghosts are is_hydrated=0 with no blob,
+            // but be defensive against a hydrated loser.
+            // PARTITION must be COLLATE NOCASE to match the `path`
+            // PRIMARY KEY's collation — otherwise `/Foo` and `foo` land in
+            // different partitions, both survive the dedup, and the UPDATE
+            // to their common `foo` key hits a UNIQUE violation.
+            const RANK: &str = "SELECT rowid FROM (
+                    SELECT rowid, ROW_NUMBER() OVER (
+                        PARTITION BY ltrim(path,'/') COLLATE NOCASE
+                        ORDER BY is_hydrated DESC, nas_size DESC, rowid ASC
+                    ) AS rn FROM known_files
+                 ) WHERE rn = 1";
+            let losers: Vec<i64> = db
+                .prepare_cached(&format!(
+                    "SELECT rowid FROM known_files WHERE rowid NOT IN ({RANK})"
+                ))
+                .ok()
+                .and_then(|mut s| {
+                    s.query_map([], |r| r.get::<_, i64>(0))
+                        .ok()
+                        .map(|it| it.filter_map(|r| r.ok()).collect())
+                })
+                .unwrap_or_default();
+
+            let _ = db.execute_batch(&format!(
+                "DELETE FROM known_files WHERE rowid NOT IN ({RANK});
+                 UPDATE known_files
+                    SET path = ltrim(path,'/'), parent_path = ltrim(parent_path,'/');
+                 DELETE FROM visited_folders WHERE rowid NOT IN (
+                     SELECT rowid FROM (
+                         SELECT rowid, ROW_NUMBER() OVER (
+                             PARTITION BY ltrim(nas_path,'/') COLLATE NOCASE
+                             ORDER BY folder_mtime DESC, rowid ASC
+                         ) AS rn FROM visited_folders
+                     ) WHERE rn = 1
+                 );
+                 UPDATE visited_folders SET nas_path = ltrim(nas_path,'/');"
+            ));
+
+            for rowid in losers {
+                let _ = std::fs::remove_file(self.cache_file_path(rowid));
+            }
+        }
+
+        let _ = db.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('path_key_norm','1')",
+            [],
+        );
     }
 
     /// One-time blob-layout migration (v2 = per-domain `by_key/{domain}/`).

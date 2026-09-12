@@ -207,7 +207,20 @@ impl PassthroughFs {
     fn rel_from_abs(&self, abs: &Path) -> String {
         abs.strip_prefix(&self.nas_root)
             .ok()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .map(|p| {
+                // `nas_root` is canonicalized to a VERBATIM path
+                // (`\\?\UNC\server\share`) in `start()`. `Path::strip_prefix`
+                // on a verbatim prefix leaves a LEADING separator on the
+                // remainder (`\job\file`), unlike the non-verbatim case — so
+                // without the trim this yields `/job/file` while `rel_path`
+                // (the create/open path) yields `job/file`, and every file
+                // ends up keyed under BOTH forms: a real row and a size-0
+                // ghost. Trim so the two functions agree. Root → "".
+                p.to_string_lossy()
+                    .replace('\\', "/")
+                    .trim_start_matches('/')
+                    .to_string()
+            })
             .unwrap_or_default()
     }
 }
