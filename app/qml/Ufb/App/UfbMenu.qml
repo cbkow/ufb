@@ -32,8 +32,25 @@ import QtQuick.Controls
 Menu {
     id: control
 
+    // Widest visible item, so labels never elide. The style's Menu has
+    // no implicit content width (a ListView reports 0) and falls back
+    // to its 200px background, which clipped "Compress 2 Items to ZIP".
+    // Reading each item's implicitWidth/visible inside the binding
+    // keeps it live as items are toggled in onAboutToShow.
+    readonly property int maxContentWidth: 420
+    function _widestItem() {
+        let w = 0
+        for (let i = 0; i < control.count; ++i) {
+            const it = control.itemAt(i)
+            if (it && it.visible)
+                w = Math.max(w, it.implicitWidth)
+        }
+        return Math.min(w, maxContentWidth)
+    }
+
     contentItem: ListView {
         implicitHeight: contentHeight
+        implicitWidth: control._widestItem()
         model: control.contentModel
         interactive: Window.window
                      ? contentHeight + control.topPadding + control.bottomPadding > control.height
