@@ -62,7 +62,19 @@ large buffered writes close instantly.
 
 ## Blocking
 
-### 1. Buffered-write files hang ~240 s at close and wedge the file
+### 1. Buffered-write files hang ~240 s at close and wedge the file — FIXED 2026-09-11
+
+**Status: fixed and verified live.** The open context now holds a single
+backing handle opened with the granted access in `open`/`create`, reused
+by `read`/`write`/`flush`, replacing the per-callback fresh SMB handle
+(and the redundant read handle held alongside it). After the fix, the
+same repro closes in **0.012 s** (was 240 s), the file is immediately
+reopenable and overwritable (no more wedge), and a 200 MB buffered copy
+lands in 0.67 s with a matching MD5 through both `U:` and the UNC path. So
+the second open handle during cleanup was indeed what blocked the
+flush-and-purge. Ships in agent ≥1.2.1. Original analysis below.
+
+
 
 This is one bug, not the two I first split it into. A file that received
 **buffered (cached) writes** stalls for a fixed ~240 s when the app closes
@@ -199,6 +211,23 @@ the folder-mtime re-enum that already works.
   `OpenCtx` (fix 1) and rate-limiting the LRU `touch` (e.g. once per N s
   per fh) removes most of it. Raising WinFsp's read/write transfer size in
   `VolumeParams` would also help the app-block-size sensitivity.
+
+- **Classic Windows delete fails ("Incorrect function") — found 2026-09-11.**
+  Surfaced once fix 1 let files reach a normal (non-wedged) state.
+  POSIX-unlink deletes (`rm`, WSL-style) work; classic deletes
+  (`Remove-Item`, `del`, and by extension Explorer permanent-delete)
+  fail, and the cleanup callback fires with `pending_delete=false` and no
+  `FspCleanupDelete` flag — the disposition never reaches us. Cause:
+  `VolumeParams` sets `supports_posix_unlink_rename(true)`, so Windows
+  issues `FileDispositionInformationEx`, but the winfsp 0.12 crate wires
+  only the classic `SetDelete` callback (no newer `Delete` op), so the Ex
+  disposition returns `ERROR_INVALID_FUNCTION`. Not touched by fix 1
+  (delete goes through `set_delete`/`cleanup`, unmodified). Options:
+  drop `supports_posix_unlink_rename` (restores classic delete via
+  CanDelete+SetDelete+Cleanup, but loses delete-of-open-file semantics),
+  or move to a winfsp build exposing the `Delete` interface. Rename works
+  (Explorer's delete-to-Recycle-Bin is a rename), so this bites permanent
+  deletes and apps that unlink directly.
 
 - **Single-strike offline.** One failed 30 s heartbeat flips the whole
   mount offline and fast-fails all SMB ops for up to 30 s. A busy NAS

@@ -51,6 +51,35 @@ fn err_io() -> FspError { FspError::NTSTATUS(STATUS_DISK_FULL) }
 /// park a WinFsp dispatcher thread on the redirector timeout.
 fn err_offline() -> FspError { FspError::NTSTATUS(STATUS_DEVICE_NOT_CONNECTED) }
 
+// Access-mask bits (granted_access) that mean we need a WRITABLE backing
+// handle. Opening the backing SMB file once with the right access and
+// reusing that handle for every read/write callback replaces the old
+// per-write `OpenOptions::open` — that fresh open/close on each sub-1 MiB
+// write callback was thousands of SMB round trips per save.
+const FILE_WRITE_DATA: u32 = 0x0000_0002;
+const FILE_APPEND_DATA: u32 = 0x0000_0004;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
+const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
+const WRITE_ACCESS_MASK: u32 =
+    FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
+
+/// Open the backing NAS file once for the lifetime of a WinFsp open.
+/// `writable` opens read+write (reused by both read and write callbacks);
+/// on failure it falls back to read-only so a write-intent open of a
+/// read-only file still serves reads (WinFsp routes no writes to it).
+fn open_backing(abs: &Path, writable: bool) -> std::io::Result<fs::File> {
+    if writable {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(abs)
+            .or_else(|_| fs::File::open(abs))
+    } else {
+        fs::File::open(abs)
+    }
+}
+
 /// Canonical permissive security descriptor applied to every file. Protected
 /// DACL with Allow-FullAccess to Everyone ("WD" = World). Computed once at
 /// first use via `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
@@ -392,7 +421,7 @@ impl FileSystemContext for PassthroughFs {
         &self,
         file_name: &U16CStr,
         _create_options: u32,
-        _granted_access: u32,
+        granted_access: u32,
         file_info: &mut OpenFileInfo,
     ) -> winfsp::Result<Self::FileContext> {
         // Offline: opening needs a live SMB handle (reads/writes go
@@ -413,7 +442,10 @@ impl FileSystemContext for PassthroughFs {
                 pending_delete: AtomicBool::new(false),
             }
         } else {
-            let h = fs::File::open(&abs).map_err(|_| err_access_denied())?;
+            // Open once with the access WinFsp granted, and reuse this
+            // handle for every read/write callback on this open.
+            let writable = (granted_access & WRITE_ACCESS_MASK) != 0;
+            let h = open_backing(&abs, writable).map_err(|_| err_access_denied())?;
             OpenCtx::File {
                 abs,
                 handle: h,
@@ -687,12 +719,12 @@ impl FileSystemContext for PassthroughFs {
         let _guard = rowid.map(|r| self.cache.key_lock(r));
         let _guard = _guard.as_ref().map(|l| l.write().unwrap());
 
-        let f = fs::OpenOptions::new()
-            .write(true)
-            .create(false)
-            .truncate(false)
-            .open(&abs)
-            .map_err(|_| err_access_denied())?;
+        // Reuse the writable backing handle opened in `open`/`create`
+        // instead of opening a fresh SMB handle per callback.
+        let f = match &**ctx {
+            OpenCtx::File { handle, .. } => handle,
+            OpenCtx::Dir { .. } => return Err(err_access_denied()),
+        };
 
         // Prefer the cached size for append resolution — the post-open
         // SMB stat can serve a stale (pre-previous-write) length from
@@ -868,7 +900,9 @@ impl FileSystemContext for PassthroughFs {
                 pending_delete: AtomicBool::new(false),
             }
         } else {
-            let h = fs::File::open(&abs).map_err(|_| err_access_denied())?;
+            // A create always grants write — open the reusable handle
+            // read+write so the write callbacks that follow reuse it.
+            let h = open_backing(&abs, true).map_err(|_| err_access_denied())?;
             OpenCtx::File {
                 abs,
                 handle: h,
@@ -1056,14 +1090,14 @@ impl FileSystemContext for PassthroughFs {
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
         let Some(ctx) = ctx else { return Ok(()) };
-        if let OpenCtx::File { abs, .. } = &**ctx {
+        if let OpenCtx::File { abs, handle, .. } = &**ctx {
             // Real durability point now that write() no longer fsyncs
-            // per callback: one FlushFileBuffers per app-requested
-            // flush/close instead of one per 64KB write.
+            // per callback: flush the already-open backing handle once
+            // per app-requested flush/close instead of reopening (and
+            // instead of one FlushFileBuffers per 64KB write). A no-op
+            // sync on a read-only handle just errors harmlessly.
             if self.health.is_online() {
-                if let Ok(f) = fs::OpenOptions::new().write(true).open(abs) {
-                    let _ = f.sync_all();
-                }
+                let _ = handle.sync_all();
             }
             if let Ok(meta) = fs::metadata(abs) {
                 let rel = self.rel_from_abs(abs);
