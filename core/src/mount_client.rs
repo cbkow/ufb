@@ -135,8 +135,9 @@ pub enum UfbToAgent {
     ReloadConfig,
     GetStates,
     Ping,
-    /// Tell the agent to drain mounts and exit. Sent from UFB's
-    /// `aboutToQuit` so closing UFB also shuts down the agent.
+    /// Tell the agent to drain mounts and exit. NOT sent on GUI quit
+    /// (audit 2026-09-11 M-3: the agent is the sync host and outlives
+    /// the GUI); available for an explicit opt-in shutdown only.
     Quit,
     /// User-driven freshness signal (window focus, refresh button).
     /// On macOS, agent posts a Darwin notification so FileProvider drains
@@ -205,6 +206,13 @@ pub struct MountConfig {
     pub smb_mount_path: Option<String>,
     #[serde(default)]
     pub mount_path_linux: Option<String>,
+    /// Agent-side override for the user-facing macOS mount path (see
+    /// `agent/src/config.rs::mount_path_macos`, its share-name
+    /// collision resolver). Present here so a GUI save round-trips it
+    /// — audit 2026-09-11 P2 twin drift: this was the one agent field
+    /// the typed save path silently dropped.
+    #[serde(default, rename = "mountPathMacos")]
+    pub mount_path_macos: Option<String>,
     #[serde(default = "default_true")]
     pub is_jobs_folder: bool,
 
@@ -696,44 +704,138 @@ pub fn config_file_path() -> Option<std::path::PathBuf> {
     None
 }
 
+impl MountsConfig {
+    fn empty() -> Self {
+        MountsConfig {
+            version: 1,
+            mounts: vec![],
+            sync_cache_root: None,
+        }
+    }
+}
+
+// audit 2026-09-11 M-4: mounts.json is shared with the agent and used
+// to be (a) written with a plain `fs::write` — a crash or power loss
+// mid-write left a truncated file — and (b) read with
+// `unwrap_or(empty)`, so a truncated/half-written/hand-edited file
+// read as "no mounts": the GUI retired every local mount task (now
+// unmounting them), the agent tore down every sync mount, and a later
+// save persisted the emptiness. Reads now fail loudly and callers keep
+// the last good config; writes go tmp → fsync → rename and keep a
+// `.bak` of the previous parseable file.
+
+/// Last config that parsed successfully in this process. `load_mount_config`
+/// falls back to it when the file on disk is unreadable so a transient
+/// bad read can never look like "the user deleted all their mounts".
+static LAST_GOOD_CONFIG: std::sync::Mutex<Option<MountsConfig>> = std::sync::Mutex::new(None);
+
+/// Read + parse `path`. A missing file is an empty config (fresh
+/// install); anything else that isn't a valid MountsConfig is an Err
+/// carrying a human-readable reason.
+pub fn try_load_mount_config_from(path: &std::path::Path) -> Result<MountsConfig, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(MountsConfig::empty()),
+        Err(e) => return Err(format!("read {} failed: {}", path.display(), e)),
+    };
+    serde_json::from_str(&contents)
+        .map_err(|e| format!("parse {} failed: {}", path.display(), e))
+}
+
+/// Read mounts.json, failing (not emptying) on a corrupt file.
+pub fn try_load_mount_config() -> Result<MountsConfig, String> {
+    let path = config_file_path().ok_or_else(|| "Could not determine config file path".to_string())?;
+    let cfg = try_load_mount_config_from(&path)?;
+    if let Ok(mut g) = LAST_GOOD_CONFIG.lock() {
+        *g = Some(cfg.clone());
+    }
+    Ok(cfg)
+}
+
+/// Infallible read for callers that can't surface an error: on a
+/// corrupt file this logs at ERROR and returns the previous
+/// successfully-parsed config from this process (or empty when there
+/// never was one — a fresh process facing a corrupt file has nothing
+/// better; the agent's own copy and the `.bak` are the recovery path).
 pub fn load_mount_config() -> MountsConfig {
-    let path = match config_file_path() {
-        Some(p) => p,
-        None => {
-            return MountsConfig {
-                version: 1,
-                mounts: vec![],
-                sync_cache_root: None,
+    match try_load_mount_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let last = LAST_GOOD_CONFIG.lock().ok().and_then(|g| g.clone());
+            match last {
+                Some(cfg) => {
+                    log::error!(
+                        "mounts.json unreadable ({}); keeping the last good config ({} mount(s))",
+                        e,
+                        cfg.mounts.len()
+                    );
+                    cfg
+                }
+                None => {
+                    log::error!(
+                        "mounts.json unreadable ({}) and no earlier good copy in this process — treating as empty; see mounts.json.bak",
+                        e
+                    );
+                    MountsConfig::empty()
+                }
             }
         }
-    };
-    if !path.exists() {
-        return MountsConfig {
-            version: 1,
-            mounts: vec![],
-            sync_cache_root: None,
-        };
     }
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or(MountsConfig {
-            version: 1,
-            mounts: vec![],
-            sync_cache_root: None,
-        }),
-        Err(_) => MountsConfig {
-            version: 1,
-            mounts: vec![],
-            sync_cache_root: None,
-        },
+}
+
+/// Write `bytes` to `path` atomically: `<path>.tmp` → fsync → rename.
+/// A reader (the agent, another UFB) sees either the old file or the
+/// complete new one, never a torn write.
+pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{}.tmp", ext),
+        None => "tmp".to_string(),
+    });
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
     }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Persist `config` at `path`. The existing file, if it parses, is
+/// copied to `<path>.bak` first so a bad save (or a bad hand-edit
+/// after it) always leaves one known-good generation on disk; an
+/// existing corrupt file is NOT promoted to `.bak` — that would
+/// overwrite the very copy the user needs.
+pub fn save_mount_config_to(path: &std::path::Path, config: &MountsConfig) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    if path.exists() {
+        match try_load_mount_config_from(path) {
+            Ok(_) => {
+                let bak = path.with_extension("json.bak");
+                if let Err(e) = std::fs::copy(path, &bak) {
+                    log::warn!("mounts.json: backup to {} failed: {}", bak.display(), e);
+                }
+            }
+            Err(e) => log::warn!(
+                "mounts.json: existing file is corrupt ({}); leaving the previous .bak untouched",
+                e
+            ),
+        }
+    }
+    write_file_atomic(path, json.as_bytes())
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+    if let Ok(mut g) = LAST_GOOD_CONFIG.lock() {
+        *g = Some(config.clone());
+    }
+    Ok(())
 }
 
 pub fn save_mount_config(config: &MountsConfig) -> Result<(), String> {
     let path = config_file_path().ok_or_else(|| "Could not determine config file path".to_string())?;
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("Failed to write config: {}", e))?;
-    Ok(())
+    save_mount_config_to(&path, config)
 }
 
 /// Shared socket-path resolution — mirrors `unix_server::socket_path()`
@@ -809,5 +911,89 @@ fn connect_to_agent() -> io::Result<std::fs::File> {
             io::ErrorKind::ConnectionRefused,
             format!("CreateFileW failed: {}", e),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(ids: &[&str]) -> MountsConfig {
+        let mounts: Vec<MountConfig> = ids
+            .iter()
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "displayName": id,
+                    "nasSharePath": format!("\\\\nas\\{}", id),
+                    "mountPathMacos": format!("/custom/{}", id),
+                }))
+                .unwrap()
+            })
+            .collect();
+        MountsConfig { version: 1, mounts, sync_cache_root: None }
+    }
+
+    // audit M-4: tmp → fsync → rename leaves no `.tmp` behind and the
+    // file parses back; the second save promotes the first to `.bak`.
+    #[test]
+    fn atomic_save_round_trips_and_keeps_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mounts.json");
+        let tmp = dir.path().join("mounts.json.tmp");
+        let bak = dir.path().join("mounts.json.bak");
+
+        save_mount_config_to(&path, &cfg_with(&["a"])).unwrap();
+        assert!(path.exists());
+        assert!(!tmp.exists(), "tmp must be renamed away");
+        assert!(!bak.exists(), "no previous generation to back up");
+        let back = try_load_mount_config_from(&path).unwrap();
+        assert_eq!(back.mounts.len(), 1);
+        assert_eq!(back.mounts[0].id, "a");
+        // Twin-drift field survives the typed round-trip.
+        assert_eq!(back.mounts[0].mount_path_macos.as_deref(), Some("/custom/a"));
+
+        save_mount_config_to(&path, &cfg_with(&["a", "b"])).unwrap();
+        assert!(!tmp.exists());
+        let cur = try_load_mount_config_from(&path).unwrap();
+        assert_eq!(cur.mounts.len(), 2);
+        let prev = try_load_mount_config_from(&bak).unwrap();
+        assert_eq!(prev.mounts.len(), 1, ".bak is the previous good generation");
+    }
+
+    #[test]
+    fn corrupt_file_is_an_error_not_empty_and_is_not_promoted_to_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mounts.json");
+        let bak = dir.path().join("mounts.json.bak");
+
+        save_mount_config_to(&path, &cfg_with(&["a"])).unwrap();
+        save_mount_config_to(&path, &cfg_with(&["a", "b"])).unwrap();
+        // Simulate a torn write / hand-edit.
+        std::fs::write(&path, "{\"version\":1,\"mounts\":[{\"id\":\"a\"").unwrap();
+        let err = try_load_mount_config_from(&path).unwrap_err();
+        assert!(err.contains("parse"), "{err}");
+
+        // Saving over the corrupt file must not clobber the good .bak.
+        save_mount_config_to(&path, &cfg_with(&["c"])).unwrap();
+        assert_eq!(try_load_mount_config_from(&bak).unwrap().mounts.len(), 1);
+        assert_eq!(try_load_mount_config_from(&path).unwrap().mounts[0].id, "c");
+    }
+
+    #[test]
+    fn missing_file_is_empty_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = try_load_mount_config_from(&dir.path().join("nope.json")).unwrap();
+        assert!(cfg.mounts.is_empty());
+    }
+
+    #[test]
+    fn write_file_atomic_replaces_existing_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.json");
+        write_file_atomic(&path, b"one").unwrap();
+        write_file_atomic(&path, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        assert!(!dir.path().join("x.json.tmp").exists());
     }
 }

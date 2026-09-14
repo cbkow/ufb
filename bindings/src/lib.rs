@@ -54,10 +54,23 @@ pub extern "C" fn ufb_bindings_phase0_smoke_test() {
     );
 }
 
-/// Tell the ufb-agent to shut down. Called from C++ on
-/// `QGuiApplication::aboutToQuit` so closing UFB also stops the agent
-/// — by default the agent stays running headless (mounts survive UI
-/// restarts), but the user expects close-window to be a full quit.
+/// The GUI's `QGuiApplication::aboutToQuit` hook (app/main.cpp).
+/// audit 2026-09-11 M-3: cancels in-flight NetFS mount requests (a
+/// process dying with one pending wedges NetAuthSysAgent machine-wide)
+/// and stops the local mount tasks WITHOUT unmounting — plain mounts
+/// are ordinary OS mounts the user expects to keep. Does NOT stop the
+/// agent: it is the sync host and outlives GUI quits by design.
+/// Blocking, bounded by the NetFS cancel grace (10s) only when a
+/// request refuses to acknowledge its cancel.
+#[unsafe(no_mangle)]
+pub extern "C" fn ufb_gui_about_to_quit() {
+    services::mount::about_to_quit();
+}
+
+/// OPT-IN, not wired: tell the ufb-agent to shut down. Nothing calls
+/// this today — closing UFB leaves the agent running as the sync host
+/// (see `ufb_gui_about_to_quit`). Kept for a future explicit
+/// "Quit and stop syncing" action.
 #[unsafe(no_mangle)]
 pub extern "C" fn ufb_shutdown_agent_blocking() {
     services::mount::shutdown_agent_for_quit();

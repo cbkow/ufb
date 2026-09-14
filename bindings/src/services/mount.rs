@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use ufb_core::events::MountEvents;
 use ufb_core::mount_client::{
     self, AckMsg, CacheStatsMsg, ConflictDetectedMsg, ErrorMsg, MountClient, MountIdMsg,
-    MountStateUpdateMsg, MountsConfig, UfbToAgent,
+    MountStateSnapshotMsg, MountStateUpdateMsg, MountsConfig, UfbToAgent,
 };
 
 use crate::runtime::shared_runtime;
@@ -43,14 +43,19 @@ pub struct MountInfo {
     nas_share_path: String,
     #[serde(default, rename = "credentialKey")]
     credential_key: String,
-    #[serde(default)]
+    /// `default_true` to match BOTH twins (core `MountConfig` and the
+    /// agent's config.rs): a mounts.json entry without the key is an
+    /// enabled mount everywhere else, so defaulting it to false here
+    /// hid the row and kept its local task from ever starting (audit
+    /// 2026-09-11 P2 twin drift).
+    #[serde(default = "default_true")]
     enabled: bool,
     /// Mirrors a Bookmark's isProjectFolder flag - tells the
     /// FileBrowser to expose the New Job button + the Synced
     /// column when the user navigates into this mount. Without
     /// this field on the IPC payload the QML side couldn't tell
     /// a mount-rooted jobs folder from any other mount.
-    #[serde(default, rename = "isJobsFolder")]
+    #[serde(default = "default_true", rename = "isJobsFolder")]
     is_jobs_folder: bool,
     /// "Fake" mount: a bookmark that lives in the Mounts UI. The
     /// agent never manages it; nas_share_path is a native path used
@@ -67,11 +72,19 @@ pub struct MountInfo {
     mount_drive_letter: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(serde::Deserialize)]
 struct MountsFile {
     #[serde(default)]
     mounts: Vec<MountInfo>,
 }
+
+/// Last slim config that parsed. See `load_mount_configs`.
+static LAST_GOOD_CONFIGS: std::sync::Mutex<Option<Vec<MountInfo>>> =
+    std::sync::Mutex::new(None);
 
 fn mounts_json_path() -> Option<PathBuf> {
     // Mirror `agent/src/config.rs::config_file_path` exactly. The
@@ -146,7 +159,9 @@ fn persist_drive_letter(mount_id: &str, letter: char) {
     }
     match serde_json::to_string_pretty(&v) {
         Ok(s) => {
-            if let Err(e) = std::fs::write(&path, s) {
+            // Atomic like the typed save path (audit M-4): the agent
+            // reads this file too and must never see a torn write.
+            if let Err(e) = mount_client::write_file_atomic(&path, s.as_bytes()) {
                 log::warn!("mount: persist_drive_letter write failed: {}", e);
             } else {
                 log::info!(
@@ -159,19 +174,41 @@ fn persist_drive_letter(mount_id: &str, letter: char) {
     }
 }
 
+/// Read the slim config view. A missing file is an empty config; an
+/// unreadable or corrupt one returns the LAST GOOD parse from this
+/// process (audit 2026-09-11 M-4): returning empty here fed
+/// `apply_config` an empty local set, which retired — and now
+/// unmounts — every GUI-owned mount off a torn write.
 fn load_mount_configs() -> Vec<MountInfo> {
     let Some(path) = mounts_json_path() else {
         return Vec::new();
     };
-    let Ok(data) = std::fs::read_to_string(&path) else {
-        log::warn!("mount: could not read {:?}", path);
-        return Vec::new();
+    let parsed: Result<Vec<MountInfo>, String> = match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str::<MountsFile>(&data)
+            .map(|f| f.mounts)
+            .map_err(|e| format!("parse {:?} failed: {}", path, e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("read {:?} failed: {}", path, e)),
     };
-    match serde_json::from_str::<MountsFile>(&data) {
-        Ok(f) => f.mounts,
+    match parsed {
+        Ok(mounts) => {
+            if let Ok(mut g) = LAST_GOOD_CONFIGS.lock() {
+                *g = Some(mounts.clone());
+            }
+            mounts
+        }
         Err(e) => {
-            log::warn!("mount: parse {:?} failed: {}", path, e);
-            Vec::new()
+            let last = LAST_GOOD_CONFIGS.lock().ok().and_then(|g| g.clone());
+            match last {
+                Some(m) => {
+                    log::error!("mount: {} — keeping last good config ({} mount(s))", e, m.len());
+                    m
+                }
+                None => {
+                    log::error!("mount: {} — no earlier good copy; treating as empty (see mounts.json.bak)", e);
+                    Vec::new()
+                }
+            }
         }
     }
 }
@@ -218,11 +255,31 @@ fn agent_required() -> bool {
     }
 }
 
+/// Ids that are enabled AND sync-enabled — agent-owned. A local task
+/// retiring for one of these hands its live SMB mount to the agent
+/// instead of unmounting (see `local_mounts::apply_config`).
+#[cfg(any(target_os = "macos", windows))]
+fn agent_owned_ids_from_configs(configs: &[MountInfo]) -> Vec<String> {
+    configs
+        .iter()
+        .filter(|c| c.enabled && !c.unmanaged && c.sync_enabled)
+        .map(|c| c.id.clone())
+        .collect()
+}
+
+/// Reconcile local mount tasks with the current mounts.json.
+#[cfg(any(target_os = "macos", windows))]
+fn reconcile_local_mounts(fwd: ufb_core::events::MountEventsArc) {
+    let configs = load_mount_configs();
+    let handoff = agent_owned_ids_from_configs(&configs);
+    crate::local_mounts::apply_config(local_specs_from_configs(configs), &handoff, fwd);
+}
+
 /// The set of mounts the GUI owns locally: enabled, real (not
 /// bookmark-only), not sync.
 #[cfg(any(target_os = "macos", windows))]
-fn local_specs_from_configs() -> Vec<crate::local_mounts::LocalMountSpec> {
-    load_mount_configs()
+fn local_specs_from_configs(configs: Vec<MountInfo>) -> Vec<crate::local_mounts::LocalMountSpec> {
+    configs
         .into_iter()
         .filter(|c| c.enabled && !c.unmanaged && !c.sync_enabled)
         .map(|c| crate::local_mounts::LocalMountSpec {
@@ -252,15 +309,46 @@ fn send_mount_id(cmd: UfbToAgent) {
     }
 }
 
-/// Called from C++ on `QGuiApplication::aboutToQuit` (via the
-/// `ufb_shutdown_agent_blocking` extern). Sends `UfbToAgent::Quit` to
-/// the agent and waits briefly for the pipe to drain so the message
-/// actually reaches the agent before this process tears the tokio
-/// runtime down.
+/// The GUI's `aboutToQuit` work (reached via the `ufb_gui_about_to_quit`
+/// extern in lib.rs). audit 2026-09-11 M-3:
+///   1. Cancel every in-flight NetFS request through the API — a
+///      process exiting with one pending wedges NetAuthSysAgent for
+///      the whole login session (macos_mounts.rs netfs header).
+///   2. Stop the local mount tasks WITHOUT unmounting: plain mounts
+///      are ordinary OS mounts the user expects to persist across an
+///      app quit.
+///   3. Do NOT tell the agent to quit — product decision: the agent is
+///      the sync host and outlives GUI sessions (sync mounts, Finder
+///      badges, the FileProvider domain all keep working with the
+///      window closed). `shutdown_agent_for_quit` stays available as
+///      an opt-in but nothing calls it.
+pub fn about_to_quit() {
+    log::info!("mount: about_to_quit() entered");
+    #[cfg(target_os = "macos")]
+    {
+        let n = ufb_core::macos_mounts::cancel_inflight_mounts();
+        if n > 0 {
+            log::warn!("mount: cancelled {} in-flight NetFS mount request(s) at quit", n);
+        }
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        let n = crate::local_mounts::shutdown_for_quit();
+        log::info!("mount: stopped {} local mount task(s) at quit (mounts left up)", n);
+    }
+}
+
+/// OPT-IN, currently unused (audit 2026-09-11 M-3): sends
+/// `UfbToAgent::Quit` and waits briefly for the pipe to drain so the
+/// message reaches the agent before this process tears the tokio
+/// runtime down. The product decision is that closing UFB does NOT
+/// stop the agent (it is the sync host — see `about_to_quit`); this
+/// is kept for a future explicit "Quit UFB and stop syncing" action.
 ///
 /// The agent's Quit handler (see `agent/src/mount_service.rs`)
 /// unmounts every share and calls `process::exit(0)`, so by the time
 /// the wait completes the agent is already gone.
+#[allow(dead_code)]
 pub fn shutdown_agent_for_quit() {
     log::info!("mount: shutdown_agent_for_quit() entered");
     let client = shared_client();
@@ -522,27 +610,84 @@ fn read_agent_pid() -> Option<i32> {
         .and_then(|s| s.trim().parse::<i32>().ok())
 }
 
+/// Executable path of `pid` via `proc_pidpath(2)`. None when the
+/// process is gone, a zombie, or not ours to inspect.
+#[cfg(target_os = "macos")]
+fn process_exe_path(pid: i32) -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    Some(PathBuf::from(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// True once `pid` has exited (kill(0) fails) or is a reaped-nothing
+/// zombie (no executable image any more).
+#[cfg(target_os = "macos")]
+fn process_gone(pid: i32) -> bool {
+    let signalable = unsafe { libc::kill(pid, 0) == 0 };
+    !signalable || process_exe_path(pid).is_none()
+}
+
 /// Heal-on-open (macOS), trimmed in 1.0.7: the launchctl kickstart /
 /// bootstrap steps died with the LaunchAgent-plist concept (nothing
 /// installs one; F2's SMAppService + socket activation replaces it).
-///   1. Read PID. If alive → SIGKILL it (it's stuck — IPC failed).
+///   1. Read PID. If it is a live `ufb-agent`, ask it to exit
+///      (SIGTERM, 3s grace) and only then SIGKILL — audit 2026-09-11
+///      L-1: the old unconditional SIGKILL hit whatever process had
+///      recycled the number after a reboot (the agent's PID file
+///      outlived it) and killed a healthy VFS-hosting agent whose only
+///      fault was a dead socket accept loop, leaving dead loopback NFS
+///      mounts behind. SIGTERM lets the agent unmount cleanly.
 ///   2. posix_spawn with setsid() so the child detaches from our
 ///      process group and survives Qt-app exit.
 /// Then waits up to 5s for the agent socket to come back.
 #[cfg(target_os = "macos")]
 fn heal_macos() -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    // Step 1: kill stale agent if its PID is still alive.
+    // Step 1: retire the stale agent — but only if the PID really is
+    // one. proc_pidpath is the identity check; a recycled PID that
+    // belongs to Safari/Terminal/anything else is left alone.
     if let Some(pid) = read_agent_pid() {
-        let alive = unsafe { libc::kill(pid, 0) == 0 };
-        if alive {
-            log::info!("[heal] stale agent pid {} still alive — sending SIGKILL", pid);
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+        match process_exe_path(pid) {
+            Some(exe) if exe.file_name().and_then(|n| n.to_str()) == Some("ufb-agent") => {
+                log::warn!(
+                    "[heal] agent pid {} ({}) is alive but not answering IPC — sending SIGTERM",
+                    pid,
+                    exe.display()
+                );
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline && !process_gone(pid) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if process_gone(pid) {
+                    log::info!("[heal] agent pid {} exited on SIGTERM", pid);
+                } else {
+                    log::warn!(
+                        "[heal] agent pid {} ignored SIGTERM for 3s — sending SIGKILL",
+                        pid
+                    );
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
-            std::thread::sleep(Duration::from_millis(500));
+            Some(exe) => log::warn!(
+                "[heal] agent.pid names pid {} but that is {} — stale PID file (recycled pid), not signalling",
+                pid,
+                exe.display()
+            ),
+            None => log::info!("[heal] agent.pid names pid {} which is gone — stale PID file", pid),
         }
     }
 
@@ -580,6 +725,25 @@ fn wait_for_agent() -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(200));
     }
     Err("Agent did not come up within 5s".into())
+}
+
+/// `spawn_agent_if_needed` on a detached worker thread. Every Qt-thread
+/// caller goes through here (audit 2026-09-11 P2): the chain blocks up
+/// to ~5.5s (SIGTERM grace, 500ms post-kill sleep, 5s socket poll) and
+/// used to freeze the GUI on start and on every config save that
+/// introduced a sync mount. Only the cheap `is_agent_running` probe
+/// stays synchronous. Concurrent callers are harmless — the spawn is
+/// idempotent behind that probe.
+fn spawn_agent_in_background(reason: &'static str) {
+    std::thread::Builder::new()
+        .name("ufb-agent-spawn".into())
+        .spawn(move || {
+            if let Err(e) = spawn_agent_if_needed() {
+                log::warn!("mount: agent spawn ({}) failed: {}", reason, e);
+            }
+        })
+        .map(|_| ())
+        .unwrap_or_else(|e| log::warn!("mount: could not start agent-spawn thread: {}", e));
 }
 
 /// Spawn or revive the agent if it isn't accepting IPC. macOS uses
@@ -846,13 +1010,12 @@ impl qobject::Mount {
     }
 
     fn launch_agent(self: &qobject::Mount) -> cxx_qt_lib::QString {
-        match spawn_agent_if_needed() {
-            Ok(()) => cxx_qt_lib::QString::from(""),
-            Err(e) => {
-                log::warn!("mount: launch_agent failed: {}", e);
-                cxx_qt_lib::QString::from(&e)
-            }
-        }
+        // Off the Qt thread (audit 2026-09-11 P2 GUI-thread block):
+        // the heal chain can sit ~5.5s in SIGTERM grace + socket
+        // polling. Readiness surfaces through `connected` when the
+        // IPC loop attaches; a spawn failure is logged.
+        spawn_agent_in_background("launch_agent");
+        cxx_qt_lib::QString::from("")
     }
 
     fn read_mount_configs(self: &qobject::Mount) -> cxx_qt_lib::QString {
@@ -892,6 +1055,21 @@ impl qobject::Mount {
             let rust_mut = self.as_mut().rust_mut();
             let rust = unsafe { rust_mut.get_unchecked_mut() };
             rust.configs = configs.into_iter().map(|c| (c.id.clone(), c)).collect();
+            // Ids deleted from config leave the states map too: a
+            // retiring local task emits state_removed for itself, but
+            // an agent-owned id only vanishes when the agent's next
+            // snapshot omits it — prune here so a deleted mount's
+            // stale row/live root doesn't linger in between (audit
+            // 2026-09-11 P2 retire).
+            let gone: Vec<String> = rust
+                .states
+                .keys()
+                .filter(|id| !rust.configs.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in gone {
+                rust.states.remove(&id);
+            }
             publish_live_roots(&rust.states, &rust.configs);
             serialize_merged(&rust.states, &rust.configs)
         };
@@ -907,15 +1085,10 @@ impl qobject::Mount {
         #[cfg(any(target_os = "macos", windows))]
         {
             if let Some(fwd) = shared_forwarder().get() {
-                crate::local_mounts::apply_config(
-                    local_specs_from_configs(),
-                    fwd.clone(),
-                );
+                reconcile_local_mounts(fwd.clone());
             }
             if required && !shared_client().is_agent_running() {
-                if let Err(e) = spawn_agent_if_needed() {
-                    log::warn!("mount: agent spawn after config save failed: {}", e);
-                }
+                spawn_agent_in_background("config save");
             }
         }
         cxx_qt_lib::QString::from("")
@@ -1220,9 +1393,7 @@ impl qobject::Mount {
         self.as_mut().set_agent_required(required);
         AGENT_REQUIRED.store(required, std::sync::atomic::Ordering::SeqCst);
         if required {
-            if let Err(e) = spawn_agent_if_needed() {
-                log::warn!("mount: auto-launch agent failed: {}", e);
-            }
+            spawn_agent_in_background("startup");
         } else {
             log::info!("mount: no sync mounts configured — agent not spawned (GUI owns plain mounts)");
         }
@@ -1240,10 +1411,7 @@ impl qobject::Mount {
         #[cfg(any(target_os = "macos", windows))]
         {
             let _ = shared_forwarder().set(forwarder.clone());
-            crate::local_mounts::apply_config(
-                local_specs_from_configs(),
-                forwarder.clone(),
-            );
+            reconcile_local_mounts(forwarder.clone());
         }
 
         let client = shared_client();
@@ -1391,59 +1559,177 @@ struct MountEventsForwarder {
     qt_handle: cxx_qt::CxxQtThread<qobject::Mount>,
 }
 
+/// Shared body of `state_update` / `local_state_update`: merge one
+/// update into the states map and republish.
+fn apply_state_update(
+    mut mount: core::pin::Pin<&mut qobject::Mount>,
+    update: MountStateUpdateMsg,
+) {
+    use cxx_qt::CxxQtType;
+    // Update map + re-encode JSON merged with static configs.
+    let new_json = {
+        let rust_mut = mount.as_mut().rust_mut();
+        let rust = unsafe { rust_mut.get_unchecked_mut() };
+
+        // Letter stability (slice B): the first time a mount
+        // lands on a letter with no configured preference,
+        // that letter becomes its sticky mountDriveLetter so
+        // it never drifts on later mounts/reboots. Applies to
+        // both GUI-owned plain mounts and agent-reported sync
+        // letters (same state stream). User-chosen letters are
+        // never overwritten (only empty fields are filled).
+        #[cfg(windows)]
+        if update.state == "mounted" {
+            if let Some(letter) = update
+                .mounted_at
+                .as_deref()
+                .filter(|p| p.get(1..2) == Some(":"))
+                .and_then(|p| p.chars().next())
+                .filter(|c| c.is_ascii_alphabetic())
+            {
+                if let Some(cfg) = rust.configs.get_mut(&update.mount_id) {
+                    if cfg.mount_drive_letter.trim().is_empty() {
+                        persist_drive_letter(&update.mount_id, letter);
+                        cfg.mount_drive_letter =
+                            letter.to_ascii_uppercase().to_string();
+                        crate::local_mounts::note_assigned_letter(
+                            &update.mount_id,
+                            letter,
+                        );
+                    }
+                }
+            }
+        }
+
+        rust.states.insert(update.mount_id.clone(), update);
+        publish_live_roots(&rust.states, &rust.configs);
+        serialize_merged(&rust.states, &rust.configs)
+    };
+    mount.as_mut().set_mount_states_json(cxx_qt_lib::QString::from(&new_json));
+}
+
+/// Ids whose lifecycle the GUI runs itself. Everything else in the
+/// states map came from the agent.
+#[cfg(any(target_os = "macos", windows))]
+fn is_gui_owned(id: &str) -> bool {
+    crate::local_mounts::is_local(id)
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn is_gui_owned(_id: &str) -> bool {
+    false
+}
+
 impl MountEvents for MountEventsForwarder {
     fn connection_changed(&self, connected: bool) {
         AGENT_CONNECTED.store(connected, std::sync::atomic::Ordering::SeqCst);
         let _ = self.qt_handle.queue(move |mut mount| {
-            mount.as_mut().set_connected(connected);
-        });
-    }
-
-    fn state_update(&self, update: &MountStateUpdateMsg) {
-        let update = update.clone();
-        let _ = self.qt_handle.queue(move |mut mount| {
             use cxx_qt::CxxQtType;
-            // Update map + re-encode JSON merged with static configs.
+            mount.as_mut().set_connected(connected);
+            if connected {
+                return;
+            }
+            // Agent gone: its mounts' last-known "mounted" + mounted_at
+            // would keep pointing identity resolution and Open/Reveal
+            // at loopback NFS mountpoints that no longer answer. Mark
+            // every agent-owned entry disconnected (GUI-owned ones
+            // are unaffected — their tasks are still running). The
+            // snapshot on reconnect restores the truth. audit
+            // 2026-09-11 P2 state_snapshot.
             let new_json = {
                 let rust_mut = mount.as_mut().rust_mut();
                 let rust = unsafe { rust_mut.get_unchecked_mut() };
-
-                // Letter stability (slice B): the first time a mount
-                // lands on a letter with no configured preference,
-                // that letter becomes its sticky mountDriveLetter so
-                // it never drifts on later mounts/reboots. Applies to
-                // both GUI-owned plain mounts and agent-reported sync
-                // letters (same state stream). User-chosen letters are
-                // never overwritten (only empty fields are filled).
-                #[cfg(windows)]
-                if update.state == "mounted" {
-                    if let Some(letter) = update
-                        .mounted_at
-                        .as_deref()
-                        .filter(|p| p.get(1..2) == Some(":"))
-                        .and_then(|p| p.chars().next())
-                        .filter(|c| c.is_ascii_alphabetic())
-                    {
-                        if let Some(cfg) = rust.configs.get_mut(&update.mount_id) {
-                            if cfg.mount_drive_letter.trim().is_empty() {
-                                persist_drive_letter(&update.mount_id, letter);
-                                cfg.mount_drive_letter =
-                                    letter.to_ascii_uppercase().to_string();
-                                crate::local_mounts::note_assigned_letter(
-                                    &update.mount_id,
-                                    letter,
-                                );
-                            }
-                        }
+                let mut changed = false;
+                for (id, st) in rust.states.iter_mut() {
+                    if is_gui_owned(id) || st.state == "disconnected" {
+                        continue;
                     }
+                    st.state = "disconnected".to_string();
+                    st.state_detail = "Agent disconnected".to_string();
+                    st.mounted_at = None;
+                    st.sync_state = None;
+                    st.sync_state_detail = None;
+                    changed = true;
                 }
-
-                rust.states.insert(update.mount_id.clone(), update);
+                if !changed {
+                    return;
+                }
                 publish_live_roots(&rust.states, &rust.configs);
                 serialize_merged(&rust.states, &rust.configs)
             };
             mount.as_mut().set_mount_states_json(cxx_qt_lib::QString::from(&new_json));
         });
+    }
+
+    /// Authoritative replacement of the AGENT-owned half of the map:
+    /// every id the agent no longer reports is dropped, GUI-owned ids
+    /// are kept untouched. The trait default re-emitted entries one by
+    /// one and could never remove anything, so a mount deleted while
+    /// the GUI was up stayed on screen until restart (audit 2026-09-11
+    /// P2 state_snapshot).
+    fn state_snapshot(&self, snapshot: &MountStateSnapshotMsg) {
+        let entries = snapshot.mounts.clone();
+        let _ = self.qt_handle.queue(move |mut mount| {
+            use cxx_qt::CxxQtType;
+            let new_json = {
+                let rust_mut = mount.as_mut().rust_mut();
+                let rust = unsafe { rust_mut.get_unchecked_mut() };
+                rust.states.retain(|id, _| is_gui_owned(id));
+                for e in entries {
+                    if is_gui_owned(&e.mount_id) {
+                        // The agent still tracking a GUI-owned id
+                        // (mixed-version fleet / hand-off window) —
+                        // the local task is the truth.
+                        continue;
+                    }
+                    rust.states.insert(e.mount_id.clone(), e);
+                }
+                publish_live_roots(&rust.states, &rust.configs);
+                serialize_merged(&rust.states, &rust.configs)
+            };
+            mount.as_mut().set_mount_states_json(cxx_qt_lib::QString::from(&new_json));
+        });
+    }
+
+    fn state_removed(&self, mount_id: &str) {
+        let id = mount_id.to_string();
+        let _ = self.qt_handle.queue(move |mut mount| {
+            use cxx_qt::CxxQtType;
+            let new_json = {
+                let rust_mut = mount.as_mut().rust_mut();
+                let rust = unsafe { rust_mut.get_unchecked_mut() };
+                if rust.states.remove(&id).is_none() {
+                    return;
+                }
+                publish_live_roots(&rust.states, &rust.configs);
+                serialize_merged(&rust.states, &rust.configs)
+            };
+            mount.as_mut().set_mount_states_json(cxx_qt_lib::QString::from(&new_json));
+        });
+    }
+
+    /// Agent-origin update. Ignored for ids the GUI owns (review
+    /// 2026-09-11): during a sync→plain hand-off the agent's late
+    /// "stopped" for X must not overwrite the local task's "mounted".
+    /// The ownership check runs on the Qt thread, at apply time, so
+    /// an update queued just before the local task registered is
+    /// still judged against the current owner.
+    fn state_update(&self, update: &MountStateUpdateMsg) {
+        let update = update.clone();
+        let _ = self.qt_handle.queue(move |mount| {
+            if is_gui_owned(&update.mount_id) {
+                log::debug!(
+                    "[mount] ignoring agent state '{}' for GUI-owned {}",
+                    update.state, update.mount_id
+                );
+                return;
+            }
+            apply_state_update(mount, update);
+        });
+    }
+
+    fn local_state_update(&self, update: &MountStateUpdateMsg) {
+        let update = update.clone();
+        let _ = self.qt_handle.queue(move |mount| apply_state_update(mount, update));
     }
 
     fn ack(&self, ack: &AckMsg) {
@@ -1578,7 +1864,9 @@ fn publish_live_roots(
         // Key by the configured share name (leaf of the UNC), NOT by
         // the leaf of mounted_at — a dedup-suffixed mount
         // (/Volumes/Share-1) must still register under "share".
-        let Some(cfg) = configs.get(id) else { continue };
+        // Disabled configs never publish: their last "mounted" state
+        // can outlive the flip until the owner reports "stopped".
+        let Some(cfg) = configs.get(id).filter(|c| c.enabled) else { continue };
         if let Some(leaf) =
             ufb_core::volumes::share_leaf(&share_name(&cfg.nas_share_path, id))
         {
@@ -1631,12 +1919,15 @@ fn serialize_merged(
     // state-only entries. Drop ids whose config is `enabled=false` so
     // the sidebar only shows mounts the user has actually turned on
     // (the MountManagerDialog reads mounts.json directly via
-    // read_mount_configs and stays comprehensive). State-only ids are
-    // kept — those exist briefly during transitions and are safer to
-    // surface than to hide.
+    // read_mount_configs and stays comprehensive) — including when a
+    // stale state entry still exists for them (audit 2026-09-11 P2
+    // retire). State-only ids with NO config are kept — those exist
+    // briefly during transitions and are safer to surface than hide.
     let mut ids: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for k in states.keys() {
-        ids.insert(k.as_str());
+        if configs.get(k).map(|c| c.enabled).unwrap_or(true) {
+            ids.insert(k.as_str());
+        }
     }
     for (k, cfg) in configs.iter() {
         if cfg.enabled {

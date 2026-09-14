@@ -97,10 +97,21 @@ pub enum MountEvent {
     Start,
     Stop,
     Restart,
+    /// Sync was switched off on a mount that stays enabled (audit
+    /// 2026-09-11 M-5): the GUI takes over the share as a plain mount.
+    /// Tear down the sync server + NFS loopback but LEAVE the backing
+    /// SMB volume mounted — the GUI has just adopted it. Plain
+    /// Stop/Quit/disable keep the full unmount.
+    Handoff,
 
     // Config changed while mount is running — orchestrator should
     // tear down the old config and apply the new one.
     ConfigChanged { new_config: MountConfig },
+    /// Cosmetic (non-mount-affecting) config edit: the orchestrator
+    /// replaces its stored config and nothing else — no transition, no
+    /// effects (review 2026-09-11, low priority). Keeps `self.config`
+    /// from going stale after mount_service's mount_key() short-cut.
+    UpdateConfig { new_config: MountConfig },
 
     // Platform errors
     MountFailed { reason: String },
@@ -124,6 +135,11 @@ pub enum Effect {
     /// Disconnect the drive before remounting or stopping.
     /// Windows: WNetCancelConnection2W. Linux: remove symlink.
     DisconnectDrive,
+    /// Forget the backing mount WITHOUT unmounting it (audit
+    /// 2026-09-11 M-5 hand-off to a GUI-owned plain mount). Cancels
+    /// any in-flight mount request and clears the local bookkeeping;
+    /// the SMB volume stays up for its new owner.
+    ReleaseDrive,
     /// Spawn the VFS server (NFS loopback on macOS, WinFsp on Windows)
     /// for a sync-enabled mount. No-op for non-sync mounts. Fires on
     /// Mounting → Mounted (i.e. as part of RequestStateUpdate's effect
@@ -157,12 +173,21 @@ pub enum LogLevel {
 /// | Initializing  | Mounting | Stopped | Mounting*| Mounting      | (n/a)       | Error      | self               | self            |
 /// | Mounting      | self     | Stopped | self     | Mounting      | Error       | Error      | Mounted            | self            |
 /// | Mounted(_)    | Mounting*| Stopped | Mounting | Mounting      | Error       | Error      | self               | self            |
-/// | Error(_)      | Mounting | Stopped | Mounting | Mounting      | Error       | Error      | self               | self            |
+/// | Error(_)      | Mounting | Stopped | Mounting | Mounting      | Error†      | Error      | self               | self            |
 /// | Stopped       | Mounting | self    | Mounting*| Mounting      | (n/a)       | Error      | self               | self            |
+///
+/// † `Error(AuthFailed)` + MountFailed keeps AuthFailed (audit
+/// 2026-09-11 L-2): a follow-on generic failure (e.g. the sync-spawn
+/// path noticing there's no backing mount) must not clobber the
+/// actionable Sign-in pill with a plain error toast.
+///
+/// Handoff (not in the table) behaves like Stop from every state but
+/// emits ReleaseDrive instead of DisconnectDrive (audit 2026-09-11 M-5).
 ///
 /// "self" = no transition, no effects. Auto-progression Mounting →
 /// Mounted runs in `Orchestrator::run` via a synthetic
-/// RequestStateUpdate event after each Mounting-producing transition.
+/// RequestStateUpdate event once the mount has actually resolved a
+/// backing path (never while a mount is still in flight or has failed).
 pub fn transition(
     state: MountState,
     event: MountEvent,
@@ -184,6 +209,26 @@ pub fn transition(
                 Effect::UpdateTray,
                 Effect::EmitStateUpdate,
             ],
+        ),
+
+        // ── Audit 2026-09-11 L-2: never downgrade an auth failure.
+        // A failed NetFS mount used to queue MountFailed, the run loop
+        // then fired the synthetic Mounting→Mounted RequestStateUpdate
+        // anyway, SpawnSyncServer found no backing path and queued a
+        // SECOND MountFailed ("no backing path resolved") which landed
+        // on top of Error(AuthFailed) and turned the Sign-in pill into
+        // a generic error. The orchestrator no longer fires the RSU on
+        // a failed mount, and this arm makes the FSM itself refuse the
+        // downgrade so the pill survives any other late failure too.
+        (Error(MountError::AuthFailed { .. }), MountFailed { reason }) => (
+            state.clone(),
+            vec![Effect::LogEvent {
+                level: LogLevel::Info,
+                message: format!(
+                    "mount failed after auth failure — keeping auth_error state ({})",
+                    reason
+                ),
+            }],
         ),
 
         // ── Mount failure: same global treatment as AuthFailed.
@@ -352,6 +397,10 @@ pub fn transition(
             vec![Effect::EmitStateUpdate],
         ),
 
+        // ── Global: cosmetic config refresh — the orchestrator swaps
+        // its stored config before calling transition; nothing to do.
+        (_, UpdateConfig { .. }) => (state, vec![]),
+
         // ── Global: Stop from any state ──
         (_, Stop) => (
             Stopped,
@@ -361,6 +410,23 @@ pub fn transition(
                 Effect::LogEvent {
                     level: LogLevel::Info,
                     message: "mount stopped".into(),
+                },
+                Effect::UpdateTray,
+                Effect::EmitStateUpdate,
+            ],
+        ),
+
+        // ── Global: Handoff from any state (audit 2026-09-11 M-5) ──
+        // Same shape as Stop, but the backing SMB mount is released,
+        // not unmounted: the GUI now owns it as a plain mount.
+        (_, Handoff) => (
+            Stopped,
+            vec![
+                Effect::TeardownSyncServer,
+                Effect::ReleaseDrive,
+                Effect::LogEvent {
+                    level: LogLevel::Info,
+                    message: "sync disabled — handing the share to the app (backing mount left up)".into(),
                 },
                 Effect::UpdateTray,
                 Effect::EmitStateUpdate,
@@ -567,6 +633,89 @@ mod tests {
             assert!(matches!(new_state, MountState::Mounting));
             assert!(effects.contains(&Effect::DisconnectDrive));
             assert!(effects.contains(&Effect::MountDrive));
+        }
+    }
+
+    #[test]
+    fn test_auth_failed_not_downgraded_by_mount_failed() {
+        // Audit 2026-09-11 L-2: the Sign-in pill must survive a late
+        // generic failure (e.g. sync-spawn "no backing path").
+        let auth = MountState::Error(MountError::AuthFailed { reason: "bad creds".into() });
+        let (state, effects) = transition(
+            auth.clone(),
+            MountEvent::MountFailed { reason: "no backing path resolved".into() },
+        );
+        assert_eq!(state, auth);
+        // No state-update effect — nothing changed for the UI.
+        assert!(!effects.contains(&Effect::EmitStateUpdate));
+        // The reverse direction still upgrades: a generic error that
+        // turns out to be auth-class becomes actionable.
+        let (state, _) = transition(
+            MountState::Error(MountError::MountFailed { reason: "x".into() }),
+            MountEvent::AuthFailed { reason: "bad creds".into() },
+        );
+        assert!(matches!(state, MountState::Error(MountError::AuthFailed { .. })));
+        // And Start/Restart from AuthFailed still retries.
+        let (state, effects) = transition(auth, MountEvent::Start);
+        assert!(matches!(state, MountState::Mounting));
+        assert!(effects.contains(&Effect::MountDrive));
+    }
+
+    #[test]
+    fn test_handoff_releases_without_disconnect() {
+        // Audit 2026-09-11 M-5: sync→plain flip hands the backing SMB
+        // mount to the GUI instead of ejecting it.
+        for s in [
+            MountState::Mounting,
+            MountState::Mounted(SyncPhase::Active),
+            MountState::Mounted(SyncPhase::Reconnecting),
+            MountState::Error(MountError::MountFailed { reason: "x".into() }),
+            MountState::Error(MountError::AuthFailed { reason: "x".into() }),
+        ] {
+            let (state, effects) = transition(s, MountEvent::Handoff);
+            assert!(matches!(state, MountState::Stopped));
+            assert!(effects.contains(&Effect::TeardownSyncServer));
+            assert!(effects.contains(&Effect::ReleaseDrive));
+            assert!(!effects.contains(&Effect::DisconnectDrive));
+            assert!(effects.contains(&Effect::EmitStateUpdate));
+            // Teardown must precede release, same ordering rule as Stop.
+            let t = effects.iter().position(|e| *e == Effect::TeardownSyncServer).unwrap();
+            let r = effects.iter().position(|e| *e == Effect::ReleaseDrive).unwrap();
+            assert!(t < r);
+        }
+        // Plain Stop keeps the full unmount.
+        let (_, effects) = transition(MountState::Mounted(SyncPhase::Active), MountEvent::Stop);
+        assert!(effects.contains(&Effect::DisconnectDrive));
+        assert!(!effects.contains(&Effect::ReleaseDrive));
+    }
+
+    #[test]
+    fn test_mounting_start_and_restart_produce_no_mount_drive() {
+        // Documents the (Mounting, Start|Restart) no-op the orchestrator
+        // relies on to clear a UI permit it armed for a mount attempt
+        // that never happened (audit 2026-09-11 P2 permit leak).
+        for ev in [MountEvent::Start, MountEvent::Restart] {
+            let (state, effects) = transition(MountState::Mounting, ev);
+            assert!(matches!(state, MountState::Mounting));
+            assert!(!effects.contains(&Effect::MountDrive));
+        }
+    }
+
+    #[test]
+    fn test_update_config_is_silent() {
+        use crate::config::MountConfig;
+        for s in [
+            MountState::Mounting,
+            MountState::Mounted(SyncPhase::Active),
+            MountState::Error(MountError::AuthFailed { reason: "x".into() }),
+            MountState::Stopped,
+        ] {
+            let (new_state, effects) = transition(
+                s.clone(),
+                MountEvent::UpdateConfig { new_config: MountConfig::default() },
+            );
+            assert_eq!(new_state, s);
+            assert!(effects.is_empty());
         }
     }
 

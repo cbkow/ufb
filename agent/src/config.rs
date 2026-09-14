@@ -184,6 +184,22 @@ impl MountConfig {
         self.sync_enabled
     }
 
+    /// The fields whose change requires unmount + remount (audit
+    /// 2026-09-11 P2). Everything else (display name, legacy rclone
+    /// tuning, is_jobs_folder, credential_key) is bookkeeping the
+    /// orchestrator never acts on mid-mount.
+    pub fn mount_key(&self) -> (&str, bool, bool, u64, Option<&str>, &str, Option<&str>) {
+        (
+            &self.nas_share_path,
+            self.enabled,
+            self.sync_enabled,
+            self.sync_cache_limit_bytes,
+            self.mount_path_macos.as_deref(),
+            &self.mount_drive_letter,
+            self.sync_root_path.as_deref(),
+        )
+    }
+
     /// The local folder path for the sync root (where CF API / NFS
     /// loopback operates).
     /// Windows: internal cache path ({cache_root}\{shareName}).
@@ -366,55 +382,59 @@ pub fn config_file_path() -> Option<PathBuf> {
     None
 }
 
-/// Load the mounts config from disk. Returns empty config if file doesn't exist.
-pub fn load_config() -> MountsConfig {
+/// Load the mounts config from disk.
+///
+/// `Ok(empty)` only when the file genuinely doesn't exist — that IS
+/// "no mounts". Every other failure (unreadable, zero-byte, unparseable)
+/// is `Err` so callers keep their last-good config (audit 2026-09-11
+/// M-4): pre-fix a half-written or corrupt mounts.json deserialised to
+/// an empty mount list and `apply_config` dutifully stopped every sync
+/// mount in the fleet. A zero-byte file is the classic non-atomic-write
+/// window (truncate → write) and gets the same treatment.
+pub fn load_config() -> Result<MountsConfig, String> {
     let path = match config_file_path() {
         Some(p) => p,
         None => {
             log::warn!("Could not determine config file path");
-            return MountsConfig {
-                version: 1,
-                mounts: vec![],
-                sync_cache_root: None,
-            };
+            return Ok(MountsConfig::empty());
         }
     };
 
     if !path.exists() {
         log::info!("No config file at {}, using empty config", path.display());
-        return MountsConfig {
+        return Ok(MountsConfig::empty());
+    }
+
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read config at {}: {}", path.display(), e))?;
+    parse_config(&contents)
+        .map(|config| {
+            log::info!(
+                "Loaded config with {} mounts from {}",
+                config.mounts.len(),
+                path.display()
+            );
+            config
+        })
+        .map_err(|e| format!("Failed to parse config at {}: {}", path.display(), e))
+}
+
+/// Pure parse step of `load_config` — split out so the "empty file is
+/// not an empty config" rule is unit-testable.
+fn parse_config(contents: &str) -> Result<MountsConfig, String> {
+    if contents.trim().is_empty() {
+        return Err("file is empty (mid-write?) — keeping previous config".into());
+    }
+    serde_json::from_str::<MountsConfig>(contents).map_err(|e| e.to_string())
+}
+
+impl MountsConfig {
+    /// The "no config file" shape.
+    pub fn empty() -> Self {
+        MountsConfig {
             version: 1,
             mounts: vec![],
             sync_cache_root: None,
-        };
-    }
-
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<MountsConfig>(&contents) {
-            Ok(config) => {
-                log::info!(
-                    "Loaded config with {} mounts from {}",
-                    config.mounts.len(),
-                    path.display()
-                );
-                config
-            }
-            Err(e) => {
-                log::error!("Failed to parse config at {}: {}", path.display(), e);
-                MountsConfig {
-                    version: 1,
-                    mounts: vec![],
-                    sync_cache_root: None,
-                }
-            }
-        },
-        Err(e) => {
-            log::error!("Failed to read config at {}: {}", path.display(), e);
-            MountsConfig {
-                version: 1,
-                mounts: vec![],
-                sync_cache_root: None,
-            }
         }
     }
 }
@@ -422,6 +442,17 @@ pub fn load_config() -> MountsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_config_rejects_empty_and_garbage() {
+        // Audit 2026-09-11 M-4: neither shape may become "no mounts".
+        assert!(parse_config("").is_err());
+        assert!(parse_config("   \n").is_err());
+        assert!(parse_config("{ \"version\": 1, \"mounts\": [ ").is_err());
+        assert!(parse_config("not json").is_err());
+        let ok = parse_config("{ \"version\": 1, \"mounts\": [] }").unwrap();
+        assert!(ok.mounts.is_empty());
+    }
 
     #[test]
     fn test_config_round_trip() {

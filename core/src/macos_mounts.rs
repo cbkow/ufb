@@ -12,13 +12,189 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// Global mutex to serialize macOS mount operations.
-/// Prevents concurrent snapshot-open-poll cycles from misidentifying each other's volumes.
+/// Global mutex serializing the NetFS call (and the squatter
+/// pre-flight right before it) so two concurrent mounts can't both
+/// decide `/Volumes/<leaf>` is free and race NetFS for it. Held ONLY
+/// around that window (audit 2026-09-11 P2 dead-mount path): the
+/// mount-table scans before it are table-only and the liveness probe
+/// is bounded, but a hung read_dir under this lock used to queue every
+/// other GUI-owned mount behind one dead server.
 static MOUNT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-fn mount_mutex() -> &'static Mutex<()> {
-    MOUNT_LOCK.get_or_init(|| Mutex::new(()))
+fn mount_mutex() -> MutexGuard<'static, ()> {
+    // A poisoned lock (a mount thread panicked while holding it) only
+    // guards a serialization window — the data behind it is `()`, so
+    // recovering the guard is always safe. Refusing would strand every
+    // later mount in the process.
+    MOUNT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+// ── mount(8) line parsing ───────────────────────────────────────────
+//
+// audit 2026-09-11 M-1/M-2: every mount-table check used to be a
+// `contains(fragment)` substring test, so a configured `\\nas\Tank`
+// adopted a Finder-mounted `//user@nas/tank_archive` line, and a
+// share sitting at `/Volumes/Projects-1` claimed a foreign volume at
+// `/Volumes/Projects` because the -1 line "contains" the shorter
+// path. A Stop / Restart / dead-heartbeat then ran `diskutil unmount`
+// on the user's OTHER volume. Everything now goes through one parser
+// and exact (case-insensitive) comparison of the decoded source
+// against `host/share[/sub]` built from the UNC. The agent's twin in
+// agent/src/platform/macos/fallback.rs mirrors this design.
+
+/// One parsed `mount(8)` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountLine {
+    /// SMB source with the leading `//` and any `user@` authority
+    /// prefix stripped and percent-escapes decoded — `host/share[/sub]`
+    /// with no trailing slash. For non-URL sources (`/dev/disk3s1`,
+    /// `map auto_home`) it is the raw text before " on ".
+    pub source: String,
+    /// The mountpoint between " on " and the trailing " (" — may
+    /// contain spaces.
+    pub mount_point: String,
+    /// First token inside the trailing parens (`smbfs`, `apfs`, `nfs`).
+    pub fstype: String,
+}
+
+/// Parse one line of `mount` output, e.g.
+/// `//chris%20bialkowski@192.168.40.100/GFX_Dropbox on /Volumes/GFX_Dropbox (smbfs, nodev, nosuid, mounted by chris)`.
+/// Returns None for anything that doesn't have both the " on " and
+/// the trailing " (" markers. The source is split at the FIRST " on "
+/// (a mountpoint may itself contain " on "; an SMB source can't — the
+/// URL is percent-encoded) and the mountpoint at the LAST " (" (the
+/// options block is always the tail).
+pub fn parse_mount_line(line: &str) -> Option<MountLine> {
+    let line = line.trim_end();
+    let (source_raw, rest) = line.split_once(" on ")?;
+    let (mount_point, opts) = rest.rsplit_once(" (")?;
+    let fstype = opts
+        .trim_end_matches(')')
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mount_point = mount_point.trim();
+    if source_raw.is_empty() || mount_point.is_empty() {
+        return None;
+    }
+    let source = normalize_mount_source(source_raw);
+    Some(MountLine {
+        source,
+        mount_point: mount_point.to_string(),
+        fstype,
+    })
+}
+
+/// `//[user@]host/share/sub/` → `host/share/sub` (decoded). The
+/// authority is everything up to the first `/` after the `//`; the
+/// user part is cut at the LAST `@` inside it — a literal `@` in a
+/// username is percent-encoded by mount_smbfs, so the last one is
+/// always the separator.
+fn normalize_mount_source(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("//") else {
+        return raw.trim().to_string();
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let joined = format!("{}{}", strip_port(host), path);
+    percent_decode(joined.trim_end_matches('/'))
+}
+
+/// `host:445` → `host`; `[::1]:445` → `[::1]`. The UNC side never
+/// carries a port, and the agent's twin (`smb_source_host_path`)
+/// strips it too — `//guest:@127.0.0.1:22000/union-jobs` must key as
+/// `127.0.0.1/union-jobs` in both processes (review 2026-09-11).
+fn strip_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        return match host.find(']') {
+            Some(i) => &host[..=i],
+            None => host,
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    }
+}
+
+/// Minimal RFC 3986 percent-decoding (`%20` → space). Malformed
+/// escapes are kept verbatim so a stray `%` can't erase characters;
+/// invalid UTF-8 is replaced lossily — this only feeds comparisons.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            // Byte-sliced (not str-sliced) so a multibyte char right
+            // after a stray `%` can't land us on a non-char boundary.
+            // Both chars must be hex digits: from_str_radix alone
+            // accepts a sign, so "%+1" would decode to 0x01.
+            let hex = &bytes[i + 1..i + 3];
+            if let Some(v) = hex
+                .iter()
+                .all(|b| b.is_ascii_hexdigit())
+                .then(|| std::str::from_utf8(hex).ok())
+                .flatten()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `\\host\share\sub\` → `host/share/sub`: the comparison key a UNC
+/// yields for `MountLine::source`. Empty segments (doubled
+/// separators, trailing slash) are dropped so spelling noise in
+/// mounts.json can't break a match.
+pub fn unc_source_key(nas_share_path: &str) -> String {
+    nas_share_path
+        .replace('\\', "/")
+        .split('/')
+        .filter(|seg| !seg.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// True when a parsed smbfs line is backed by exactly the share the
+/// UNC names — whole-string, case-insensitive (SMB hosts and share
+/// names are case-insensitive; a Finder mount may spell either
+/// differently than mounts.json). `Tank` vs `Tank_Archive` and
+/// `Projects` vs `Projects-1` are different sources.
+pub fn mount_line_matches_unc(line: &MountLine, nas_share_path: &str) -> bool {
+    if !line.fstype.eq_ignore_ascii_case("smbfs") {
+        return false;
+    }
+    let key = unc_source_key(nas_share_path);
+    !key.is_empty() && line.source.to_lowercase() == key.to_lowercase()
+}
+
+/// Snapshot of the mount table, parsed. `mount(8)` reads the kernel's
+/// table (getmntinfo) and never touches the mounted filesystems, so
+/// this can't hang on a dead server.
+fn mount_table() -> Vec<MountLine> {
+    let Some(output) = Command::new("mount").output().ok() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_mount_line)
+        .collect()
 }
 
 /// Extract the SMB share name from a UNC-style `nas_share_path`.
@@ -90,33 +266,53 @@ pub fn macos_smb_mount(
     nas_share_path: &str,
     allow_ui: bool,
 ) -> Result<String, MacosMountError> {
-    // Serialize mount operations so concurrent mounts don't misidentify each other's volumes
-    let _guard = mount_mutex().lock().unwrap();
-
     // Extract expected share name for matching against /Volumes/ entries.
     let expected_name = extract_share_name(nas_share_path);
 
     // Check if already mounted (user-owned location first, then /Volumes/ fallback
-    // for shares a user may have mounted manually via Finder).
+    // for shares a user may have mounted manually via Finder). No lock
+    // held: these are mount-table reads plus a bounded probe.
     if let Some(existing) = find_existing_user_mount(&expected_name) {
-        log::info!("macOS: share already mounted at {}", existing);
-        return Ok(existing);
-    }
-    if let Some(existing) = find_existing_volume(&expected_name, nas_share_path) {
         log::info!("macOS: share already mounted at {}", existing);
         return Ok(existing);
     }
     // Source-of-truth fallback for deep-path SMB URLs. extract_share_name
     // returns the top-level share component (e.g. "Tank" from
     // \\srv\Tank\Deep\DEEP_JOBS), but NetFSMountURLSync names
-    // the volume by the leaf path segment (/Volumes/DEEP_JOBS). The two
-    // checks above search by share name and miss any deep-path mount
-    // inherited from a previous UFB session — without this fallback we
-    // re-enter NetFS, get EEXIST, and fail to recover the mountpoint.
-    if let Some(existing) = find_mount_by_smb_url(nas_share_path) {
-        log::info!("macOS: share already mounted at {} (matched by SMB URL)", existing);
-        return Ok(existing);
+    // the volume by the leaf path segment (/Volumes/DEEP_JOBS). The
+    // name-scoped check searches by share name and misses any deep-path
+    // mount inherited from a previous UFB session — without this
+    // fallback we re-enter NetFS, get EEXIST, and fail to recover the
+    // mountpoint.
+    if let Some(existing) = find_existing_volume(&expected_name, nas_share_path)
+        .or_else(|| find_mount_by_smb_url(nas_share_path))
+    {
+        // Both finders match the source EXACTLY (audit M-1/M-2), so
+        // this mount is ours to keep or to tear down. Adopting a DEAD
+        // one used to hand the task a path that fails its next
+        // heartbeat and loops back here forever; unmount it (ours by
+        // construction) and fall through to a fresh NetFS mount.
+        if probe_path_alive(&existing, PROBE_TIMEOUT) {
+            log::info!("macOS: share already mounted at {}", existing);
+            return Ok(existing);
+        }
+        log::warn!(
+            "macOS: existing mount of {} at {} is dead — unmounting before remount",
+            nas_share_path,
+            existing
+        );
+        if let Err(e) = macos_smb_unmount(&existing) {
+            log::warn!("macOS: dead-mount unmount of {} failed ({}); NetFS will dedup", existing, e);
+        }
     }
+
+    // Serialize the squatter pre-flight + the ISSUING of the NetFS
+    // request so two mounts can't both find /Volumes/<leaf> free and
+    // race NetFS for it. The guard travels into netfs_smb_mount and is
+    // released the moment NetFSMountURLAsync returns — never across
+    // the 60s/600s wait (review 2026-09-11: holding it there queued
+    // every other GUI-owned mount behind one slow server).
+    let issue_guard = mount_mutex();
 
     // ── Collision pre-flight (plans/17 slice C) ───────────────────────────
     // The reuse checks above didn't match, so if /Volumes/<leaf> (the
@@ -135,7 +331,7 @@ pub fn macos_smb_mount(
         if !leaf.is_empty() {
             let expected_path = format!("/Volumes/{}", leaf);
             if path_is_mount_point(&expected_path)
-                && !probe_path_alive(&expected_path, std::time::Duration::from_secs(3))
+                && !probe_path_alive(&expected_path, PROBE_TIMEOUT)
             {
                 log::warn!(
                     "macOS: dead mount squatting {} — force-unmounting before mount",
@@ -167,7 +363,7 @@ pub fn macos_smb_mount(
     }
 
     // ── NetFS with Keychain credentials (NULL user/pass) ──────────────────
-    match try_mount_netfs(&expected_name, nas_share_path, allow_ui) {
+    match try_mount_netfs(&expected_name, nas_share_path, allow_ui, issue_guard) {
         Ok(path) => {
             log::info!("macOS: mounted at {} via NetFS (keychain)", path);
             Ok(path)
@@ -182,6 +378,19 @@ pub fn macos_smb_mount(
         Err(status) if status == libc::ECANCELED => {
             Err(MacosMountError::Auth(format!(
                 "Sign-in cancelled for {} — use Fix credentials to try again",
+                nas_share_path
+            )))
+        }
+        // audit 2026-09-11 P2 (failure visibility): a UI-permitted
+        // attempt that outlives MOUNT_TIMEOUT_UI almost always means
+        // the NetAuthAgent dialog sat unanswered — the request was
+        // cancelled (dismissing the dialog), which is a sign-in
+        // outcome, not a network one. Mapping it to Other lost the
+        // Sign-in pill and left a generic "error" the user couldn't
+        // act on.
+        Err(status) if status == libc::ETIMEDOUT && allow_ui => {
+            Err(MacosMountError::Auth(format!(
+                "Sign-in for {} timed out waiting for the password dialog — use Fix credentials to try again",
                 nas_share_path
             )))
         }
@@ -227,6 +436,7 @@ fn try_mount_netfs(
     _share_name: &str,
     nas_share_path: &str,
     allow_ui: bool,
+    issue_guard: MutexGuard<'static, ()>,
 ) -> Result<String, i32> {
     // NetFS wants a creds-free URL (smb://host/share); credentials come
     // from the Keychain (or the NetAuthAgent dialog when allow_ui).
@@ -239,40 +449,22 @@ fn try_mount_netfs(
     // re-points `~/ufb/mounts/<share>` at whatever NetFS returns, so
     // letting Apple pick costs us nothing user-visible and dodges the
     // prompt entirely.
-    netfs_smb_mount(
-        &smb_url, None, None, allow_ui,
-    )
+    netfs_smb_mount_serialized(&smb_url, None, None, allow_ui, Some(issue_guard))
 }
 
-/// Check if a path is a mountpoint by comparing device IDs of path and parent.
-fn is_mountpoint(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let path_meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    let parent = match path.parent() {
-        Some(p) => p,
-        None => return false,
-    };
-    let parent_meta = match std::fs::metadata(parent) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    path_meta.dev() != parent_meta.dev()
-}
-
-/// Check if a matching share is already mounted at our user-owned base.
 /// True when `path` appears as a mount point in the mount table.
-/// Table-based (no stat) so a dead mount can't hang us here.
+/// Table-based (no stat) so a dead mount can't hang us here. Exact
+/// mountpoint comparison via the parser — `/Volumes/Projects` must
+/// not match the `/Volumes/Projects-1` line (audit M-2).
 fn path_is_mount_point(path: &str) -> bool {
-    let Some(output) = Command::new("mount").output().ok() else {
-        return false;
-    };
-    let table = String::from_utf8_lossy(&output.stdout);
-    let needle = format!(" on {} (", path);
-    table.lines().any(|l| l.contains(&needle))
+    let path = path.trim_end_matches('/');
+    mount_table()
+        .iter()
+        .any(|l| l.mount_point.trim_end_matches('/') == path)
 }
+
+/// Bounded read_dir budget for liveness probes of candidate mounts.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// True when `path` is an orphaned mountpoint placeholder: a directory
 /// that exists on disk, is NOT in the mount table, and is empty. NetFS
@@ -313,7 +505,15 @@ fn probe_path_alive(path: &str, timeout: std::time::Duration) -> bool {
     let (tx, rx) = std::sync::mpsc::channel();
     let p = path.to_string();
     std::thread::spawn(move || {
-        let alive = std::fs::read_dir(&p).is_ok();
+        // Read the FIRST ENTRY, not just opendir: opendir succeeds off
+        // the kernel attr cache on a dead smbfs mount, so `.is_ok()`
+        // adopted zombies at Start that the stricter heartbeat (same
+        // body as here and as the agent) declared dead 30s later —
+        // an adopt/unmount loop (review 2026-09-11).
+        let alive = match std::fs::read_dir(&p) {
+            Ok(mut rd) => !matches!(rd.next(), Some(Err(_))),
+            Err(_) => false,
+        };
         let _ = tx.send(alive);
     });
     matches!(rx.recv_timeout(timeout), Ok(true))
@@ -327,9 +527,12 @@ fn find_existing_user_mount(share_name: &str) -> Option<String> {
         Some(home) => std::path::PathBuf::from(home).join(".local/share/ufb/smb-mounts"),
         None => std::path::PathBuf::from("/tmp/ufb-smb-mounts"),
     };
-    let candidate = smb_base.join(share_name);
-    if is_mountpoint(&candidate) {
-        Some(candidate.to_string_lossy().to_string())
+    let candidate = smb_base.join(share_name).to_string_lossy().to_string();
+    // Table check rather than the stat-based `is_mountpoint`: a dead
+    // legacy mount would otherwise block here before the bounded
+    // probes even get a look in.
+    if path_is_mount_point(&candidate) {
+        Some(candidate)
     } else {
         None
     }
@@ -338,9 +541,11 @@ fn find_existing_user_mount(share_name: &str) -> Option<String> {
 /// Unmount an SMB share on macOS.
 /// `volumes_path` is the actual /Volumes/... path (not the symlink).
 pub fn macos_smb_unmount(volumes_path: &str) -> Result<(), String> {
-    let path = Path::new(volumes_path);
-    if !path.exists() {
-        log::info!("macOS: mount point {} doesn't exist, nothing to unmount", volumes_path);
+    // Mount-table check, NOT `Path::exists()`: stat on a dead smbfs
+    // mount blocks until the server answers, which is exactly the
+    // case this fn is called for (audit 2026-09-11 P2 dead-mount path).
+    if !path_is_mount_point(volumes_path) {
+        log::info!("macOS: {} is not in the mount table, nothing to unmount", volumes_path);
         return Ok(());
     }
 
@@ -403,117 +608,83 @@ fn percent_encode_userinfo(s: &str) -> String {
     out
 }
 
-/// Check if a volume matching the expected name is already mounted from the correct server.
-/// Accepts macOS dedup suffixes (e.g. `MyShare-1` when another SMB mount already holds
-/// `MyShare`) and verifies via `mount` output that the backing SMB source matches.
+/// Find a `/Volumes/<name>` mount for this share, where `<name>` is the
+/// expected share name or a macOS dedup of it (`MyShare-1` when another
+/// SMB mount already held `MyShare`) AND the mount table attributes
+/// the mountpoint to exactly this UNC's source. Pure table logic —
+/// `find_existing_volume_in` is the testable core (audit M-2: the old
+/// `line.contains(candidate)` adopted a live foreign `/Volumes/Projects`
+/// when our share sat at `/Volumes/Projects-1`). No filesystem touch:
+/// the caller probes liveness with a bounded read_dir.
 pub fn find_existing_volume(expected_name: &str, nas_share_path: &str) -> Option<String> {
-    let candidates: Vec<String> = if let Ok(entries) = std::fs::read_dir("/Volumes") {
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_str()?.to_string();
-                if name.eq_ignore_ascii_case(expected_name)
-                    || strip_macos_dedup_suffix(&name)
+    find_existing_volume_in(&mount_table(), expected_name, nas_share_path)
+}
+
+fn find_existing_volume_in(
+    table: &[MountLine],
+    expected_name: &str,
+    nas_share_path: &str,
+) -> Option<String> {
+    if expected_name.is_empty() {
+        return None;
+    }
+    table
+        .iter()
+        .filter(|l| mount_line_matches_unc(l, nas_share_path))
+        .find(|l| {
+            let name = match l.mount_point.strip_prefix("/Volumes/") {
+                Some(n) => n.trim_end_matches('/'),
+                None => return false,
+            };
+            !name.contains('/')
+                && (name.eq_ignore_ascii_case(expected_name)
+                    || strip_macos_dedup_suffix(name)
                         .map(|base| base.eq_ignore_ascii_case(expected_name))
-                        .unwrap_or(false)
-                {
-                    let path = format!("/Volumes/{}", name);
-                    // Verify it's actually a mount point (not just an empty dir)
-                    if std::fs::read_dir(&path).map(|mut d| d.next().is_some()).unwrap_or(false) {
-                        return Some(path);
-                    }
-                }
-                None
-            })
-            .collect()
-    } else {
-        return None;
-    };
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Verify the candidate is actually mounted from the expected server/share
-    let smb_fragment = nas_share_path
-        .trim_start_matches('\\')
-        .replace('\\', "/")
-        .to_lowercase();
-
-    let mount_output = Command::new("mount").output().ok()?;
-    let mount_text = String::from_utf8_lossy(&mount_output.stdout);
-
-    for candidate in &candidates {
-        for line in mount_text.lines() {
-            if line.contains(candidate) && line.to_lowercase().contains(&smb_fragment) {
-                return Some(candidate.clone());
-            }
-        }
-    }
-
-    None
+                        .unwrap_or(false))
+        })
+        .map(|l| l.mount_point.clone())
 }
 
 /// Look up an SMB mount's mountpoint by matching `mount(8)` output
-/// against the SMB URL derived from a UNC path. This is the source of
-/// truth for SMB mounts and is independent of volume-name heuristics
-/// (which break for deep-path mounts where NetFS names the volume by
-/// the leaf path segment, not the SMB share component).
-///
-/// `mount(8)` SMB lines look like:
-///   //user%20name@host/share/sub/leaf on /Volumes/leaf (smbfs, ...)
-/// We build `host/share/sub/leaf` from the UNC, match it case-insensitively
-/// against the source side, and return the mountpoint following ` on `.
+/// against the SMB source derived from a UNC path. This is the source
+/// of truth for SMB mounts and is independent of volume-name
+/// heuristics (which break for deep-path mounts where NetFS names the
+/// volume by the leaf path segment, not the SMB share component).
+/// Exact source match — see the parser header (audit M-1).
 fn find_mount_by_smb_url(nas_share_path: &str) -> Option<String> {
-    let fragment = nas_share_path
-        .trim_start_matches('\\')
-        .replace('\\', "/")
-        .to_lowercase();
-    if fragment.is_empty() {
-        return None;
-    }
-    let output = Command::new("mount").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let lower = line.to_lowercase();
-        if !lower.contains("smbfs") || !lower.contains(&fragment) {
-            continue;
-        }
-        if let Some(rest) = line.split(" on ").nth(1) {
-            if let Some(mp) = rest.split(" (").next() {
-                let mp = mp.trim();
-                if !mp.is_empty() {
-                    return Some(mp.to_string());
-                }
-            }
-        }
-    }
-    None
+    find_mount_by_smb_url_in(&mount_table(), nas_share_path)
+}
+
+fn find_mount_by_smb_url_in(table: &[MountLine], nas_share_path: &str) -> Option<String> {
+    table
+        .iter()
+        .find(|l| mount_line_matches_unc(l, nas_share_path))
+        .map(|l| l.mount_point.clone())
 }
 
 /// Ownership check for a mountpoint (plans/17 slice C): what the mount
 /// table says occupies `path`.
 ///   None        — nothing mounted there (plain dir or absent)
-///   Some(true)  — an smbfs mount whose URL matches `nas_share_path`
+///   Some(true)  — an smbfs mount whose source is exactly `nas_share_path`
 ///   Some(false) — someone else's volume (foreign SMB, disk image,
 ///                 USB, …). Never unmount these: a mount Restart must
-///                 not eject the user's identically-named disk.
+///                 not eject the user's identically-named disk — nor,
+///                 since audit M-1, their `Tank_Archive` when we own
+///                 `Tank`.
 pub fn mount_at_path_is_ours(path: &str, nas_share_path: &str) -> Option<bool> {
-    let fragment = nas_share_path
-        .trim_start_matches('\\')
-        .replace('\\', "/")
-        .to_lowercase();
-    let output = Command::new("mount").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let needle = format!(" on {} (", path);
-    for line in text.lines() {
-        if !line.contains(&needle) {
-            continue;
-        }
-        let lower = line.to_lowercase();
-        return Some(lower.contains("smbfs") && lower.contains(&fragment));
-    }
-    None
+    mount_at_path_is_ours_in(&mount_table(), path, nas_share_path)
+}
+
+fn mount_at_path_is_ours_in(
+    table: &[MountLine],
+    path: &str,
+    nas_share_path: &str,
+) -> Option<bool> {
+    let path = path.trim_end_matches('/');
+    table
+        .iter()
+        .find(|l| l.mount_point.trim_end_matches('/') == path)
+        .map(|l| mount_line_matches_unc(l, nas_share_path))
 }
 
 /// Strip a macOS dedup suffix like "-1", "-2" from a volume name.
@@ -551,7 +722,10 @@ use std::time::Duration;
 // mount aimed at a host behind a not-yet-connected VPN parked inside
 // `NetFSMountURLSync` for hours, and a client dying with a request in
 // flight wedges the daemon for every process on the machine. See the
-// agent's netfs.rs module docs for the full incident write-up.
+// agent's netfs.rs module docs for the full incident write-up. The
+// GUI's aboutToQuit calls `cancel_inflight_mounts` (below) so a Cmd-Q
+// mid-attempt retires the request through the API instead of
+// abandoning it (audit 2026-09-11 M-3).
 
 #[link(name = "NetFS", kind = "framework")]
 extern "C" {
@@ -619,6 +793,196 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long to wait for the ECANCELED callback after
 /// `NetFSMountURLCancel` before giving up on a clean retirement.
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
+
+// ── In-flight request registry (audit 2026-09-11 M-3) ────────────────
+//
+// A process that dies (or simply exits) with a NetFSMountURLAsync
+// request pending wedges NetAuthSysAgent for the whole login session
+// — every later mount from ANY app parks forever until the daemon is
+// killed (see the incident notes above). The deadline path below
+// cancels its own request, but nothing covered app quit: a user who
+// hit Cmd-Q while a VPN-less mount attempt sat in its 60s window left
+// the request behind. Every accepted request is registered here so
+// `cancel_inflight_mounts` (called from the GUI's aboutToQuit) can
+// retire them through the API before the process goes away.
+
+/// One NetFS request. Registered BEFORE `NetFSMountURLAsync` is
+/// issued (review 2026-09-11: registering after left a window the
+/// quit sweep couldn't see); `request_id` — the opaque pointer NetFS
+/// hands back, stored as usize so the entry is Send+Sync — is 0 until
+/// the call returns.
+struct Inflight {
+    url: String,
+    request_id: std::sync::atomic::AtomicUsize,
+    /// Set by the mount_report block before it sends the result —
+    /// the callback has fired, the daemon has retired the request.
+    done: std::sync::atomic::AtomicBool,
+    /// CAS-guarded so the deadline path and the quit path can't both
+    /// call NetFSMountURLCancel on the same id. Once set, a request
+    /// that never acknowledges stays registered (see `InflightGuard::
+    /// keep_registered`) but the sweep never waits on it again.
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+/// How long the quit sweep waits for `NetFSMountURLAsync` to hand back
+/// an id for a request that was registered but not yet issued.
+const ISSUE_ID_WAIT: Duration = Duration::from_secs(2);
+
+impl Inflight {
+    /// Cancel through the API exactly once. Returns the cancel status
+    /// (0 = accepted) or None when already cancelled / never started.
+    fn cancel(&self) -> Option<i32> {
+        use std::sync::atomic::Ordering;
+        let id = self.request_id.load(Ordering::SeqCst);
+        if id == 0 || self.done.load(Ordering::SeqCst) {
+            return None;
+        }
+        if self
+            .cancelled
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return None;
+        }
+        Some(unsafe { NetFSMountURLCancel(id as *mut c_void) })
+    }
+}
+
+/// Keyed by a process-local sequence number, not the request id —
+/// the entry exists before the id does.
+fn inflight_registry() -> &'static Mutex<std::collections::HashMap<u64, std::sync::Arc<Inflight>>> {
+    static REG: OnceLock<Mutex<std::collections::HashMap<u64, std::sync::Arc<Inflight>>>> =
+        OnceLock::new();
+    REG.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Insert a fresh entry under the registry lock; returns its key.
+fn register_inflight(entry: std::sync::Arc<Inflight>) -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut reg) = inflight_registry().lock() {
+        reg.insert(seq, entry);
+    }
+    seq
+}
+
+/// Removes the entry when the mounting thread leaves `netfs_smb_mount`
+/// by any path — unless `keep_registered` was called: a request whose
+/// cancel was never acknowledged is still live inside NetAuthSysAgent,
+/// and the quit sweep must still see it (review 2026-09-11).
+struct InflightGuard {
+    seq: u64,
+    keep: bool,
+}
+
+impl InflightGuard {
+    fn keep_registered(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        if let Ok(mut reg) = inflight_registry().lock() {
+            reg.remove(&self.seq);
+        }
+    }
+}
+
+/// Number of NetFS requests currently pending in this process.
+pub fn inflight_mount_count() -> usize {
+    inflight_registry().lock().map(|r| r.len()).unwrap_or(0)
+}
+
+/// Cancel every pending `NetFSMountURLAsync` request and wait (up to
+/// `CANCEL_GRACE`) for the daemon to acknowledge each with its
+/// ECANCELED callback. Returns how many requests were cancelled.
+/// Called from the GUI's aboutToQuit hook — the mounting threads
+/// themselves see ECANCELED through their own channels and return;
+/// an unacknowledged request is logged and abandoned (the process is
+/// exiting either way; the API call is what lets NetAuthSysAgent
+/// retire it).
+pub fn cancel_inflight_mounts() -> usize {
+    use std::sync::atomic::Ordering;
+    let pending: Vec<std::sync::Arc<Inflight>> = inflight_registry()
+        .lock()
+        .map(|r| r.values().cloned().collect())
+        .unwrap_or_default();
+    if pending.is_empty() {
+        return 0;
+    }
+    let mut cancelled = 0usize;
+    // Only the requests THIS sweep cancels are waited on: one already
+    // flagged by the deadline path (and never acknowledged) is a
+    // wedged daemon — waiting again would just stall quit.
+    let mut wait_on: Vec<std::sync::Arc<Inflight>> = Vec::new();
+    let id_deadline = std::time::Instant::now() + ISSUE_ID_WAIT;
+    for req in &pending {
+        if req.done.load(Ordering::SeqCst) {
+            continue;
+        }
+        if req.cancelled.load(Ordering::SeqCst) {
+            log::warn!(
+                "[netfs] quit: {} was already cancelled and never acknowledged — not waiting",
+                req.url
+            );
+            continue;
+        }
+        // Registered but NetFSMountURLAsync hasn't returned an id yet:
+        // give the issuing thread a moment, then cancel.
+        while req.request_id.load(Ordering::SeqCst) == 0
+            && !req.done.load(Ordering::SeqCst)
+            && std::time::Instant::now() < id_deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        match req.cancel() {
+            Some(st) => {
+                cancelled += 1;
+                wait_on.push(req.clone());
+                log::warn!(
+                    "[netfs] quit: cancelling in-flight mount {} (cancel_status={})",
+                    req.url,
+                    st
+                );
+            }
+            None if req.done.load(Ordering::SeqCst) => {
+                log::info!("[netfs] quit: in-flight mount {} completed before cancel", req.url)
+            }
+            None => log::warn!(
+                "[netfs] quit: {} has no request id after {}s (NetFSMountURLAsync still blocked) — cannot cancel",
+                req.url,
+                ISSUE_ID_WAIT.as_secs()
+            ),
+        }
+    }
+    let deadline = std::time::Instant::now() + CANCEL_GRACE;
+    loop {
+        let outstanding: Vec<&std::sync::Arc<Inflight>> = wait_on
+            .iter()
+            .filter(|r| !r.done.load(Ordering::SeqCst))
+            .collect();
+        if outstanding.is_empty() {
+            log::info!("[netfs] quit: all {} cancelled mount(s) retired", wait_on.len());
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            for r in outstanding {
+                log::warn!(
+                    "[netfs] quit: cancel of {} not acknowledged within {}s — abandoning",
+                    r.url,
+                    CANCEL_GRACE.as_secs()
+                );
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    cancelled
+}
 
 /// Host component of an `smb://[user@]host[:port]/share` URL.
 fn smb_url_host(smb_url: &str) -> Option<&str> {
@@ -694,6 +1058,19 @@ pub fn netfs_smb_mount(
     mountpoint: Option<&Path>,
     credentials: Option<(&str, &str)>,
     allow_ui: bool,
+) -> Result<String, i32> {
+    netfs_smb_mount_serialized(smb_url, mountpoint, credentials, allow_ui, None)
+}
+
+/// `netfs_smb_mount` with an optional serialization guard that is
+/// released as soon as `NetFSMountURLAsync` has returned — the wait for
+/// the mount_report block runs unlocked.
+fn netfs_smb_mount_serialized(
+    smb_url: &str,
+    mountpoint: Option<&Path>,
+    credentials: Option<(&str, &str)>,
+    allow_ui: bool,
+    issue_guard: Option<MutexGuard<'static, ()>>,
 ) -> Result<String, i32> {
     log::info!(
         "[netfs] mount {} → {} (creds={}, ui={})",
@@ -780,8 +1157,20 @@ pub fn netfs_smb_mount(
     // is really a CFArrayRef, owned by NetFS and valid only inside the
     // callback — extract the resolved path here, send it over.
     let (tx, rx) = mpsc::channel::<(i32, Option<String>)>();
+    let inflight = std::sync::Arc::new(Inflight {
+        url: smb_url.to_string(),
+        request_id: std::sync::atomic::AtomicUsize::new(0),
+        done: std::sync::atomic::AtomicBool::new(false),
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let inflight_for_block = inflight.clone();
     let report = block2::RcBlock::new(
         move |status: i32, _request_id: *mut c_void, mountpoints: *const c_void| {
+            // Mark retired BEFORE handing the result over: the quit
+            // path polls `done` and must not outrun the send.
+            inflight_for_block
+                .done
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             let resolved: Option<String> = if status == 0 && !mountpoints.is_null() {
                 let arr = mountpoints as CFArrayRef;
                 let count = unsafe { CFArrayGetCount(arr) };
@@ -805,6 +1194,11 @@ pub fn netfs_smb_mount(
         },
     );
 
+    // Registered BEFORE issuing so a quit sweep racing this call sees
+    // the request (it waits briefly for the id if needed).
+    let seq = register_inflight(inflight.clone());
+    let mut inflight_guard = InflightGuard { seq, keep: false };
+
     let mut request_id: *mut c_void = std::ptr::null_mut();
     let start_status = unsafe {
         NetFSMountURLAsync(
@@ -819,6 +1213,9 @@ pub fn netfs_smb_mount(
             &*report as *const _ as *mut c_void,
         )
     };
+    // The request is issued (or refused) — other mounts may proceed
+    // to their own pre-flight now; nothing below touches /Volumes.
+    drop(issue_guard);
     if start_status != 0 {
         log::warn!(
             "[netfs] NetFSMountURLAsync({}) failed to start: {}",
@@ -827,6 +1224,9 @@ pub fn netfs_smb_mount(
         );
         return Err(start_status);
     }
+    inflight
+        .request_id
+        .store(request_id as usize, std::sync::atomic::Ordering::SeqCst);
 
     let timeout = if allow_ui { MOUNT_TIMEOUT_UI } else { MOUNT_TIMEOUT_SILENT };
     let (status, resolved) = match rx.recv_timeout(timeout) {
@@ -837,7 +1237,9 @@ pub fn netfs_smb_mount(
                 smb_url,
                 timeout.as_secs()
             );
-            let cancel_status = unsafe { NetFSMountURLCancel(request_id) };
+            // CAS-guarded: if the quit sweep already cancelled this
+            // id we just wait for the callback it triggered.
+            let cancel_status = inflight.cancel().unwrap_or(0);
             match rx.recv_timeout(CANCEL_GRACE) {
                 Ok((st, _)) => log::warn!(
                     "[netfs] cancelled mount {} retired with status={}",
@@ -851,6 +1253,10 @@ pub fn netfs_smb_mount(
                         smb_url,
                         cancel_status
                     );
+                    // Still live inside the daemon: leave it in the
+                    // registry (flagged cancelled) so the quit sweep
+                    // knows about it — it will log, not wait.
+                    inflight_guard.keep_registered();
                     // The unretired request may still reference these CF
                     // objects from NetAuthSysAgent's side; leak them
                     // rather than risk a use-after-free. Rare (requires a
@@ -904,4 +1310,179 @@ pub fn status_message(status: i32) -> String {
         _ => "mount failed",
     };
     format!("{} (errno {})", label, status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GFX: &str = "//chris%20bialkowski@192.168.40.100/GFX_Dropbox on /Volumes/GFX_Dropbox (smbfs, nodev, nosuid, mounted by chris)";
+    const TANK: &str = "//chris@nas/Tank on /Volumes/Tank (smbfs, nodev, nosuid, mounted by chris)";
+    const TANK_ARCHIVE: &str = "//chris@nas/tank_archive on /Volumes/Tank_Archive (smbfs, nodev, nosuid, mounted by chris)";
+    const PROJECTS_FOREIGN: &str = "//alice@otherbox/Projects on /Volumes/Projects (smbfs, nodev, nosuid, mounted by chris)";
+    const PROJECTS_OURS_DEDUP: &str = "//chris@nas/Projects on /Volumes/Projects-1 (smbfs, nodev, nosuid, mounted by chris)";
+    const SPACED: &str = "//chris@nas/My%20Share on /Volumes/My Share (smbfs, nodev, nosuid, mounted by chris)";
+    const PORTED: &str = "//guest:@127.0.0.1:22000/union-jobs on /Volumes/union-jobs (smbfs, nodev, nosuid, mounted by chris)";
+    const APFS: &str = "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)";
+    const AUTOFS: &str = "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)";
+
+    fn table() -> Vec<MountLine> {
+        [GFX, TANK, TANK_ARCHIVE, PROJECTS_FOREIGN, PROJECTS_OURS_DEDUP, SPACED, PORTED, APFS, AUTOFS]
+            .iter()
+            .map(|l| parse_mount_line(l).expect("fixture parses"))
+            .collect()
+    }
+
+    #[test]
+    fn parses_user_prefixed_percent_encoded_line() {
+        let l = parse_mount_line(GFX).unwrap();
+        assert_eq!(l.source, "192.168.40.100/GFX_Dropbox");
+        assert_eq!(l.mount_point, "/Volumes/GFX_Dropbox");
+        assert_eq!(l.fstype, "smbfs");
+    }
+
+    #[test]
+    fn parses_mount_point_with_space_and_decodes_source() {
+        let l = parse_mount_line(SPACED).unwrap();
+        assert_eq!(l.source, "nas/My Share");
+        assert_eq!(l.mount_point, "/Volumes/My Share");
+        assert!(mount_line_matches_unc(&l, r"\\nas\My Share"));
+    }
+
+    #[test]
+    fn parses_non_smb_lines_and_rejects_garbage() {
+        let l = parse_mount_line(APFS).unwrap();
+        assert_eq!(l.source, "/dev/disk3s1s1");
+        assert_eq!(l.mount_point, "/");
+        assert_eq!(l.fstype, "apfs");
+        assert!(!mount_line_matches_unc(&l, r"\\nas\Tank"));
+        let a = parse_mount_line(AUTOFS).unwrap();
+        assert_eq!(a.fstype, "autofs");
+        assert!(parse_mount_line("").is_none());
+        assert!(parse_mount_line("no markers here").is_none());
+        assert!(parse_mount_line("//x@h/s on /Volumes/s").is_none());
+    }
+
+    #[test]
+    fn unc_source_key_normalises_separators() {
+        assert_eq!(unc_source_key(r"\\nas\Tank"), "nas/Tank");
+        assert_eq!(unc_source_key(r"\\nas\Tank\Deep\"), "nas/Tank/Deep");
+        assert_eq!(unc_source_key("//nas/Tank/"), "nas/Tank");
+        assert_eq!(unc_source_key(""), "");
+    }
+
+    #[test]
+    fn percent_decode_keeps_malformed_escapes() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%+1"), "%+1", "sign is not a hex digit");
+        assert_eq!(percent_decode("%C3%A9"), "é");
+    }
+
+    // Twin alignment: the agent strips ":port" from the source host.
+    #[test]
+    fn source_port_is_stripped_like_the_agent_twin() {
+        let l = parse_mount_line(PORTED).unwrap();
+        assert_eq!(l.source, "127.0.0.1/union-jobs");
+        assert!(mount_line_matches_unc(&l, r"\\127.0.0.1\union-jobs"));
+        assert_eq!(strip_port("nas"), "nas");
+        assert_eq!(strip_port("nas:445"), "nas");
+        assert_eq!(strip_port("[::1]:445"), "[::1]");
+        assert_eq!(strip_port("nas:notaport"), "nas:notaport");
+    }
+
+    // audit M-1: `Tank` must not adopt `tank_archive` (substring) and
+    // vice versa; matching is case-insensitive on the whole source.
+    #[test]
+    fn tank_does_not_match_tank_archive() {
+        let t = table();
+        assert_eq!(
+            find_mount_by_smb_url_in(&t, r"\\nas\Tank").as_deref(),
+            Some("/Volumes/Tank")
+        );
+        assert_eq!(
+            find_mount_by_smb_url_in(&t, r"\\nas\Tank_Archive").as_deref(),
+            Some("/Volumes/Tank_Archive")
+        );
+        assert_eq!(
+            find_mount_by_smb_url_in(&t, r"\\NAS\tank").as_deref(),
+            Some("/Volumes/Tank")
+        );
+        assert_eq!(find_mount_by_smb_url_in(&t, r"\\nas\Tan"), None);
+        assert_eq!(find_mount_by_smb_url_in(&t, r"\\nas\Tank\Sub"), None);
+        // Ownership: our Tank task must never call Tank_Archive ours.
+        assert_eq!(
+            mount_at_path_is_ours_in(&t, "/Volumes/Tank_Archive", r"\\nas\Tank"),
+            Some(false)
+        );
+        assert_eq!(
+            mount_at_path_is_ours_in(&t, "/Volumes/Tank", r"\\nas\Tank"),
+            Some(true)
+        );
+        assert_eq!(
+            mount_at_path_is_ours_in(&t, "/Volumes/Nope", r"\\nas\Tank"),
+            None
+        );
+    }
+
+    // audit M-2: our share at /Volumes/Projects-1 must not adopt the
+    // foreign live volume at /Volumes/Projects.
+    #[test]
+    fn projects_dedup_does_not_adopt_foreign_projects() {
+        let t = table();
+        assert_eq!(
+            find_existing_volume_in(&t, "Projects", r"\\nas\Projects").as_deref(),
+            Some("/Volumes/Projects-1")
+        );
+        assert_eq!(
+            find_existing_volume_in(&t, "Projects", r"\\otherbox\Projects").as_deref(),
+            Some("/Volumes/Projects")
+        );
+        assert_eq!(
+            mount_at_path_is_ours_in(&t, "/Volumes/Projects", r"\\nas\Projects"),
+            Some(false)
+        );
+        assert_eq!(
+            mount_at_path_is_ours_in(&t, "/Volumes/Projects-1", r"\\nas\Projects"),
+            Some(true)
+        );
+        // Name scoping still applies: a matching source mounted under
+        // an unrelated name is the URL finder's job, not this one's.
+        assert_eq!(find_existing_volume_in(&t, "Elsewhere", r"\\nas\Projects"), None);
+        assert_eq!(
+            find_existing_volume_in(&t, "GFX_Dropbox", r"\\192.168.40.100\GFX_Dropbox").as_deref(),
+            Some("/Volumes/GFX_Dropbox")
+        );
+    }
+
+    #[test]
+    fn extract_share_name_handles_deep_and_bare() {
+        assert_eq!(extract_share_name(r"\\srv\Tank\Deep\DEEP_JOBS"), "Tank");
+        assert_eq!(extract_share_name(r"\\srv\Tank"), "Tank");
+        assert_eq!(extract_share_name("Tank"), "Tank");
+    }
+
+    // One test (the registry is process-global): empty sweep is a
+    // no-op; an entry already flagged cancelled-but-unacknowledged is
+    // reported, not waited on, and never re-cancelled (no FFI call —
+    // the id below is fake, a real NetFSMountURLCancel would crash).
+    #[test]
+    fn cancel_sweep_skips_flagged_entries_and_does_not_stall() {
+        assert_eq!(inflight_mount_count(), 0);
+        assert_eq!(cancel_inflight_mounts(), 0);
+        let stuck = std::sync::Arc::new(Inflight {
+            url: "smb://test/stuck".into(),
+            request_id: std::sync::atomic::AtomicUsize::new(0xdead_beef),
+            done: std::sync::atomic::AtomicBool::new(false),
+            cancelled: std::sync::atomic::AtomicBool::new(true),
+        });
+        let seq = register_inflight(stuck);
+        assert_eq!(inflight_mount_count(), 1);
+        let t0 = std::time::Instant::now();
+        assert_eq!(cancel_inflight_mounts(), 0);
+        assert!(t0.elapsed() < CANCEL_GRACE, "sweep must not wait on a flagged entry");
+        inflight_registry().lock().unwrap().remove(&seq);
+        assert_eq!(inflight_mount_count(), 0);
+    }
 }

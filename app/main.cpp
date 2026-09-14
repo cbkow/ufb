@@ -103,6 +103,10 @@ QString singletonServerAddress() {
 extern "C" {
     // From the bindings crate. Phase 0 stub — does nothing yet.
     void ufb_bindings_phase0_smoke_test(void);
+    // aboutToQuit hook (audit 2026-09-11 M-3): cancels in-flight NetFS
+    // mount requests and stops the GUI-owned mount tasks without
+    // unmounting. Never stops the agent — it is the sync host.
+    void ufb_gui_about_to_quit(void);
 }
 
 // Phase 2 bring-up: force every Qt log message to stderr so QML import
@@ -377,6 +381,15 @@ int main(int argc, char *argv[])
     // Smoke-test the Rust↔C++ link. Should print a one-line message
     // through the Rust logger.
     ufb_bindings_phase0_smoke_test();
+
+    // Quit-time cleanup on the Rust side. Connected before the QML
+    // engine exists so it fires for every exit path that reaches
+    // aboutToQuit (Cmd-Q, tray Quit, window close with quitOnLastWindow,
+    // the single-instance forward). A hard crash still skips it — that
+    // case is exactly why the NetFS deadline cancel exists too.
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, &app, []() {
+        ufb_gui_about_to_quit();
+    });
 
     QQmlApplicationEngine engine;
     QObject::connect(

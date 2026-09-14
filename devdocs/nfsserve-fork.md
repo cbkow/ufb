@@ -32,6 +32,23 @@ Diff vs upstream is intentionally small:
 
 That's it — three files touched in `external/nfsserve/`.
 
+### Sync-audit deltas (2026-09-11, audit C-14)
+
+Three more fork-only fixes landed with the macOS sync-cache audit.
+They live in the same two files (`src/vfs.rs`, `src/nfs_handlers.rs`)
+and MUST be re-applied on the next upstream bump — none of them is
+upstream as of 0.10.2:
+
+| Where | Change | Why |
+|---|---|---|
+| `src/vfs.rs` `NFSFileSystem::readdir_simple` | Signature is now `readdir_simple(dirid, start_after: fileid3, count)`; the default impl forwards `start_after` to `readdir`. `src/nfs_handlers.rs::nfsproc3_readdir` passes `args.cookie`. | Upstream hard-wired `start_after = 0`, so every plain READDIR page after the first re-sent the first page and a directory larger than one reply never listed past it. |
+| `src/nfs_handlers.rs::nfsproc3_setattr` | The `sattrguard3::obj_ctime` mismatch branch now ends with `return Ok(())`. | Upstream serialised `NFS3ERR_NOT_SYNC` and then fell through: it still ran the setattr (truncating a file the client asked us NOT to touch) and wrote a second reply for the same xid. |
+| `src/vfs.rs` `NFSFileSystem::create_exclusive` + `src/nfs_handlers.rs::nfsproc3_create` | `create_exclusive(dirid, filename, verf: createverf3)`; the handler deserialises the 8-byte `createverf3` from the `EXCLUSIVE` arm of `createhow3` (it was left unread) and passes it through. | RFC 1813 EXCLUSIVE create is idempotent by verifier: a retransmitted CREATE (lost reply on the loopback) must succeed when the file exists with the same verf. `PassthroughFs::create_exclusive` remembers recent verfs in-memory and answers the existing fh instead of `NFS3ERR_EXIST`. |
+
+`cargo check` will catch the two signature changes (the agent's
+`PassthroughFs` impl won't compile against an unpatched trait); the
+SETATTR `return` is silent if dropped, so re-check it by hand.
+
 ## How the agent uses it
 
 `agent/src/sync/nfs_server.rs` overrides `write_with_stable` and

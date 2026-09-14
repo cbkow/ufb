@@ -9,6 +9,9 @@
 //!        ▲                                               │ dead/foreign
 //!        └── auto-remount (silent) ◄────────────────────┘
 //!   Stop → guarded unmount → idle until next command
+//!   Retire (left config) → guarded unmount → "stopped" → removed → exit
+//!   Retire (hand-off to the agent: sync flipped on) → "stopped" → removed → exit
+//!   Quit → exit, mount left up (an ordinary OS mount the user keeps)
 //!
 //! State updates are emitted as `MountStateUpdateMsg` through the SAME
 //! `MountEvents` forwarder the agent's IPC events use, so the states
@@ -54,14 +57,41 @@ pub struct LocalMountSpec {
 struct LocalMount {
     spec: LocalMountSpec,
     cmd_tx: mpsc::Sender<LocalCmd>,
-    /// Flipped when the mount leaves config — the task exits at the
-    /// next loop turn (its cmd channel also closes).
+    /// Flipped when the mount leaves config — the task processes a
+    /// final Stop (audit 2026-09-11 P2 retire: it used to exit before
+    /// Stop ran, leaving the share mounted and the row stuck) and exits.
     retired: Arc<AtomicBool>,
+    /// Retired because the SAME id flipped to sync (agent-owned): the
+    /// agent adopts the backing SMB mount, so the task must leave it
+    /// up — an unmount here would race the agent's own mount.
+    handoff: Arc<AtomicBool>,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, LocalMount>> {
     static REG: OnceLock<Mutex<HashMap<String, LocalMount>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Process-wide "the GUI is quitting" latch. Retired tasks consult it
+/// to skip the unmount: plain mounts are ordinary OS mounts the user
+/// expects to survive an app quit (Finder shows them; the agent may
+/// be using one as a sync backing). Only tasks stop — nothing is
+/// ejected. audit 2026-09-11 M-3.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// aboutToQuit hook: stop every local mount task WITHOUT unmounting.
+/// Clearing the registry drops each task's cmd sender, which wakes it
+/// (channel closed) into the `QUITTING` early-return.
+pub fn shutdown_for_quit() -> usize {
+    QUITTING.store(true, Ordering::SeqCst);
+    let mut n = 0;
+    if let Ok(mut reg) = registry().lock() {
+        n = reg.len();
+        for (_, m) in reg.drain() {
+            m.retired.store(true, Ordering::SeqCst);
+        }
+    }
+    n
 }
 
 /// True when `id` is currently GUI-owned (has a live local task).
@@ -103,9 +133,18 @@ pub fn send(id: &str, cmd: LocalCmd) -> bool {
 
 /// Reconcile the set of GUI-owned mounts with config: start tasks for
 /// enabled non-sync non-unmanaged mounts, retire tasks whose mount
-/// left that set. Idempotent; call at startup and after every config
-/// save.
-pub fn apply_config(specs: Vec<LocalMountSpec>, events: MountEventsArc) {
+/// left that set. `handoff_ids` are ids that are still enabled but now
+/// sync-enabled (agent-owned) — their tasks retire without unmounting
+/// so the agent can adopt the live SMB mount. Idempotent; call at
+/// startup and after every config save.
+pub fn apply_config(
+    specs: Vec<LocalMountSpec>,
+    handoff_ids: &[String],
+    events: MountEventsArc,
+) {
+    if QUITTING.load(Ordering::SeqCst) {
+        return;
+    }
     let mut reg = match registry().lock() {
         Ok(r) => r,
         Err(_) => return,
@@ -132,7 +171,13 @@ pub fn apply_config(specs: Vec<LocalMountSpec>, events: MountEventsArc) {
         .collect();
     for id in stale {
         if let Some(m) = reg.remove(&id) {
-            log::info!("[local-mounts] retiring {}", id);
+            let handoff = handoff_ids.contains(&id);
+            log::info!(
+                "[local-mounts] retiring {}{}",
+                id,
+                if handoff { " (hand-off to agent, mount left up)" } else { "" }
+            );
+            m.handoff.store(handoff, Ordering::SeqCst);
             m.retired.store(true, Ordering::SeqCst);
             // Nudge the task so it notices retirement promptly; a
             // closed channel (drop below) also wakes it.
@@ -151,13 +196,15 @@ pub fn apply_config(specs: Vec<LocalMountSpec>, events: MountEventsArc) {
         }
         let (cmd_tx, cmd_rx) = mpsc::channel::<LocalCmd>(8);
         let retired = Arc::new(AtomicBool::new(false));
+        let handoff = Arc::new(AtomicBool::new(false));
         log::info!("[local-mounts] starting {}", id);
         {
             let spec = spec.clone();
             let retired = retired.clone();
+            let handoff = handoff.clone();
             let events = events.clone();
             let _guard = shared_runtime().enter();
-            tokio::spawn(run_mount(spec, cmd_rx, retired, events));
+            tokio::spawn(run_mount(spec, cmd_rx, retired, handoff, events));
         }
         reg.insert(
             id,
@@ -165,6 +212,7 @@ pub fn apply_config(specs: Vec<LocalMountSpec>, events: MountEventsArc) {
                 spec,
                 cmd_tx,
                 retired,
+                handoff,
             },
         );
     }
@@ -176,7 +224,7 @@ fn emit(events: &MountEventsArc, spec: &LocalMountSpec, state: &str, detail: Str
         Some((text, fixable)) => (Some(text), if fixable { Some(true) } else { None }),
         None => (None, None),
     };
-    events.state_update(&MountStateUpdateMsg {
+    events.local_state_update(&MountStateUpdateMsg {
         mount_id: spec.id.clone(),
         state: state.to_string(),
         state_detail: detail,
@@ -214,7 +262,12 @@ mod sys {
         /// `_forget` is a Windows concept (persistent profile entry);
         /// macOS unmount has nothing to forget.
         pub fn unmount(path: &str, _forget: bool) {
-            let _ = macos_mounts::macos_smb_unmount(path);
+            // warn, not silent: a failed eject is the difference
+            // between "stopped" and "still mounted" on the row (audit
+            // 2026-09-11 P2 failure visibility).
+            if let Err(e) = macos_mounts::macos_smb_unmount(path) {
+                log::warn!("[local-mounts] unmount {} failed: {}", path, e);
+            }
         }
 
         pub fn is_ours(path: &str, nas_share_path: &str) -> Option<bool> {
@@ -341,20 +394,32 @@ mod sys {
 /// then a read_dir on a worker thread with a timeout (dead SMB mounts
 /// block read_dir indefinitely; the kernel's attr cache makes stat
 /// lie). Mirrors the agent's heartbeat probe.
-fn probe_alive(path: &str, nas_share_path: &str) -> bool {
+///
+/// `busy` is the per-mount "a probe thread is still out there" latch
+/// (audit 2026-09-11 P2 thread leak): a dead server never answers, so
+/// each 30s tick used to detach one more thread stuck in read_dir. If
+/// the previous probe hasn't returned, this tick is skipped (None) —
+/// the earlier timeout already triggered the remount; piling on adds
+/// threads, not information.
+fn probe_alive(path: &str, nas_share_path: &str, busy: &Arc<AtomicBool>) -> Option<bool> {
     if sys::is_ours(path, nas_share_path) != Some(true) {
-        return false;
+        return Some(false);
+    }
+    if busy.swap(true, Ordering::SeqCst) {
+        return None;
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let p = path.to_string();
+    let busy_t = busy.clone();
     std::thread::spawn(move || {
         let ok = match std::fs::read_dir(&p) {
             Ok(mut rd) => !matches!(rd.next(), Some(Err(_))),
             Err(_) => false,
         };
+        busy_t.store(false, Ordering::SeqCst);
         let _ = tx.send(ok);
     });
-    matches!(rx.recv_timeout(std::time::Duration::from_secs(10)), Ok(true))
+    Some(matches!(rx.recv_timeout(std::time::Duration::from_secs(10)), Ok(true)))
 }
 
 const HEARTBEAT_SECS: u64 = 30;
@@ -363,14 +428,41 @@ async fn run_mount(
     spec: LocalMountSpec,
     mut cmd_rx: mpsc::Receiver<LocalCmd>,
     retired: Arc<AtomicBool>,
+    handoff: Arc<AtomicBool>,
     events: MountEventsArc,
 ) {
     let mut mounted_at: Option<String> = None;
     // Start immediately (silent) — mirrors the agent's boot behavior.
     let mut pending: Option<LocalCmd> = Some(LocalCmd::Start { allow_ui: false });
+    let probe_busy = Arc::new(AtomicBool::new(false));
 
     loop {
         if retired.load(Ordering::SeqCst) {
+            if QUITTING.load(Ordering::SeqCst) {
+                // App quit: the task dies, the mount stays (see
+                // shutdown_for_quit).
+                return;
+            }
+            // Retire = a final Stop, then drop the id from every
+            // downstream map so no "stopped" ghost row / live root
+            // outlives the config entry. Hand-off keeps the mount up
+            // for the agent to adopt.
+            if handoff.load(Ordering::SeqCst) {
+                // The agent owns this id now and reports its own
+                // states; a late local "stopped"/removed here could
+                // wipe the agent's "mounted" (review 2026-09-11) — so
+                // exit silently, mount left up for it to adopt.
+                log::info!(
+                    "[local-mounts] {} handed off to the agent — leaving {:?} mounted",
+                    spec.id, mounted_at
+                );
+                return;
+            }
+            if let Some(p) = mounted_at.take() {
+                guarded_unmount(&spec, p, true).await;
+            }
+            emit(&events, &spec, "stopped", "Stopped".into(), None, None);
+            events.state_removed(&spec.id);
             return;
         }
 
@@ -401,17 +493,23 @@ async fn run_mount(
             Some(LocalCmd::Start { allow_ui }) => {
                 emit(&events, &spec, "mounting", "Mounting".into(), None, None);
                 let s = spec.clone();
+                // drift_notice + upkeep stat the filesystem (stale-dir
+                // check under /Volumes, symlink removal) — they ride
+                // the same blocking task as the mount rather than the
+                // async runtime (audit 2026-09-11 P2 thread leak).
                 let result = tokio::task::spawn_blocking(move || {
-                    sys::mount(&s, allow_ui)
+                    sys::mount(&s, allow_ui).map(|path| {
+                        let notice = sys::drift_notice(&s, &path);
+                        sys::post_mount_upkeep(&s, &path);
+                        (path, notice)
+                    })
                 })
                 .await
                 .unwrap_or_else(|e| {
                     Err(sys::MountError::Other(format!("mount task panicked: {}", e)))
                 });
                 match result {
-                    Ok(path) => {
-                        let notice = sys::drift_notice(&spec, &path);
-                        sys::post_mount_upkeep(&spec, &path);
+                    Ok((path, notice)) => {
                         mounted_at = Some(path.clone());
                         log::info!("[local-mounts] {} mounted at {}", spec.id, path);
                         emit(&events, &spec, "mounted", "Mounted".into(),
@@ -453,11 +551,19 @@ async fn run_mount(
                     Some(p) => {
                         let pp = p.clone();
                         let np = spec.nas_share_path.clone();
+                        let busy = probe_busy.clone();
                         let alive = tokio::task::spawn_blocking(move || {
-                            probe_alive(&pp, &np)
+                            probe_alive(&pp, &np, &busy)
                         })
                         .await
-                        .unwrap_or(false);
+                        .unwrap_or(Some(false));
+                        let Some(alive) = alive else {
+                            log::warn!(
+                                "[local-mounts] {} heartbeat skipped — previous probe of {} still hung",
+                                spec.id, p
+                            );
+                            continue;
+                        };
                         if !alive {
                             log::warn!(
                                 "[local-mounts] {} unreachable at {:?} — remounting",

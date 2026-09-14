@@ -190,7 +190,12 @@ Rectangle {
                     unmanaged: m.unmanaged === true,
                     notice: m.notice || "",
                     noticeFixable: m.noticeFixable === true,
-                    state: m.unmanaged === true ? qsTr("bookmark") : (m.state || "(waiting)")
+                    state: m.unmanaged === true ? qsTr("bookmark") : (m.state || "(waiting)"),
+                    // The owner's human sentence for the state ("NetFS
+                    // mount of \\nas\x failed: no route to host") —
+                    // surfaced as the row tooltip so a failure isn't
+                    // just the word "error".
+                    stateDetail: m.stateDetail || ""
                 })
             }
         } catch (e) {
@@ -621,6 +626,16 @@ Rectangle {
                 readonly property string mountPath: model.mountPath || ""
                 readonly property string mountState: model.state || ""
                 readonly property bool mountReady: mountPath.length > 0
+                readonly property string mountStateDetail: model.stateDetail || ""
+
+                // Failure visibility (audit 2026-09-11 P2): the row only
+                // shows the state word; the detail (errno text, which
+                // server, what to do) was invisible without the logs.
+                ToolTip.text: mountStateDetail
+                ToolTip.visible: mtHover.containsMouse
+                    && mountStateDetail.length > 0
+                    && mountStateDetail.toLowerCase() !== mountState.toLowerCase()
+                ToolTip.delay: 600
 
                 DropArea {
                     id: mtDropTarget
@@ -890,7 +905,11 @@ Rectangle {
             Label {
                 anchors.centerIn: parent
                 visible: mountsModel.count === 0
-                text: Mount.connected ? qsTr("(no mounts)") : qsTr("(agent waiting)")
+                // Gate on agent_required like Main.qml's footer does: a
+                // sync-free setup never needs the agent, so "waiting"
+                // there was a permanent lie (audit 2026-09-11 P2).
+                text: (Mount.connected || !Mount.agent_required)
+                    ? qsTr("(no mounts)") : qsTr("(agent waiting)")
                 color: Theme.colors.textSubtle
                 font.pixelSize: Theme.font.sizeSmall
                 font.italic: true

@@ -65,7 +65,18 @@ fn ensure_single_instance() -> MutexGuard {
 fn ensure_single_instance() -> MutexGuard {
     use std::os::unix::io::AsRawFd;
 
-    let lock_dir = if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+    // macOS: next to agent.pid in ~/Library/Application Support/ufb —
+    // a per-user location (audit 2026-09-11 P2). The old /tmp lock was
+    // machine-wide, so on a multi-user Mac the second user's agent
+    // failed the single-instance check against the first user's and
+    // exited. Linux keeps XDG_RUNTIME_DIR (already per-user) → /tmp.
+    #[cfg(target_os = "macos")]
+    let per_user_dir = pid_file_path().and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    #[cfg(not(target_os = "macos"))]
+    let per_user_dir: Option<std::path::PathBuf> = None;
+    let lock_dir = if let Some(dir) = per_user_dir {
+        dir
+    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         let dir = std::path::PathBuf::from(runtime_dir).join("ufb");
         let _ = std::fs::create_dir_all(&dir);
         dir
@@ -143,8 +154,70 @@ fn pid_file_path() -> Option<std::path::PathBuf> {
 /// RAII guard that writes the PID file at construction and removes it
 /// on Drop. Crash / SIGKILL leaves it behind; heal-on-open detects the
 /// stale file (PID not alive) and overwrites.
+///
+/// Audit 2026-09-11 L-1: Drop never ran on a normal exit because every
+/// exit path ends in `process::exit`, which skips destructors — so the
+/// file always outlived the process and the GUI's heal-on-open found a
+/// "live" PID that, after reuse, could belong to an unrelated process.
+/// `graceful_exit` now removes it explicitly (only when it still names
+/// THIS pid, so a newer agent's file is never clobbered). The contents
+/// stay a bare pid: the GUI side identity-checks (process name / start
+/// time) before killing.
 struct PidFileGuard {
     path: std::path::PathBuf,
+}
+
+/// Remove the PID file if it still records this process. Idempotent.
+fn remove_own_pid_file() {
+    let Some(path) = pid_file_path() else { return };
+    let me = std::process::id().to_string();
+    match std::fs::read_to_string(&path) {
+        Ok(contents) if contents.trim() == me => {
+            match std::fs::remove_file(&path) {
+                Ok(()) => log::info!("Removed PID file {}", path.display()),
+                Err(e) => log::warn!("PID file cleanup failed: {} ({})", path.display(), e),
+            }
+        }
+        Ok(other) => log::debug!(
+            "PID file {} names pid {} (not us) — leaving it",
+            path.display(),
+            other.trim()
+        ),
+        Err(_) => {}
+    }
+}
+
+/// The ONLY way the agent should exit once it's running. Everything
+/// `process::exit` would skip — and that must not be skipped — goes
+/// here:
+///   * cancel any NetFS mount request still in flight (audit 2026-09-11
+///     M-3): dying with one pending wedges NetAuthSysAgent for the whole
+///     login session, after which no process on the machine can mount
+///     an SMB share until the daemon is killed. The orchestrators'
+///     Stop handling normally retires these; this is the backstop for
+///     the "shutdown timed out after 15s" path;
+///   * remove the PID file (audit 2026-09-11 L-1).
+pub fn graceful_exit(code: i32) -> ! {
+    #[cfg(target_os = "macos")]
+    {
+        // At most one cancel-and-wait pass per process (review
+        // 2026-09-11 #6): a request whose cancel went unacknowledged
+        // is already unregistered, and a second pass would only wait
+        // another CANCEL_GRACE for nothing.
+        static EXIT_CANCEL_DONE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let pending = platform::macos::inflight_count();
+        if pending > 0 && !EXIT_CANCEL_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            log::warn!(
+                "{} NetFS mount request(s) still in flight at exit — cancelling before process::exit",
+                pending
+            );
+            platform::macos::cancel_inflight_mounts();
+        }
+    }
+    remove_own_pid_file();
+    log::info!("ufb-agent exiting (code {})", code);
+    process::exit(code);
 }
 
 impl PidFileGuard {
@@ -170,15 +243,10 @@ impl PidFileGuard {
 
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.path) {
-            log::debug!(
-                "PID file cleanup failed (non-fatal): {} ({})",
-                self.path.display(),
-                e
-            );
-        } else {
-            log::debug!("Removed PID file {}", self.path.display());
-        }
+        // Only reached on a return-based unwind (panic in main, early
+        // return); the process::exit paths go through graceful_exit.
+        let _ = &self.path;
+        remove_own_pid_file();
     }
 }
 
@@ -334,8 +402,16 @@ async fn run_event_loop() {
         // Shared config cache — loaded once at startup, refreshed when the
         // config file changes (watcher below). Reloaded into the NFS server
         // + mount service on config change.
+        // Audit 2026-09-11 M-4: an unreadable/corrupt file at boot is
+        // logged and treated as "nothing to mount yet" — there's no
+        // last-good to keep. Later reloads (below) skip on Err.
         let config_cache: std::sync::Arc<std::sync::RwLock<config::MountsConfig>> =
-            std::sync::Arc::new(std::sync::RwLock::new(config::load_config()));
+            std::sync::Arc::new(std::sync::RwLock::new(
+                config::load_config().unwrap_or_else(|e| {
+                    log::error!("{} — starting with no mounts until the file is fixed", e);
+                    config::MountsConfig::empty()
+                }),
+            ));
 
         // Shared per-domain cache map — populated on VFS server startup,
         // queried by mount_service for UI drain/stats.
@@ -426,15 +502,42 @@ async fn run_event_loop() {
                 // Outgoing state updates to forward to UFB
                 Some(msg) = state_rx.recv() => {
                     log::debug!("Forwarding to UFB: {:?}", msg);
-                    if let Err(e) = ipc_server.send(msg).await {
+                    // Badge updates are per-file and idempotent — drop
+                    // under pressure. Everything else is a reply or a
+                    // state transition and must be delivered (review
+                    // 2026-09-11 #3).
+                    #[cfg(unix)]
+                    let droppable = matches!(msg, messages::AgentToUfb::BadgeUpdate(_));
+                    #[cfg(not(unix))]
+                    let droppable = false;
+                    let sent = if droppable {
+                        #[cfg(unix)]
+                        { ipc_server.send_droppable(msg) }
+                        #[cfg(not(unix))]
+                        { ipc_server.send(msg).await }
+                    } else {
+                        ipc_server.send(msg).await
+                    };
+                    if let Err(e) = sent {
                         log::warn!("Failed to forward to UFB: {}", e);
                     }
                 }
 
-                // Config file changed on disk
+                // Config file changed on disk. Audit 2026-09-11 M-4: a
+                // file that doesn't parse (or is mid-write and empty)
+                // must NOT be applied — pre-fix it deserialised to an
+                // empty mount list and stopped every sync mount.
                 Some(()) = config_reload_rx.recv() => {
-                    *config_cache.write().unwrap() = config::load_config();
-                    mount_service.reload_config().await;
+                    match config::load_config() {
+                        Ok(cfg) => {
+                            *config_cache.write().unwrap() = cfg.clone();
+                            mount_service.apply_loaded_config(cfg).await;
+                        }
+                        Err(e) => log::error!(
+                            "{} — keeping the last good config (no mounts changed)",
+                            e
+                        ),
+                    }
                 }
 
                 // Shutdown signal (SIGINT or SIGTERM). The funneling
@@ -452,8 +555,7 @@ async fn run_event_loop() {
         }
     }
 
-    log::info!("ufb-agent exiting");
-    process::exit(0);
+    graceful_exit(0);
 }
 
 /// macOS: headless agent — tray UI handled by companion Swift MenuBarExtra app.

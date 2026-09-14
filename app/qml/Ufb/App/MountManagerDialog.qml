@@ -176,9 +176,13 @@ Dialog {
             Layout.fillWidth: true
             spacing: 0
             Label {
+                // "agent waiting" only means something when a sync
+                // mount needs the agent (Main.qml gates the same way);
+                // otherwise say so instead of nagging (audit 2026-09-11 P2).
                 text: qsTr("%1 mount(s) · agent %2")
                     .arg(dialog.configsObj.mounts ? dialog.configsObj.mounts.length : 0)
-                    .arg(Mount.connected ? qsTr("connected") : qsTr("waiting"))
+                    .arg(!Mount.agent_required ? qsTr("not needed")
+                         : Mount.connected ? qsTr("connected") : qsTr("waiting"))
                 color: Theme.colors.textMuted
                 font.pixelSize: Theme.font.sizeSmall
                 Layout.fillWidth: true

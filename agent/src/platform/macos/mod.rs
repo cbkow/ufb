@@ -4,12 +4,16 @@ pub(crate) mod netfs;
 // credentials (slice C), TestCredentials is a wire tombstone, and
 // the plain-mount symlink layer retired with GUI-owned mounts (F1).
 
-pub use fallback::find_existing_volume;
+pub use fallback::cancel_inflight_mount;
+pub use fallback::macos_reconnect_blocking;
 pub use fallback::macos_smb_mount;
 pub use fallback::macos_smb_unmount;
 pub use fallback::mount_at_path_is_ours;
 pub use fallback::stale_dir_blocking;
+pub use fallback::MacosMount;
 pub use fallback::MacosMountError;
+pub use netfs::cancel_inflight_mounts;
+pub use netfs::inflight_count;
 
 /// macOS App Group identifier shared by ufb-agent (this binary), the Qt
 /// main app (UFB.app), the Swift menu-bar tray (UFBTray.app), and the

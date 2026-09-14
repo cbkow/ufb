@@ -1036,9 +1036,13 @@ pub async fn nfsproc3_readdir(
     // This is hard to ballpark, so we just divide it by 16
     let estimated_max_results = args.dircount / 16;
     let mut ctr = 0;
+    // Thread the client's cookie through: the default readdir_simple
+    // always restarted from 0, so every READDIR page after the first
+    // re-sent the first page and a directory larger than one reply
+    // never listed past it (audit 2026-09-11 C-14).
     match context
         .vfs
-        .readdir_simple(dirid, estimated_max_results as usize)
+        .readdir_simple(dirid, args.cookie, estimated_max_results as usize)
         .await
     {
         Ok(result) => {
@@ -1464,6 +1468,7 @@ pub async fn nfsproc3_create(
         }
     };
     let mut target_attributes = nfs::sattr3::default();
+    let mut verf = nfs::createverf3::default();
 
     match createhow {
         createmode3::UNCHECKED => {
@@ -1493,7 +1498,12 @@ pub async fn nfsproc3_create(
             }
         }
         createmode3::EXCLUSIVE => {
-            debug!("create exclusive");
+            // createhow3 carries the 8-byte verifier for EXCLUSIVE; it
+            // was left unread. The VFS needs it to recognise a
+            // retransmitted create of a file it already made (audit
+            // 2026-09-11 C-14).
+            verf.deserialize(input)?;
+            debug!("create exclusive verf={:?}", verf);
         }
     }
 
@@ -1503,7 +1513,7 @@ pub async fn nfsproc3_create(
     if matches!(createhow, createmode3::EXCLUSIVE) {
         // the API for exclusive is very slightly different
         // We are not returning a post op attribute
-        fid = context.vfs.create_exclusive(dirid, &dirops.name).await;
+        fid = context.vfs.create_exclusive(dirid, &dirops.name, verf).await;
         postopattr = nfs::post_op_attr::Void;
     } else {
         // create!
@@ -1655,6 +1665,12 @@ pub async fn nfsproc3_setattr(
                 make_success_reply(xid).serialize(output)?;
                 nfs::nfsstat3::NFS3ERR_NOT_SYNC.serialize(output)?;
                 nfs::wcc_data::default().serialize(output)?;
+                // The guard failed: the reply above is the whole answer.
+                // Falling through ran the setattr anyway (truncating a
+                // file the client explicitly asked us NOT to touch) and
+                // then wrote a second reply for the same xid (audit
+                // 2026-09-11 C-14).
+                return Ok(());
             }
         }
     }

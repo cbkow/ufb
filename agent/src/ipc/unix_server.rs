@@ -1,5 +1,4 @@
 use crate::messages::{AgentToUfb, UfbToAgent};
-use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -45,6 +44,15 @@ pub fn get_socket_path() -> std::path::PathBuf {
     socket_path()
 }
 
+/// Per-client write budget. The broadcast writer runs every client's
+/// `send_message` back-to-back on one task; a client that stops
+/// draining its socket (GUI hung on the main thread, debugger attached)
+/// would otherwise park that task in `write_all` forever and, through
+/// the bounded response channel, back-pressure the agent's main loop
+/// (audit 2026-09-11 P2). A client that can't take a state update in
+/// this long is dropped — it reconnects and asks for a fresh snapshot.
+const CLIENT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// IPC server that listens for connections on a Unix domain socket.
 /// Supports multiple concurrent clients (e.g. UFB + Swift tray app).
 pub struct IpcServer {
@@ -56,7 +64,11 @@ pub struct IpcServer {
 impl IpcServer {
     pub fn start() -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<UfbToAgent>(64);
-        let (resp_tx, mut resp_rx) = mpsc::channel::<AgentToUfb>(64);
+        // 1024: one-shot replies (Ack, CacheStats, snapshots) must not
+        // be lost behind a burst of per-file badge updates (review
+        // 2026-09-11 #3); the writer drains one message per
+        // spawn_blocking round trip.
+        let (resp_tx, mut resp_rx) = mpsc::channel::<AgentToUfb>(1024);
         let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
         // Shared list of connected client write streams
@@ -66,19 +78,38 @@ impl IpcServer {
         let writer_handle = writers.clone();
         tokio::spawn(async move {
             while let Some(msg) = resp_rx.recv().await {
-                let mut lock = writer_handle.lock().await;
-                let mut failed = Vec::new();
-                for (i, stream) in lock.iter_mut().enumerate() {
-                    if let Err(e) = super::send_message(stream, &msg) {
-                        log::debug!("Failed to send to client {}: {}", i, e);
-                        failed.push(i);
+                // The writes are blocking socket I/O (bounded by
+                // CLIENT_WRITE_TIMEOUT per client) — keep them off the
+                // async workers so a slow client can't stall the
+                // runtime the orchestrators share.
+                let writers = Arc::clone(&writer_handle);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let mut lock = writers.blocking_lock();
+                    let mut failed = Vec::new();
+                    for (i, stream) in lock.iter_mut().enumerate() {
+                        if let Err(e) = super::send_message(stream, &msg) {
+                            let slow = matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            );
+                            if slow {
+                                log::warn!(
+                                    "IPC client {} not draining (write timed out) — dropping it",
+                                    i
+                                );
+                            } else {
+                                log::debug!("Failed to send to client {}: {}", i, e);
+                            }
+                            failed.push(i);
+                        }
                     }
-                }
-                // Remove disconnected clients (reverse order to preserve indices)
-                for i in failed.into_iter().rev() {
-                    log::info!("Removing disconnected client {}", i);
-                    lock.remove(i);
-                }
+                    // Remove disconnected clients (reverse order to preserve indices)
+                    for i in failed.into_iter().rev() {
+                        log::info!("Removing disconnected client {}", i);
+                        lock.remove(i);
+                    }
+                })
+                .await;
             }
         });
 
@@ -140,6 +171,9 @@ impl IpcServer {
                         continue;
                     }
                 };
+                if let Err(e) = write_stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT)) {
+                    log::warn!("IPC: could not set client write timeout: {}", e);
+                }
 
                 // Add write half to client list
                 {
@@ -175,10 +209,27 @@ impl IpcServer {
         }
     }
 
+    /// Queue a message for every connected client. Reliable (awaited):
+    /// one-shot replies — Ack, Error, CacheStats, TestCredentialsResult,
+    /// MountStateSnapshot, Pong, ConflictDetected — and state
+    /// transitions must reach the GUI or its 10s command timeout renders
+    /// success as failure (review 2026-09-11 #3). The channel is 1024
+    /// deep and a wedged client is evicted by the per-client write
+    /// timeout, so this only ever waits briefly.
     pub async fn send(&self, msg: AgentToUfb) -> Result<(), String> {
         self.response_tx
             .send(msg)
             .await
+            .map_err(|e| format!("Failed to queue response: {}", e))
+    }
+
+    /// Non-blocking variant for high-frequency, idempotent traffic
+    /// (per-file BadgeUpdate): dropped when the channel is full — the
+    /// next update supersedes it — so a burst can never back-pressure
+    /// the agent's main loop (audit 2026-09-11 P2).
+    pub fn send_droppable(&self, msg: AgentToUfb) -> Result<(), String> {
+        self.response_tx
+            .try_send(msg)
             .map_err(|e| format!("Failed to queue response: {}", e))
     }
 }

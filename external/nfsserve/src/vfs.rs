@@ -177,10 +177,14 @@ pub trait NFSFileSystem: Sync {
 
     /// Creates a file if it does not already exist
     /// this should return Err(nfsstat3::NFS3ERR_ROFS)
+    /// `verf` is the client's 8-byte create verifier: the same
+    /// (dir, name, verf) arriving again is a retransmit and must
+    /// succeed with the existing file's id, not EXIST.
     async fn create_exclusive(
         &self,
         dirid: fileid3,
         filename: &filename3,
+        verf: createverf3,
     ) -> Result<fileid3, nfsstat3>;
 
     /// Makes a directory with the following attributes.
@@ -225,13 +229,17 @@ pub trait NFSFileSystem: Sync {
 
     /// Simple version of readdir.
     /// Only need to return filename and id
+    /// `start_after` is the client's READDIR cookie (audit 2026-09-11
+    /// C-14: it used to be hard-wired to 0, so pagination never
+    /// advanced).
     async fn readdir_simple(
         &self,
         dirid: fileid3,
+        start_after: fileid3,
         count: usize,
     ) -> Result<ReadDirSimpleResult, nfsstat3> {
         Ok(ReadDirSimpleResult::from_readdir_result(
-            &self.readdir(dirid, 0, count).await?,
+            &self.readdir(dirid, start_after, count).await?,
         ))
     }
 

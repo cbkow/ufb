@@ -91,14 +91,27 @@ impl MountService {
 
     /// Load config and start all enabled mounts.
     pub async fn start_from_config(&mut self) {
-        let config = config::load_config();
-        self.apply_config(config).await;
+        match config::load_config() {
+            Ok(config) => self.apply_config(config).await,
+            // Audit 2026-09-11 M-4: nothing to keep at boot, but don't
+            // pretend the file said "no mounts" either — just wait for
+            // the poller to see a fixed file.
+            Err(e) => log::error!("{} — no mounts started", e),
+        }
     }
 
-    /// Reload config from disk and apply changes.
+    /// Reload config from disk and apply changes. Audit 2026-09-11 M-4:
+    /// a file that fails to load leaves the running mounts untouched.
     pub async fn reload_config(&mut self) {
         log::info!("Reloading config...");
-        let config = config::load_config();
+        match config::load_config() {
+            Ok(config) => self.apply_config(config).await,
+            Err(e) => log::error!("{} — keeping the last good config", e),
+        }
+    }
+
+    /// Apply a config the caller already loaded (main.rs's poller).
+    pub async fn apply_loaded_config(&mut self, config: MountsConfig) {
         self.apply_config(config).await;
     }
 
@@ -144,15 +157,24 @@ impl MountService {
                         // over from a now-disabled mount, or just an empty dir.
                         if crate::sync::nfs_server::is_mounted(&path) {
                             log::info!("Umounting stale NFS mount: {}", path.display());
-                            let _ = std::process::Command::new("umount")
+                            let gentle = std::process::Command::new("umount")
                                 .arg(&path)
                                 .status();
-                            // Try forced umount if the gentle one left it mounted
+                            // Try forced umount if the gentle one left it mounted.
+                            // Audit 2026-09-11 P2: results were discarded — a
+                            // loopback that survives both is exactly the kind
+                            // of Finder-hanging zombie we need to hear about.
                             if crate::sync::nfs_server::is_mounted(&path) {
-                                let _ = std::process::Command::new("umount")
+                                let forced = std::process::Command::new("umount")
                                     .arg("-f")
                                     .arg(&path)
                                     .status();
+                                log::warn!(
+                                    "Stale NFS mount {} survived umount ({:?}); umount -f → {:?}",
+                                    path.display(),
+                                    gentle.map(|s| s.code()),
+                                    forced.map(|s| s.code())
+                                );
                             }
                         }
                         match std::fs::remove_dir(&path) {
@@ -258,8 +280,24 @@ impl MountService {
             if !mount_config.enabled || mount_config.unmanaged || gui_owned {
                 // If mount exists but is now disabled, stop it
                 if let Some(instance) = self.mounts.remove(&mount_config.id) {
-                    log::info!("Disabling mount: {}", mount_config.id);
-                    let _ = instance.event_tx.send(MountEvent::Stop).await;
+                    // Audit 2026-09-11 M-5: sync flipped off while the
+                    // mount stays enabled = the GUI is taking the share
+                    // over as a plain mount and has (or is about to)
+                    // adopt /Volumes/<share>. Hand it off — tear down
+                    // the sync server + NFS loopback but leave the
+                    // backing SMB volume mounted. A real disable /
+                    // unmanaged flip keeps the full Stop + unmount.
+                    let handoff = gui_owned && mount_config.enabled && !mount_config.unmanaged;
+                    if handoff {
+                        log::info!(
+                            "Sync disabled on {} — handing the share to the app (backing mount kept)",
+                            mount_config.id
+                        );
+                        let _ = instance.event_tx.send(MountEvent::Handoff).await;
+                    } else {
+                        log::info!("Disabling mount: {}", mount_config.id);
+                        let _ = instance.event_tx.send(MountEvent::Stop).await;
+                    }
                     if let Ok(mut g) = self.state_cache.write() {
                         g.remove(&mount_config.id);
                     }
@@ -269,19 +307,34 @@ impl MountService {
             }
 
             if let Some(instance) = self.mounts.get(&mount_config.id) {
-                // Mount exists — check if config changed
-                if instance.config != mount_config {
-                    log::info!("Config changed for mount: {}", mount_config.id);
+                // Mount exists — check if config changed. Audit
+                // 2026-09-11 P2: compare only the fields that change
+                // what/where we mount; a display-name edit or a legacy
+                // tuning field used to force-unmount + remount the share.
+                let remount = instance.config.mount_key() != mount_config.mount_key();
+                if remount {
+                    log::info!("Mount-affecting config changed for mount: {}", mount_config.id);
                     let _ = instance
                         .event_tx
                         .send(MountEvent::ConfigChanged {
                             new_config: mount_config.clone(),
                         })
                         .await;
-                    // Update stored config
-                    if let Some(instance) = self.mounts.get_mut(&mount_config.id) {
-                        instance.config = mount_config;
-                    }
+                } else if instance.config != mount_config {
+                    log::info!(
+                        "Cosmetic config change for mount {} — updating without remount",
+                        mount_config.id
+                    );
+                    let _ = instance
+                        .event_tx
+                        .send(MountEvent::UpdateConfig {
+                            new_config: mount_config.clone(),
+                        })
+                        .await;
+                }
+                // Update stored config
+                if let Some(instance) = self.mounts.get_mut(&mount_config.id) {
+                    instance.config = mount_config;
                 }
                 continue;
             }
@@ -407,7 +460,9 @@ impl MountService {
             UfbToAgent::Quit => {
                 log::info!("Quit command received via IPC, shutting down...");
                 self.shutdown().await;
-                std::process::exit(0);
+                // graceful_exit cancels any NetFS request still in
+                // flight and removes the PID file (audit M-3 / L-1).
+                crate::graceful_exit(0);
             }
             UfbToAgent::FreshnessSweep(msg) => {
                 self.handle_freshness_sweep(msg).await;
@@ -697,7 +752,18 @@ impl MountService {
                 Ok((id, Ok(Ok(())))) => log::info!("Mount {} shut down cleanly", id),
                 Ok((id, Ok(Err(e)))) => log::error!("Mount {} task panicked: {}", id, e),
                 Ok((id, Err(_))) => {
-                    log::warn!("Mount {} shutdown timed out after 15s", id)
+                    // The orchestrator didn't drain Stop in time. The
+                    // one thing that must not outlive us is a pending
+                    // NetFS request (audit 2026-09-11 M-3) — cancel it
+                    // here rather than trusting the caller's backstop.
+                    log::warn!("Mount {} shutdown timed out after 15s", id);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let n = crate::platform::macos::cancel_inflight_mounts();
+                        if n > 0 {
+                            log::warn!("Cancelled {} in-flight NetFS request(s) after timeout", n);
+                        }
+                    }
                 }
                 Err(e) => log::error!("Shutdown supervisor task error: {}", e),
             }

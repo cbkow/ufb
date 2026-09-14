@@ -122,6 +122,16 @@ pub trait MountEvents: Send + Sync + 'static {
     /// Agent reported mount state changed (Mounting → Mounted, etc.).
     fn state_update(&self, update: &MountStateUpdateMsg);
 
+    /// Same payload, but from a GUI-owned local mount task rather than
+    /// the agent. Split so a UI can guard `state_update` by ownership
+    /// (review 2026-09-11: on a sync→plain flip the agent's hand-off
+    /// emits a late "stopped" for an id the GUI task already mounted —
+    /// applied blindly it flipped the row and dropped the live root).
+    /// Default routes to `state_update` for impls that don't care.
+    fn local_state_update(&self, update: &MountStateUpdateMsg) {
+        self.state_update(update);
+    }
+
     /// Agent sent an authoritative snapshot of every known mount. UI
     /// implementations should replace their entire local mounts map on
     /// receipt — any mount missing from the snapshot has been removed
@@ -134,6 +144,14 @@ pub trait MountEvents: Send + Sync + 'static {
             self.state_update(entry);
         }
     }
+
+    /// A mount id left the owner's set entirely (a GUI-owned plain
+    /// mount was removed from config / disabled and its task retired).
+    /// UIs drop the id from their states map so a stale "stopped" row
+    /// and its live root don't outlive the config entry (audit
+    /// 2026-09-11 P2 retire). Default no-op — only the QML forwarder
+    /// keeps a map to prune.
+    fn state_removed(&self, _mount_id: &str) {}
 
     /// Agent acknowledged a previously-issued async command.
     fn ack(&self, ack: &AckMsg);

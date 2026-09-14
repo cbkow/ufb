@@ -81,9 +81,12 @@ pub fn cleanup_stale_mounts_on_startup() {
     let mut victims: Vec<String> = Vec::new();
     for line in text.lines() {
         // mount line: "localhost:/<domain> on /Users/.../ufb/mounts/<domain> (nfs, ...)"
-        let Some((source, rest)) = line.split_once(" on ") else { continue };
+        // A mount point containing spaces ("…/ufb/mounts/Jobs Live") was
+        // truncated at its first space by the old split_once(' '), so the
+        // umount -f below targeted a nonexistent path and the dead
+        // loopback survived the restart (audit 2026-09-11 L-5).
+        let Some((source, path)) = parse_mount_line(line) else { continue };
         if !source.starts_with("localhost:/") { continue; }
-        let Some((path, _)) = rest.split_once(' ') else { continue };
         if !path.starts_with(&mounts_root_str) { continue; }
         victims.push(path.to_string());
     }
@@ -114,8 +117,17 @@ pub fn is_mounted(path: &Path) -> bool {
         return false;
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let needle = format!(" on {} ", path.display());
-    text.contains(&needle)
+    mount_table_has(&text, path)
+}
+
+/// Exact mount-point match against `mount(8)` output (see
+/// `parse_mount_line` for why a substring needle is wrong).
+fn mount_table_has(mount_output: &str, path: &Path) -> bool {
+    let want = path.display().to_string();
+    mount_output
+        .lines()
+        .filter_map(parse_mount_line)
+        .any(|(_, mp)| mp == want)
 }
 
 /// Prepare `path` for use as an NFS mount point. Existing installs may have a
@@ -209,7 +221,65 @@ pub struct PassthroughFs {
     /// Rolling NAS reachability state. Ops that would touch SMB consult
     /// this first and short-circuit with JUKEBOX when offline.
     health: Arc<NasHealth>,
+    /// Last good `fattr3` for the share root + when we got it. The
+    /// dispatcher calls `getattr(dirid)` before almost every op, and root
+    /// has no known_files metadata, so root GETATTR used to stat SMB
+    /// live — with no offline gate and no fallback, every LOOKUP /
+    /// ACCESS / READDIR at the top level blocked for the full SMB
+    /// timeout during an outage (audit 2026-09-11 C-5a).
+    root_attr_cache: std::sync::Mutex<Option<(fattr3, std::time::Instant)>>,
+    /// `createverf3` of recent EXCLUSIVE creates, keyed by relative
+    /// path. NFS3 EXCLUSIVE create is idempotent by verifier: a
+    /// retransmitted CREATE (lost reply on the loopback) must succeed
+    /// when the file exists with the SAME verf, not EXIST. In-memory is
+    /// enough — retransmits arrive within seconds and a restart drops
+    /// the client's handles anyway (audit 2026-09-11 C-14).
+    exclusive_verfs: std::sync::Mutex<std::collections::HashMap<String, ([u8; 8], std::time::Instant)>>,
+    /// fh → wall-clock time of OUR most recent write / truncate through
+    /// this server. This is the only legitimate "we just wrote this"
+    /// signal: the row's `nas_mtime` is NOT — enumeration and the TTL
+    /// stat adopt it from PEER edits, so gating conflict checks on it
+    /// let a peer save inside the window be clobbered without a sidecar
+    /// (review of C-4a, 2026-09-11). In-memory: after a restart there is
+    /// no marker and every check does the live stat, which is the safe
+    /// direction.
+    local_writes: std::sync::Mutex<std::collections::HashMap<fileid3, f64>>,
 }
+
+/// Quiet window after OUR OWN write during which conflict checks and
+/// freshness stats are skipped. Sized to the macOS SMB client's
+/// attribute cache (~10s): inside it a live stat can still report
+/// PRE-write size/mtime, which read as spurious drift (a `.conflict-*`
+/// sidecar of our own bytes on every write→truncate, or a half-copied
+/// file's bitmap nuked). Outside it the live stat is authoritative. A
+/// peer edit landing inside these seconds of our own write is the
+/// accepted residual.
+const LOCAL_WRITE_QUIET_SECS: f64 = 15.0;
+/// Entries older than this are swept from `local_writes` on insert.
+const LOCAL_WRITE_RETAIN_SECS: f64 = 600.0;
+
+/// Pure gate: is `now` still inside the quiet window of a local write
+/// recorded at `last_local_write`? No marker → never quiet (always
+/// check). Clock going backwards (marker in the future) → treat as
+/// quiet for at most the window, never permanently.
+#[inline]
+fn in_local_write_quiet_window(last_local_write: Option<f64>, now: f64) -> bool {
+    match last_local_write {
+        None => false,
+        Some(at) => (now - at).abs() < LOCAL_WRITE_QUIET_SECS,
+    }
+}
+
+/// How long a root `fattr3` is served without re-stat'ing SMB while
+/// online. Matches the client's `actimeo=1` — anything shorter is wasted
+/// SMB round-trips, anything longer delays the readdir cookieverf bump.
+const ROOT_ATTR_TTL: Duration = Duration::from_secs(1);
+/// Cap on a live root stat before we fall back to the cached attr. SMB
+/// normally answers in ms; a stall past this is an outage the heartbeat
+/// hasn't noticed yet.
+const ROOT_STAT_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long an EXCLUSIVE create verifier is remembered.
+const EXCLUSIVE_VERF_TTL: Duration = Duration::from_secs(120);
 
 impl PassthroughFs {
     pub fn new(
@@ -224,7 +294,30 @@ impl PassthroughFs {
             .map_err(|e| format!("Failed to canonicalize {}: {}", nas_root.display(), e))?;
         // Root always has an fh (seeded at schema init; ensure idempotently).
         cache.ensure_fh("");
-        Ok(Self { domain, nas_root: canon, cache, ipc_tx, health })
+        Ok(Self {
+            domain,
+            nas_root: canon,
+            cache,
+            ipc_tx,
+            health,
+            root_attr_cache: std::sync::Mutex::new(None),
+            exclusive_verfs: std::sync::Mutex::new(std::collections::HashMap::new()),
+            local_writes: std::sync::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Record that WE just wrote/truncated `fh` (see `local_writes`).
+    fn note_local_write(&self, fh: fileid3) {
+        let now = unix_now_f64();
+        let mut map = self.local_writes.lock().unwrap();
+        if map.len() >= 4096 {
+            map.retain(|_, at| now - *at < LOCAL_WRITE_RETAIN_SECS);
+        }
+        map.insert(fh, now);
+    }
+
+    fn last_local_write(&self, fh: fileid3) -> Option<f64> {
+        self.local_writes.lock().unwrap().get(&fh).copied()
     }
 
     /// Short-circuit guard for SMB-touching ops. Returns `NFS3ERR_JUKEBOX`
@@ -250,8 +343,8 @@ impl PassthroughFs {
 
     fn rel_path(&self, fh: fileid3) -> Result<String, nfsstat3> {
         match self.cache.path_for_fh(fh) {
-            Some(p) => Ok(p),
-            None => {
+            Ok(Some(p)) => Ok(p),
+            Ok(None) => {
                 let total = self.cache.nfs_handles_count();
                 log::warn!(
                     "[nfs-server] {}: STALE — no nfs_handles row for fh={} (table has {} rows total)",
@@ -260,6 +353,17 @@ impl PassthroughFs {
                     total
                 );
                 Err(nfsstat3::NFS3ERR_STALE)
+            }
+            // DB-layer failure (pool exhausted / SQLITE_BUSY): the row
+            // may well exist. STALE would make the client discard a
+            // perfectly good handle; JUKEBOX makes it retry shortly
+            // (audit 2026-09-11 C-12).
+            Err(e) => {
+                log::warn!(
+                    "[nfs-server] {}: fh={} lookup failed ({}) — JUKEBOX",
+                    self.domain, fh, e
+                );
+                Err(nfsstat3::NFS3ERR_JUKEBOX)
             }
         }
     }
@@ -275,8 +379,20 @@ impl PassthroughFs {
     async fn populate_folder(&self, parent_rel: &str) -> Result<(), nfsstat3> {
         self.require_online()?;
         let abs = self.absolute(parent_rel);
-        let (entries, is_partial): (Vec<crate::messages::DirEntry>, bool) =
-            tokio::task::spawn_blocking(move || -> Result<(Vec<_>, bool), nfsstat3> {
+        let (entries, is_partial, folder_mtime): (Vec<crate::messages::DirEntry>, bool, f64) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<_>, bool, f64), nfsstat3> {
+                // Folder mtime is stat'd HERE, on the blocking thread,
+                // and handed to record_enumeration — it used to stat SMB
+                // again from inside record_enumeration on the tokio
+                // worker (audit 2026-09-11 C-5b). Stat before the
+                // listing so a child change landing mid-listing bumps
+                // the mtime past what we store and forces a re-enum.
+                let folder_mtime = std::fs::metadata(&abs)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
                 let rd = std::fs::read_dir(&abs).map_err(io_to_nfsstat)?;
                 let mut entries: Vec<crate::messages::DirEntry> = Vec::new();
                 // Any per-entry error (flaky SMB readdir under load, stat
@@ -331,24 +447,78 @@ impl PassthroughFs {
                         created,
                     });
                 }
-                Ok((entries, is_partial))
+                Ok((entries, is_partial, folder_mtime))
             })
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)??;
-        self.cache.record_enumeration(parent_rel, &entries, is_partial);
+        // The whole SQLite transaction (N upserts + orphan scan + prune)
+        // is blocking work too — off the tokio worker (C-5b).
+        let cache = self.cache.clone();
+        let parent_owned = parent_rel.to_string();
+        tokio::task::spawn_blocking(move || {
+            cache.record_enumeration(&parent_owned, &entries, is_partial, folder_mtime);
+        })
+        .await
+        .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         Ok(())
     }
 
     /// Build an `fattr3` for the share root (no known_files row for "").
-    /// Slice E: async + spawn_blocking — stat'ing the SMB root can
-    /// hang briefly on a slow link.
+    ///
+    /// Served from `root_attr_cache` whenever the NAS is offline, the
+    /// cached value is younger than `ROOT_ATTR_TTL`, or the live stat
+    /// fails / exceeds `ROOT_STAT_TIMEOUT`. Only a cold cache with a
+    /// failing stat surfaces an error — and even then a synthesized
+    /// directory attr is preferred over blocking the dispatcher, because
+    /// root GETATTR gates every top-level op (audit 2026-09-11 C-5a).
     async fn root_attr(&self) -> Result<fattr3, nfsstat3> {
+        let root_fh = self.root_dir();
+        let cached: Option<(fattr3, std::time::Instant)> =
+            *self.root_attr_cache.lock().unwrap();
+        if let Some((attr, at)) = cached {
+            if !self.health.is_online() || at.elapsed() < ROOT_ATTR_TTL {
+                return Ok(attr);
+            }
+        } else if !self.health.is_online() {
+            return Ok(synthesized_root_attr(root_fh));
+        }
+
         let nas_root = self.nas_root.clone();
-        let meta = tokio::task::spawn_blocking(move || std::fs::metadata(&nas_root))
-            .await
-            .map_err(|_| nfsstat3::NFS3ERR_IO)?
-            .map_err(io_to_nfsstat)?;
-        Ok(nfsserve::fs_util::metadata_to_fattr3(1, &meta))
+        let live: Result<std::fs::Metadata, String> = match tokio::time::timeout(
+            ROOT_STAT_TIMEOUT,
+            tokio::task::spawn_blocking(move || std::fs::metadata(&nas_root)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(meta))) => Ok(meta),
+            Ok(Ok(Err(e))) => Err(format!("stat failed: {}", e)),
+            Ok(Err(_)) => Err("stat task panicked".to_string()),
+            Err(_) => Err(format!("stat exceeded {:?}", ROOT_STAT_TIMEOUT)),
+        };
+        match live {
+            Ok(meta) => {
+                let attr = nfsserve::fs_util::metadata_to_fattr3(root_fh, &meta);
+                *self.root_attr_cache.lock().unwrap() =
+                    Some((attr, std::time::Instant::now()));
+                Ok(attr)
+            }
+            Err(why) => match cached {
+                Some((attr, _)) => {
+                    log::debug!(
+                        "[nfs-server] {}: root getattr {} — serving last good attr",
+                        self.domain, why
+                    );
+                    Ok(attr)
+                }
+                None => {
+                    log::warn!(
+                        "[nfs-server] {}: root getattr {} with no cached attr — synthesizing",
+                        self.domain, why
+                    );
+                    Ok(synthesized_root_attr(root_fh))
+                }
+            },
+        }
     }
 
     /// Conflict-detection pre-flight for a truncate-style write. If the NAS
@@ -366,11 +536,37 @@ impl PassthroughFs {
     /// detection or copy preflight failures (where there's nothing
     /// useful to preserve) still return Ok so we don't block legitimate
     /// truncates.
+    ///
+    /// Callers: SETATTR truncate-to-zero, the first WRITE of an editing
+    /// session, and RENAME over an existing file — the last two were
+    /// missing, so macOS safe-save (write tmp, RENAME over original)
+    /// and in-place editors silently clobbered a peer's edit (audit
+    /// 2026-09-11 C-4a). `cached` is what the index last knew about
+    /// `rel`; callers already hold it.
+    ///
+    /// Quiet gate (C-11): only OUR OWN write/truncate of this fh inside
+    /// `LOCAL_WRITE_QUIET_SECS` skips the check — the macOS SMB client's
+    /// ~10s attribute cache can still return PRE-write size/mtime then,
+    /// which minted spurious `.conflict-*` sidecars on every
+    /// write→truncate sequence. The gate is keyed on the `local_writes`
+    /// marker, never on the row's mtime: that value is adopted from peer
+    /// edits too, and gating on it skipped the live stat for a peer save
+    /// made after our write (data loss — review of C-4a). With no marker
+    /// the live stat always runs, with the narrow 2s slop.
     async fn preserve_conflict_sidecar_if_drifted(
         &self,
         rel: &str,
         abs: &Path,
+        fh: fileid3,
+        cached: &CachedAttr,
     ) -> Result<(), nfsstat3> {
+        if cached.is_dir {
+            return Ok(());
+        }
+        if in_local_write_quiet_window(self.last_local_write(fh), unix_now_f64()) {
+            return Ok(());
+        }
+
         let abs_for_stat = abs.to_path_buf();
         // Live NAS stat — wrapped in spawn_blocking.
         let live_meta = match tokio::task::spawn_blocking(move || {
@@ -392,16 +588,13 @@ impl PassthroughFs {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
 
-        // What we last saw.
-        let cached = match self.cache.cached_attr(rel) {
-            Some(c) => c,
-            None => return Ok(()), // never seen — nothing to compare
-        };
-
-        // mtime granularity on Synology/SMB is ~1s; allow 2s slop.
-        let drifted =
-            live_size != cached.size || (live_mtime - cached.mtime).abs() > 2.0;
-        if !drifted {
+        if !is_drift(
+            cached.size,
+            cached.mtime,
+            live_size,
+            live_mtime,
+            CONFLICT_MTIME_SLOP_SECS,
+        ) {
             return Ok(());
         }
 
@@ -521,21 +714,20 @@ impl PassthroughFs {
         Ok((fh, attr_from_cache(fh, &attr)))
     }
 
-    /// Serve a read from the local cache file (fully-hydrated fast path).
-    fn read_from_cache(
+    /// Conflict pre-flight for the WRITE path (C-4a): one SMB stat per
+    /// editing session — every write refreshes the local-write marker,
+    /// so the second and later writes of a burst are inside the quiet
+    /// window and skip it. Runs under the per-fh write guard, which the
+    /// caller already holds.
+    async fn preflight_write_conflict(
         &self,
+        rel: &str,
+        abs: &Path,
         fh: fileid3,
-        offset: u64,
-        len: usize,
-        size: u64,
-    ) -> Result<(Vec<u8>, bool), nfsstat3> {
-        let cache_path = self.cache.cache_file_path(fh);
-        let f = std::fs::File::open(&cache_path).map_err(io_to_nfsstat)?;
-        let mut buf = vec![0u8; len];
-        let n = f.read_at(&mut buf, offset).map_err(io_to_nfsstat)?;
-        buf.truncate(n);
-        let eof = offset + n as u64 >= size;
-        Ok((buf, eof))
+        prior: Option<&CachedAttr>,
+    ) -> Result<(), nfsstat3> {
+        let Some(prior) = prior else { return Ok(()) };
+        self.preserve_conflict_sidecar_if_drifted(rel, abs, fh, prior).await
     }
 
     /// Chunk-aware read: for each chunk covered by the request, serve from
@@ -728,6 +920,22 @@ impl PassthroughFs {
     }
 }
 
+/// Serve a byte range from a local cache blob (fully-hydrated fast
+/// path). Plain blocking I/O — call from `spawn_blocking`.
+fn read_blob_range(
+    cache_path: &Path,
+    offset: u64,
+    len: usize,
+    size: u64,
+) -> Result<(Vec<u8>, bool), nfsstat3> {
+    let f = std::fs::File::open(cache_path).map_err(io_to_nfsstat)?;
+    let mut buf = vec![0u8; len];
+    let n = f.read_at(&mut buf, offset).map_err(io_to_nfsstat)?;
+    buf.truncate(n);
+    let eof = offset + n as u64 >= size;
+    Ok((buf, eof))
+}
+
 /// Clear a bit in the chunk bitmap (used when a cached chunk turns out to
 /// be invalid and we need to refetch).
 #[inline]
@@ -753,6 +961,82 @@ fn is_all_zeros(buf: &[u8]) -> bool {
     let remainder = chunks.remainder();
     chunks.map(|c| u64::from_ne_bytes(c.try_into().unwrap())).all(|w| w == 0)
         && remainder.iter().all(|&b| b == 0)
+}
+
+/// Freshness / self-echo tuning shared by read(), write(), setattr() and
+/// rename(). All wall-clock seconds. "Recently written by us" is NOT a
+/// constant here — it is the per-fh `local_writes` marker gated by
+/// `in_local_write_quiet_window` (see `LOCAL_WRITE_QUIET_SECS`).
+///
+/// * `FRESHNESS_TTL_SECS` — how long a successful NAS stat vouches for a
+///   row before read() re-stats.
+/// * `READ_SELF_ECHO_SECS` — read(): same-size drift with an mtime delta
+///   under this is our own write echoed back with the NAS's clock (we
+///   stamp local time on write), not a peer edit. Adopt, don't
+///   invalidate — otherwise every copied file fully re-hydrates on its
+///   first read. Pre-audit value; a wider window here only costs a
+///   missed same-size peer edit until the next size change.
+/// * `CONFLICT_MTIME_SLOP_SECS` — conflict sidecar decisions: SMB mtime
+///   granularity is ~1s; equal size inside this slop is the same
+///   version. Deliberately NARROW — a wider window here is silent data
+///   loss (a peer's same-size save skipped as "echo"), which is exactly
+///   what the sidecar exists to prevent. Our own writes are excluded by
+///   the local-write marker instead (C-11 review, 2026-09-11).
+const FRESHNESS_TTL_SECS: f64 = 5.0;
+const READ_SELF_ECHO_SECS: f64 = 30.0;
+const CONFLICT_MTIME_SLOP_SECS: f64 = 2.0;
+
+#[inline]
+fn unix_now_f64() -> f64 {
+    crate::sync::cache_core::unix_now_f64()
+}
+
+/// "Has the NAS copy diverged from what the index knows?" A size change
+/// is always drift; at equal size an mtime delta beyond `mtime_slop` is.
+#[inline]
+fn is_drift(
+    cached_size: u64,
+    cached_mtime: f64,
+    live_size: u64,
+    live_mtime: f64,
+    mtime_slop: f64,
+) -> bool {
+    if live_size != cached_size {
+        return true;
+    }
+    (live_mtime - cached_mtime).abs() > mtime_slop
+}
+
+/// Parse one `mount(8)` output line into `(source, mount_point)`.
+/// Shape: `<source> on <mount point> (<fstype>, <opts…>)`. The trailing
+/// ` (` group is split off FIRST because mount points may contain
+/// spaces (`…/ufb/mounts/Jobs Live`); only then is ` on ` split.
+/// Shared by `is_mounted` and `cleanup_stale_mounts_on_startup` so both
+/// compare the mount point by exact equality — a `" on {path} "`
+/// substring needle matched `…/Jobs` against `…/Jobs Live` and fired a
+/// spurious `umount -f` (review 2026-09-11).
+fn parse_mount_line(line: &str) -> Option<(&str, &str)> {
+    let (head, _opts) = line.rsplit_once(" (")?;
+    let (source, mount_point) = head.split_once(" on ")?;
+    Some((source, mount_point.trim_end()))
+}
+
+/// Root attr to serve when SMB can't be stat'd and nothing is cached
+/// yet: a plain directory with epoch timestamps. Better than an error —
+/// root GETATTR gates every top-level op — and the epoch mtime only
+/// means the readdir cookieverf is 0 until the first live stat lands.
+fn synthesized_root_attr(fh: fileid3) -> fattr3 {
+    attr_from_cache(
+        fh,
+        &CachedAttr {
+            is_dir: true,
+            size: 0,
+            mtime: 0.0,
+            created: 0.0,
+            is_hydrated: false,
+            hydrated_size: 0,
+        },
+    )
 }
 
 /// Convert a `CachedAttr` + fh into an `fattr3`. Used for all non-root entries.
@@ -1009,7 +1293,10 @@ impl NFSFileSystem for PassthroughFs {
             let _write_guard = fh_lock.write().await;
 
             if new_size == 0 {
-                self.preserve_conflict_sidecar_if_drifted(&rel, &abs).await?;
+                if let Some(cached) = self.cache.cached_attr(&rel) {
+                    self.preserve_conflict_sidecar_if_drifted(&rel, &abs, id, &cached)
+                        .await?;
+                }
             }
 
             let abs_for_io = abs.clone();
@@ -1026,6 +1313,7 @@ impl NFSFileSystem for PassthroughFs {
                 .await
                 .map_err(|_| nfsstat3::NFS3ERR_IO)?;
             truncate_result?;
+            self.note_local_write(id);
 
             // Cached content is now stale — nuke it.
             self.cache.invalidate_cache(&rel, id);
@@ -1064,23 +1352,23 @@ impl NFSFileSystem for PassthroughFs {
         // stat closes that hole.
         //
         // Two guards keep this from fighting our own writes:
-        //  * Recently-written files are skipped outright — during an
-        //    active copy the SMB attribute cache lags our own writes and
-        //    a stat would read as spurious drift, nuking the bitmap of a
-        //    half-copied file.
+        //  * Files WE wrote inside the quiet window are skipped — during
+        //    an active copy the SMB attribute cache lags our own writes
+        //    and a stat would read as spurious drift, nuking the bitmap
+        //    of a half-copied file. Keyed on the local-write marker, not
+        //    the row's mtime: that is adopted from peer edits too, and a
+        //    NAS clock running ahead made `now - mtime` negative, i.e.
+        //    "recent" forever, so the file was never re-verified (audit
+        //    2026-09-11 C-11).
         //  * Same-size drift with a small mtime delta is a self-write
         //    echo (we stamp nas_mtime with LOCAL time on write; the NAS
         //    stamps its own clock) — adopt the server values instead of
         //    invalidating, or every copied file would fully re-hydrate
         //    on its first read a minute later.
-        const FRESHNESS_TTL_SECS: f64 = 5.0;
-        const RECENT_WRITE_SKIP_SECS: f64 = 60.0;
-        const SELF_WRITE_ECHO_SECS: f64 = 30.0;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        if self.health.is_online() && now - attr.mtime > RECENT_WRITE_SKIP_SECS {
+        let now = unix_now_f64();
+        if self.health.is_online()
+            && !in_local_write_quiet_window(self.last_local_write(id), now)
+        {
             let cache = self.cache.clone();
             let rel_owned = rel.clone();
             let abs = self.absolute(&rel);
@@ -1095,25 +1383,36 @@ impl NFSFileSystem for PassthroughFs {
             .await
             .unwrap_or(macos_cache::StatResult::Skipped);
             if let macos_cache::StatResult::Drifted { size, mtime } = stat {
-                let self_echo = size == attr.size
-                    && (mtime - attr.mtime).abs() < SELF_WRITE_ECHO_SECS;
-                if !self_echo {
+                if is_drift(attr.size, attr.mtime, size, mtime, READ_SELF_ECHO_SECS) {
                     log::info!(
                         "[nfs-server] {}: {} changed on NAS (size {}→{}) — \
                          dropping cached bytes",
                         self.domain, rel, attr.size, size
                     );
+                    // Invalidate under a BLOCKING write lock, then adopt
+                    // the metadata. No guard is held here and readers are
+                    // per-RPC, so the wait is bounded. The old try_write
+                    // skipped the invalidation whenever a concurrent READ
+                    // held the read guard — and because the stat had
+                    // already adopted the new size/mtime, every later
+                    // stat said Fresh and the stale hydrated bytes were
+                    // served until eviction (audit 2026-09-11 C-1).
                     let lock = self.cache.fh_lock(id);
-                    if let Ok(_g) = lock.try_write() {
+                    {
+                        let _g = lock.write().await;
                         self.cache.invalidate_cache(&rel, id);
+                        self.cache.update_nas_metadata(&rel, size, mtime);
                     }
-                    // Re-read: size/mtime were refreshed by the stat and
-                    // hydration state by the invalidate.
-                    attr = self
-                        .cache
-                        .cached_attr(&rel)
-                        .ok_or(nfsstat3::NFS3ERR_NOENT)?;
+                } else {
+                    // Self-echo: same bytes, the NAS's clock. Adopt the
+                    // server's values so the next stat is Fresh.
+                    self.cache.update_nas_metadata(&rel, size, mtime);
                 }
+                // Re-read: size/mtime and hydration state both changed.
+                attr = self
+                    .cache
+                    .cached_attr(&rel)
+                    .ok_or(nfsstat3::NFS3ERR_NOENT)?;
             }
         }
         let size = attr.size;
@@ -1144,8 +1443,20 @@ impl NFSFileSystem for PassthroughFs {
         // zeros for a file that is perfectly fine on SMB. Demote to the
         // bitmap path instead — it re-hydrates from SMB.
         if attr.is_hydrated {
-            self.cache.touch(&rel);
-            match self.read_from_cache(id, offset, read_len, size) {
+            // Blocking local pread + the SQLite touch run on a blocking
+            // thread — inline they pinned a tokio worker per hydrated
+            // READ, and a 1 MiB pread from a cold page cache is not free
+            // (audit 2026-09-11 C-15).
+            let cache = self.cache.clone();
+            let rel_for_touch = rel.clone();
+            let cache_path = self.cache.cache_file_path(id);
+            let fast = tokio::task::spawn_blocking(move || {
+                cache.touch(&rel_for_touch);
+                read_blob_range(&cache_path, offset, read_len, size)
+            })
+            .await
+            .map_err(|_| nfsstat3::NFS3ERR_IO)?;
+            match fast {
                 Ok((buf, eof)) if buf.len() == read_len => {
                     return Ok((buf, eof));
                 }
@@ -1233,6 +1544,12 @@ impl NFSFileSystem for PassthroughFs {
         let was_hydrated = prior_attr.as_ref().map(|a| a.is_hydrated).unwrap_or(false);
         let new_size = prev_size.max(offset + data.len() as u64);
 
+        // Peer-edit check before the first write of a session (C-4a).
+        // The recency gate inside makes this one SMB stat per editing
+        // session, not per WRITE RPC.
+        self.preflight_write_conflict(&rel, &abs, id, prior_attr.as_ref())
+            .await?;
+
         // Slice H: write-through to the local cache file at the same
         // offset. Pre-Slice-H the write path called invalidate_cache
         // which deleted the cache file outright, forcing every read-
@@ -1308,14 +1625,25 @@ impl NFSFileSystem for PassthroughFs {
         .await
         .map_err(|_| nfsstat3::NFS3ERR_IO)?;
         let mirror_ok = write_result?;
+        // SMB write landed → this fh is "ours" for the quiet window.
+        self.note_local_write(id);
 
-        if !mirror_ok && was_hydrated {
-            // The cache file now diverges from SMB at this offset and
-            // the hydrated fast path would serve the stale bytes
-            // forever. Drop the cache entry; the next read re-hydrates
-            // from SMB. (We hold the per-fh write guard, so no reader
-            // is mid-flight on this fh.)
+        if !mirror_ok {
+            // The cache file now diverges from SMB at this offset. For a
+            // hydrated file the fast path would serve the stale bytes
+            // forever; for a PARTIALLY hydrated file every chunk the
+            // write touched whose bit was already set is just as stale
+            // — the old `&& was_hydrated` guard left those serving
+            // pre-write bytes (audit 2026-09-11 C-3). Drop the whole
+            // entry; the next read re-hydrates from SMB. (We hold the
+            // per-fh write guard, so no reader is mid-flight on this
+            // fh.) Cheap when nothing was cached.
             self.cache.invalidate_cache(&rel, id);
+        } else if was_hydrated && new_size > prev_size {
+            // Write-through past the old EOF on a fully-hydrated file:
+            // the blob holds every byte, so the accounting must grow
+            // with it (audit 2026-09-11 C-6b).
+            self.cache.extend_hydrated_size(&rel, new_size);
         }
 
         // Update the chunk bitmap for chunks the write fully covered.
@@ -1488,6 +1816,7 @@ impl NFSFileSystem for PassthroughFs {
         &self,
         dirid: fileid3,
         filename: &filename3,
+        verf: nfsserve::nfs::createverf3,
     ) -> Result<fileid3, nfsstat3> {
         self.require_online()?;
         let parent_rel = self.rel_path(dirid)?;
@@ -1508,9 +1837,41 @@ impl NFSFileSystem for PassthroughFs {
             })
             .await
             .map_err(|_| nfsstat3::NFS3ERR_IO)?;
-        create_result?;
+        match create_result {
+            Ok(()) => {}
+            Err(nfsstat3::NFS3ERR_EXIST) => {
+                // Retransmit of an EXCLUSIVE create whose reply was lost:
+                // the file exists because WE just made it with this
+                // exact verifier. RFC 1813 says answer success; EXIST
+                // made the client's open() fail on a file it owns
+                // (audit 2026-09-11 C-14).
+                let remembered = {
+                    let map = self.exclusive_verfs.lock().unwrap();
+                    map.get(&child_rel)
+                        .filter(|(v, at)| *v == verf && at.elapsed() < EXCLUSIVE_VERF_TTL)
+                        .is_some()
+                };
+                if remembered {
+                    if let Some(fh) = self.cache.fh_for_path(&child_rel) {
+                        log::debug!(
+                            "[nfs-server] {}: exclusive create retransmit for {} — fh={}",
+                            self.domain, child_rel, fh
+                        );
+                        return Ok(fh);
+                    }
+                }
+                return Err(nfsstat3::NFS3ERR_EXIST);
+            }
+            Err(e) => return Err(e),
+        }
 
         let (fh, _attr) = self.register_new_entry(&child_rel, &name, &abs).await?;
+        {
+            let mut map = self.exclusive_verfs.lock().unwrap();
+            // Bounded: sweep expired entries on every insert.
+            map.retain(|_, (_, at)| at.elapsed() < EXCLUSIVE_VERF_TTL);
+            map.insert(child_rel.clone(), (verf, std::time::Instant::now()));
+        }
         Ok(fh)
     }
 
@@ -1622,9 +1983,28 @@ impl NFSFileSystem for PassthroughFs {
         let to_abs = self.absolute(&to_rel);
 
         // Same-path rename is a no-op (some clients do this while editors
-        // re-save files); short-circuit before hitting the NAS.
+        // re-save files); short-circuit before hitting the NAS. A
+        // case-only rename (`Foo.mov` → `foo.mov`) is NOT equal here and
+        // proceeds — SMB performs it, and `rename_path` keeps the row
+        // (C-4b).
         if from_rel == to_rel {
             return Ok(());
+        }
+
+        // RENAME over an existing file is macOS safe-save (write tmp,
+        // rename over the original). If a peer edited the original since
+        // we last saw it, preserve their version as a sidecar before the
+        // rename clobbers it — this path never checked (audit
+        // 2026-09-11 C-4a). A case-only rename maps to the SAME row and
+        // is skipped: the "target" is the source.
+        let from_fh = self.cache.fh_for_path(&from_rel);
+        let to_fh = self.cache.fh_for_path(&to_rel);
+        let same_row = from_fh.is_some() && from_fh == to_fh;
+        if !same_row {
+            if let (Some(to_fh), Some(target)) = (to_fh, self.cache.cached_attr(&to_rel)) {
+                self.preserve_conflict_sidecar_if_drifted(&to_rel, &to_abs, to_fh, &target)
+                    .await?;
+            }
         }
 
         // Slice E: SMB rename wrapped in spawn_blocking. Atomic on
@@ -1808,6 +2188,178 @@ fn join_rel(parent: &str, child: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drift_rule_size_change_always_drifts() {
+        assert!(is_drift(10, 1000.0, 11, 1000.0, CONFLICT_MTIME_SLOP_SECS));
+        assert!(is_drift(10, 1000.0, 0, 1000.0, READ_SELF_ECHO_SECS));
+    }
+
+    #[test]
+    fn drift_rule_same_size_inside_slop_is_same_version() {
+        assert!(!is_drift(10, 1000.0, 10, 1000.0, CONFLICT_MTIME_SLOP_SECS));
+        assert!(!is_drift(10, 1000.0, 10, 1001.5, CONFLICT_MTIME_SLOP_SECS));
+        // A same-size peer save 20s later is a conflict — the narrow
+        // slop must catch it (review of C-4a).
+        assert!(is_drift(10, 1000.0, 10, 1020.0, CONFLICT_MTIME_SLOP_SECS));
+        // read() tolerates a wider self-echo, but not minutes.
+        assert!(!is_drift(10, 1000.0, 10, 1020.0, READ_SELF_ECHO_SECS));
+        assert!(is_drift(10, 1000.0, 10, 1000.0 + 3600.0, READ_SELF_ECHO_SECS));
+    }
+
+    #[test]
+    fn local_write_quiet_window_needs_a_marker() {
+        let now: f64 = 1_000_000.0;
+        // No marker (peer-adopted mtime, or fresh process) → always check.
+        assert!(!in_local_write_quiet_window(None, now));
+        assert!(in_local_write_quiet_window(Some(now - 3.0), now));
+        assert!(!in_local_write_quiet_window(Some(now - 40.0), now));
+        // A marker in the future (clock step) is never a permanent skip.
+        assert!(!in_local_write_quiet_window(Some(now + 3600.0), now));
+    }
+
+    #[test]
+    fn mount_line_parse_is_exact_and_space_safe() {
+        let table = "\
+localhost:/Jobs on /Users/me/ufb/mounts/Jobs (nfs, nodev, nosuid, mounted by me)
+localhost:/Jobs Live on /Users/me/ufb/mounts/Jobs Live (nfs, nodev, nosuid, mounted by me)
+//me@nas/Archive on /Volumes/Archive (smbfs, nodev, nosuid, mounted by me)
+devfs on /dev (devfs, local, nobrowse)
+";
+        assert_eq!(
+            parse_mount_line("localhost:/Jobs Live on /Users/me/ufb/mounts/Jobs Live (nfs, nodev)"),
+            Some(("localhost:/Jobs Live", "/Users/me/ufb/mounts/Jobs Live"))
+        );
+        assert_eq!(parse_mount_line("garbage"), None);
+        assert!(mount_table_has(table, Path::new("/Users/me/ufb/mounts/Jobs")));
+        assert!(mount_table_has(table, Path::new("/Users/me/ufb/mounts/Jobs Live")));
+        // Substring of a longer mount point is NOT a match.
+        assert!(!mount_table_has(table, Path::new("/Users/me/ufb/mounts/Job")));
+        assert!(!mount_table_has(table, Path::new("/Users/me/ufb/mounts")));
+        assert!(!mount_table_has(table, Path::new("/Users/me/ufb/mounts/Jobs Liv")));
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ufb-nfs-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sidecars(nas: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(nas)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_string_lossy().contains(".conflict-"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The C-4a review scenario: we write notes.txt at T (row stamped
+    /// with the LOCAL clock), a peer saves at T+20s, our safe-save
+    /// RENAMEs over it at T+40s. Gating on the row's mtime (T, 40s ago,
+    /// inside a 60s window) skipped the live stat and lost the peer's
+    /// version; gating on the local-write marker (T, outside the 15s
+    /// quiet window) runs it and preserves a sidecar.
+    #[tokio::test]
+    async fn peer_edit_after_our_write_still_gets_a_sidecar() {
+        let dir = scratch_dir("peeredit");
+        let nas = dir.join("nas");
+        std::fs::create_dir_all(&nas).unwrap();
+        let file = nas.join("notes.txt");
+        std::fs::write(&file, b"ours").unwrap();
+        let cache = Arc::new(
+            MacosCache::open("t", nas.clone(), 0, &dir.join("cache")).unwrap(),
+        );
+        let (tx, mut rx) = mpsc::channel(4);
+        let health = NasHealth::new("t".into(), nas.clone());
+        let fs = PassthroughFs::new("t".into(), nas.clone(), cache, tx, health).unwrap();
+
+        let now = unix_now_f64();
+        let t = now - 40.0;
+        fs.cache.record_enumeration(
+            "",
+            &[crate::messages::DirEntry {
+                name: "notes.txt".into(),
+                is_dir: false,
+                size: 4,
+                modified: t,
+                created: t,
+            }],
+            false,
+            1.0,
+        );
+        let fh = fs.cache.fh_for_path("notes.txt").unwrap();
+        // Our write at T.
+        fs.local_writes.lock().unwrap().insert(fh, t);
+        // Peer's save (same byte count, mtime ≈ now, i.e. T+40 > 2s slop).
+        std::fs::write(&file, b"peer").unwrap();
+        let cached = fs.cache.cached_attr("notes.txt").unwrap();
+
+        fs.preserve_conflict_sidecar_if_drifted("notes.txt", &file, fh, &cached)
+            .await
+            .unwrap();
+        let sc = sidecars(&nas);
+        assert_eq!(sc.len(), 1, "peer version preserved as sidecar");
+        assert_eq!(std::fs::read(&sc[0]).unwrap(), b"peer");
+        assert!(matches!(rx.try_recv(), Ok(AgentToUfb::ConflictDetected(_))));
+
+        // Inside OUR quiet window the (possibly attr-cache-stale) stat is
+        // ignored: no second sidecar even though size now differs.
+        fs.local_writes.lock().unwrap().insert(fh, now - 3.0);
+        std::fs::write(&file, b"peer-2").unwrap();
+        fs.preserve_conflict_sidecar_if_drifted("notes.txt", &file, fh, &cached)
+            .await
+            .unwrap();
+        assert_eq!(sidecars(&nas).len(), 1);
+        assert!(rx.try_recv().is_err(), "no conflict event inside the quiet window");
+
+        // No marker at all (fresh process) → the live stat always runs.
+        // (Sidecar names have 1s granularity, so this second conflict
+        // reuses the same name — check the event + content, not count.)
+        fs.local_writes.lock().unwrap().remove(&fh);
+        fs.preserve_conflict_sidecar_if_drifted("notes.txt", &file, fh, &cached)
+            .await
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(AgentToUfb::ConflictDetected(_))));
+        let sc = sidecars(&nas);
+        assert_eq!(sc.len(), 1);
+        assert_eq!(std::fs::read(&sc[0]).unwrap(), b"peer-2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthesized_root_is_a_directory_with_the_given_fh() {
+        let a = synthesized_root_attr(7);
+        assert!(matches!(a.ftype, ftype3::NF3DIR));
+        assert_eq!(a.fileid, 7);
+        assert_eq!(a.size, 4096);
+    }
+
+    #[test]
+    fn read_blob_range_reports_short_and_eof() {
+        let dir = std::env::temp_dir().join(format!("ufb-nfs-blob-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("blob");
+        std::fs::write(&p, b"0123456789").unwrap();
+        let (buf, eof) = read_blob_range(&p, 2, 4, 10).unwrap();
+        assert_eq!((buf.as_slice(), eof), (&b"2345"[..], false));
+        let (buf, eof) = read_blob_range(&p, 8, 4, 10).unwrap();
+        assert_eq!((buf.as_slice(), eof), (&b"89"[..], true));
+        assert!(matches!(
+            read_blob_range(&dir.join("missing"), 0, 1, 1),
+            Err(nfsstat3::NFS3ERR_NOENT)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Start one NFS server bound to `127.0.0.1:<port>`, serving `nas_root` as
 /// the export root and using `cache` as the metadata authority. Spawns a
 /// background tokio task; returns immediately. If bind or handshake fails,
@@ -1824,8 +2376,18 @@ pub fn start(
     cache: Arc<MacosCache>,
     ipc_tx: mpsc::Sender<AgentToUfb>,
     health: Arc<NasHealth>,
-) -> crate::sync::SyncServerHandle {
+) -> (
+    crate::sync::SyncServerHandle,
+    tokio::sync::oneshot::Receiver<Result<(), String>>,
+) {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // Readiness: resolved Ok once the listener is bound AND the loopback
+    // auto-mount succeeded, Err with the reason on any failure before
+    // that. The orchestrator awaits this (15s cap, mirrors the WinFsp
+    // arm) before declaring the mount Active — previously bind / mount
+    // failures were log-only and the UI showed a green mount over an
+    // empty directory (audit L-4, 2026-09-11).
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     // Child shutdown for the evictor — separate oneshot so we can signal
     // it from inside the server task's cleanup path.
     let (evict_shutdown_tx, mut evict_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1885,6 +2447,7 @@ pub fn start(
                     e
                 );
                 let _ = evict_shutdown_tx.send(());
+                let _ = ready_tx.send(Err(format!("passthrough fs: {}", e)));
                 return;
             }
         };
@@ -1895,6 +2458,7 @@ pub fn start(
             Err(e) => {
                 log::error!("[nfs-server] {} failed to bind {}: {}", domain, bind, e);
                 let _ = evict_shutdown_tx.send(());
+                let _ = ready_tx.send(Err(format!("bind {}: {}", bind, e)));
                 return;
             }
         };
@@ -1916,21 +2480,27 @@ pub fn start(
         tokio::task::spawn_blocking(move || {
             let mount_point = mount_point_for(&domain_for_mount);
             match mount_nfs_share(&domain_for_mount, port, &mount_point) {
-                Ok(()) => log::info!(
-                    "[nfs-server] {} auto-mounted at {}",
-                    domain_for_mount,
-                    mount_point.display()
-                ),
-                Err(e) => log::warn!(
-                    "[nfs-server] {} auto-mount failed ({}) — mount manually with: \
-                     mount -t nfs -o \"port={p},mountport={p},nolocks,vers=3,tcp,nobrowse,actimeo=1,rsize=1048576,wsize=1048576\" \
-                     localhost:/{} {}",
-                    domain_for_mount,
-                    e,
-                    domain_for_mount,
-                    mount_point.display(),
-                    p = port,
-                ),
+                Ok(()) => {
+                    log::info!(
+                        "[nfs-server] {} auto-mounted at {}",
+                        domain_for_mount,
+                        mount_point.display()
+                    );
+                    let _ = ready_tx.send(Ok(()));
+                }
+                Err(e) => {
+                    log::error!(
+                        "[nfs-server] {} auto-mount failed ({}) — mount manually with: \
+                         mount -t nfs -o \"port={p},mountport={p},intr,deadtimeout=60,nolocks,vers=3,tcp,nobrowse,actimeo=1,rsize=1048576,wsize=1048576\" \
+                         localhost:/{} {}",
+                        domain_for_mount,
+                        e,
+                        domain_for_mount,
+                        mount_point.display(),
+                        p = port,
+                    );
+                    let _ = ready_tx.send(Err(format!("loopback mount: {}", e)));
+                }
             }
         });
 
@@ -1978,5 +2548,8 @@ pub fn start(
         log::info!("[nfs-server] {} stopped", domain);
     });
 
-    crate::sync::SyncServerHandle::new_macos(domain, shutdown_tx, task_handle)
+    (
+        crate::sync::SyncServerHandle::new_macos(domain, shutdown_tx, task_handle),
+        ready_rx,
+    )
 }
