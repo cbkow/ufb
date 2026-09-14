@@ -329,8 +329,15 @@ impl PassthroughFs {
              NAS size={} mtime={}) — refreshing + dropping block cache",
             self.domain, rel, cached.size, cached.mtime, live_size, live_mtime
         );
-        self.cache.update_metadata_by_rel(rel, live_size, live_mtime);
+        // Invalidate the block cache BEFORE adopting the new size/mtime.
+        // The reverse order (audit: "drift adopted before invalidation")
+        // leaves a window where nas_size is already the new value while
+        // is_hydrated is still 1 over the OLD blob, so a concurrent read
+        // serves stale bytes at the new offsets. Dropping the blob first
+        // means the worst a racing read sees is a short (old-size-bounded)
+        // fetch straight from SMB.
         self.cache.invalidate_cache_by_path(rel);
+        self.cache.update_metadata_by_rel(rel, live_size, live_mtime);
         self.cache.cached_attr_by_path(rel)
     }
 
@@ -1274,9 +1281,26 @@ impl FileSystemContext for PassthroughFs {
         if !replace_if_exists && dst_abs.exists() {
             return Err(err_name_collision());
         }
-        fs::rename(&src_abs, &dst_abs).map_err(|_| err_io())?;
         let src_rel = Self::rel_path(file_name);
         let dst_rel = Self::rel_path(new_file_name);
+
+        // Rename over an existing file is the safe-save pattern (write
+        // tmp, rename over the original). If a peer edited the
+        // destination since we cached it, preserve their version as a
+        // `.conflict-*` sidecar before the rename clobbers it — the
+        // overwrite() path does this but rename() never did (macOS audit
+        // C-4a). Skip a case-only rename (source and destination are the
+        // same row). Bail loudly: if the sidecar copy fails on a drifted
+        // target, `?` refuses the rename rather than lose the peer's data.
+        if replace_if_exists
+            && !dst_rel.is_empty()
+            && !src_rel.eq_ignore_ascii_case(&dst_rel)
+            && dst_abs.exists()
+        {
+            self.preserve_conflict_sidecar_if_drifted(&dst_rel, &dst_abs)?;
+        }
+
+        fs::rename(&src_abs, &dst_abs).map_err(|_| err_io())?;
         if !src_rel.is_empty() && !dst_rel.is_empty() {
             self.cache.rename_entry_by_rel(&src_rel, &dst_rel);
         }

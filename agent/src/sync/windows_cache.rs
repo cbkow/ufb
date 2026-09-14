@@ -878,17 +878,27 @@ impl CacheIndex {
                 let rowid = self.rowid_for_path(&orphan_path);
                 doomed.push((orphan_path, rowid));
             }
-            if let Ok(mut del) = db.prepare_cached("DELETE FROM known_files WHERE path = ?1") {
-                for (orphan_path, rowid) in &doomed {
-                    if del.execute(params![orphan_path]).is_ok() {
-                        // Remove the blob too — a bare row DELETE leaked
-                        // it until the next startup scan_and_index.
-                        if let Some(rowid) = rowid {
-                            let _ = std::fs::remove_file(self.cache_file_path(*rowid));
+            let _ = db
+                .prepare_cached("DELETE FROM known_files WHERE path = ?1")
+                .map(|mut del| {
+                    for (orphan_path, rowid) in &doomed {
+                        if del.execute(params![orphan_path]).is_ok() {
+                            // Remove the blob too — a bare row DELETE leaked
+                            // it until the next startup scan_and_index. Take
+                            // the per-key write lock first (non-blocking):
+                            // don't yank a blob a reader is mid-walk on. If
+                            // it's held, leave the blob for scan_and_index
+                            // to reconcile — mirrors the evictor's discipline.
+                            if let Some(rowid) = rowid {
+                                let lock = self.key_lock(*rowid);
+                                let guard = lock.try_write();
+                                if guard.is_ok() {
+                                    let _ = std::fs::remove_file(self.cache_file_path(*rowid));
+                                }
+                            }
                         }
                     }
-                }
-            }
+                });
         }
 
         // Mark folder as visited. Store the SMB folder mtime (not
@@ -996,49 +1006,69 @@ impl CacheIndex {
 
     /// Rename a known file's path in the cache (after NAS rename).
     pub fn rename_entry_by_rel(&self, old_rel: &str, new_rel: &str) {
+        use crate::sync::cache_core::like_prefix;
         let new_parent = parent_of(new_rel).to_string();
         let new_name = new_rel.rsplit('/').next().unwrap_or(new_rel).to_string();
 
-        // Rename-over-existing (the editor atomic-save pattern: write
-        // `~tmp`, rename over the final name). `path` is the PRIMARY
-        // KEY, so if a row already exists at the destination the UPDATE
-        // below would collide and silently fail — leaving the OLD
-        // destination row alive with is_hydrated=1 over its pre-save
-        // cache blob. Every read of the saved file then returns the
-        // pre-save bytes. Clear the destination rows (and their blobs)
-        // first; do the same for descendants on a directory rename.
+        // Port of the macOS `rename_path` fix (audit 2026-09-11 C-2/C-3).
+        // Key everything off the source ROWID, not its path: under the
+        // NOCASE path collation a case-only rename ("Foo"→"foo") makes
+        // `path = new_rel` also match the SOURCE row, so a path-keyed
+        // clobber-delete would remove the very row we're renaming and
+        // lose the file + its blob. rowid disambiguates. -1 never matches
+        // a real row, so if the source was never indexed (disk rename
+        // already happened — not an error) the exclusions below no-op.
+        let src_rowid: i64 = self.rowid_for_path(old_rel).unwrap_or(-1);
+        let from_subtree = like_prefix(&format!("{}/", old_rel));
+        let to_subtree = like_prefix(&format!("{}/", new_rel));
+
+        // Clear anything already at the target (rename-over-existing, the
+        // editor atomic-save pattern) — but NEVER the source or its
+        // subtree, and escape the LIKE: unescaped, `_`/`%` in a path
+        // (underscores are everywhere in these job trees) match wrong
+        // rows. Collect rowids first so their cache blobs go too.
         let clobbered: Vec<i64> = {
             let db = self.db();
             db.prepare_cached(
-                "SELECT rowid FROM known_files WHERE path = ?1 OR path LIKE ?1 || '/%'",
+                "SELECT rowid FROM known_files
+                 WHERE (path = ?1 OR path LIKE ?2 ESCAPE '\\')
+                   AND rowid != ?3
+                   AND NOT (path LIKE ?4 ESCAPE '\\')",
             )
             .ok()
             .and_then(|mut s| {
-                s.query_map(params![new_rel], |r| r.get::<_, i64>(0))
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                s.query_map(
+                    params![new_rel, to_subtree, src_rowid, from_subtree],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
             })
             .unwrap_or_default()
         };
         if !clobbered.is_empty() {
             let db = self.db();
             let _ = db
-                .prepare_cached(
-                    "DELETE FROM known_files WHERE path = ?1 OR path LIKE ?1 || '/%'",
-                )
-                .map(|mut stmt| stmt.execute(params![new_rel]));
+                .prepare_cached("DELETE FROM known_files WHERE rowid = ?1")
+                .map(|mut del| {
+                    for rowid in &clobbered {
+                        let _ = del.execute(params![rowid]);
+                    }
+                });
         }
-        for rowid in clobbered {
-            let _ = std::fs::remove_file(self.cache_file_path(rowid));
+        for rowid in &clobbered {
+            let _ = std::fs::remove_file(self.cache_file_path(*rowid));
         }
 
+        // Move the source row by rowid (a path-keyed UPDATE would miss on
+        // a case-only rename).
         {
             let db = self.db();
             let _ = db
                 .prepare_cached(
-                    "UPDATE known_files SET path = ?1, name = ?2, parent_path = ?3 WHERE path = ?4",
+                    "UPDATE known_files SET path = ?1, name = ?2, parent_path = ?3 WHERE rowid = ?4",
                 )
-                .map(|mut stmt| stmt.execute(params![new_rel, new_name, new_parent, old_rel]));
+                .map(|mut stmt| stmt.execute(params![new_rel, new_name, new_parent, src_rowid]));
         }
 
         // Directory rename: cascade the prefix rewrite to descendants,
@@ -1048,10 +1078,10 @@ impl CacheIndex {
         let new_prefix = format!("{}/", new_rel);
         let descendants: Vec<(i64, String)> = {
             let db = self.db();
-            db.prepare_cached("SELECT rowid, path FROM known_files WHERE path LIKE ?1 || '%'")
+            db.prepare_cached("SELECT rowid, path FROM known_files WHERE path LIKE ?1 ESCAPE '\\'")
                 .ok()
                 .and_then(|mut s| {
-                    s.query_map(params![old_prefix], |r| {
+                    s.query_map(params![from_subtree], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
                     })
                     .ok()
@@ -1060,6 +1090,11 @@ impl CacheIndex {
                 .unwrap_or_default()
         };
         for (rowid, old_path) in descendants {
+            // Prefix is byte-identical in length (NOCASE differs only in
+            // ASCII case), so the slice is safe; guard anyway.
+            if old_path.len() < old_prefix.len() {
+                continue;
+            }
             let new_path = format!("{}{}", new_prefix, &old_path[old_prefix.len()..]);
             let new_parent = parent_of(&new_path).to_string();
             let db = self.db();
@@ -1242,11 +1277,9 @@ impl CacheIndex {
                 let bytes = if hydrated != 0 {
                     hydrated_size as u64
                 } else {
-                    let fetched = bitmap
-                        .map(|b| b.iter().map(|byte| byte.count_ones() as u64).sum::<u64>())
+                    bitmap
+                        .map(|b| cache_core::bitmap_cached_bytes(&b, nas_size as u64))
                         .unwrap_or(0)
-                        .saturating_mul(cache_core::CHUNK_SIZE);
-                    fetched.min(nas_size as u64)
                 };
                 Ok((row.get::<_, i64>(0)?, bytes))
             })

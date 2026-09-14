@@ -47,6 +47,52 @@ pub const CHUNK_SIZE: u64 = 1024 * 1024;
 pub type SqlitePool = Pool<SqliteConnectionManager>;
 pub type SqliteConn = PooledConnection<SqliteConnectionManager>;
 
+// ── LIKE-pattern escaping ──
+//
+// Shared home for the helpers the macOS audit added to `macos_cache.rs`
+// (`like_escape`/`like_prefix`/`bitmap_cached_bytes`). Windows needs the
+// same fixes; putting them here is the single implementation both cache
+// twins should use. (Follow-up for the macOS side at merge: drop the
+// local copies in `macos_cache.rs` and call these instead.)
+
+/// Escape a literal string for use as a SQLite `LIKE` pattern with
+/// `ESCAPE '\'`. `%` and `_` are LIKE wildcards; unescaped, a folder
+/// named `shot_010` also matched its sibling `shot-010` (and, with the
+/// underscores all over these job trees, almost every prefix match hit
+/// wrong rows), so a rename or prune of one re-pathed / deleted the
+/// other's rows. Every prefix match MUST go through `like_prefix` +
+/// `ESCAPE '\'`.
+///
+/// LIKE is ASCII-case-insensitive, matching the NOCASE collation on the
+/// path columns — intended, since paths are case-insensitive keys.
+pub fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `LIKE` pattern matching every string that starts with `prefix`
+/// (literally — wildcards in `prefix` are escaped). Pair with
+/// `LIKE ?n ESCAPE '\'` in the SQL.
+pub fn like_prefix(prefix: &str) -> String {
+    let mut out = like_escape(prefix);
+    out.push('%');
+    out
+}
+
+/// Bytes a chunk bitmap accounts for: set-bit count × chunk size, clamped
+/// to the file size (the last chunk is usually short). Lets the evictor
+/// count partially-hydrated blobs against the budget.
+pub fn bitmap_cached_bytes(bitmap: &[u8], file_size: u64) -> u64 {
+    let set: u64 = bitmap.iter().map(|b| b.count_ones() as u64).sum();
+    set.saturating_mul(CHUNK_SIZE).min(file_size)
+}
+
 // ── Chunk-bitmap bit operations ──
 //
 // Bits are packed LSB-first within each byte: chunk `i` lives in byte
