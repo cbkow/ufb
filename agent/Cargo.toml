@@ -59,6 +59,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Ioctl",
     "Win32_System_IO",
+    "Win32_Storage_FileSystem",
 ] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 r2d2 = "0.8"

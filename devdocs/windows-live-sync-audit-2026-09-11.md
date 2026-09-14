@@ -245,22 +245,31 @@ the folder-mtime re-enum that already works.
   per fh) removes most of it. Raising WinFsp's read/write transfer size in
   `VolumeParams` would also help the app-block-size sensitivity.
 
-- **Classic Windows delete fails ("Incorrect function") — found 2026-09-11.**
-  Surfaced once fix 1 let files reach a normal (non-wedged) state.
-  POSIX-unlink deletes (`rm`, WSL-style) work; classic deletes
-  (`Remove-Item`, `del`, and by extension Explorer permanent-delete)
-  fail, and the cleanup callback fires with `pending_delete=false` and no
-  `FspCleanupDelete` flag — the disposition never reaches us. Cause:
-  `VolumeParams` sets `supports_posix_unlink_rename(true)`, so Windows
-  issues `FileDispositionInformationEx`, but the winfsp 0.12 crate wires
-  only the classic `SetDelete` callback (no newer `Delete` op), so the Ex
-  disposition returns `ERROR_INVALID_FUNCTION`. Not touched by fix 1
-  (delete goes through `set_delete`/`cleanup`, unmodified). Options:
-  drop `supports_posix_unlink_rename` (restores classic delete via
-  CanDelete+SetDelete+Cleanup, but loses delete-of-open-file semantics),
-  or move to a winfsp build exposing the `Delete` interface. Rename works
-  (Explorer's delete-to-Recycle-Bin is a rename), so this bites permanent
-  deletes and apps that unlink directly.
+- **Classic Windows delete fails ("Incorrect function") — FIXED 2026-09-11.**
+  Surfaced once fix 1 let files reach a normal (non-wedged) state. The
+  real cause was NOT the POSIX flag (a red herring — flipping it changed
+  nothing): the winfsp 0.12 crate's default `set_basic_info` returns
+  `STATUS_INVALID_DEVICE_REQUEST`, and `del` / `Remove-Item -Force`
+  clear the file's attributes via `set_basic_info` BEFORE deleting, so
+  every classic delete aborted there (cleanup then fired with
+  `pending_delete=false`). Fix: implement `set_basic_info` — apply
+  attributes via `SetFileAttributesW` (path-based, works for files and
+  dirs) and timestamps via `SetFileTime` on the reused handle,
+  best-effort, always returning Ok. Verified: `Remove-Item -Force`,
+  read-only-file delete, `.NET File.Delete`, and rename all work.
+  Residual below.
+
+- **cmd.exe `dir`/`del` exact-name + `Remove-Item -Recurse` — OPEN.**
+  A separate, pre-existing enumeration quirk: `FindFirstFileW` with an
+  exact name (what cmd `dir`/`del` and recursive `Remove-Item` issue)
+  finds nothing, while `Get-ChildItem`, `Test-Path`, `Remove-Item -Force`
+  and `.NET File.Delete` all work. Diagnostic logging proved our
+  `read_directory` returns the matching entry (matched=1), and it made no
+  difference whether WinFsp did the pattern match
+  (`pass_query_directory_pattern(false)`) or we did — the entry never
+  reached the FindFirst client. Points at a cmd-specific / 8.3-short-name
+  behavior of the passthrough (we advertise no short names), not the
+  delete path. Left as-is; needs a WinFsp-level investigation.
 
 - **Single-strike offline.** One failed 30 s heartbeat flips the whole
   mount offline and fast-fails all SMB ops for up to 30 s. A busy NAS

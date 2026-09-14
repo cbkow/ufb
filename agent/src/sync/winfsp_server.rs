@@ -90,6 +90,54 @@ fn set_file_sparse(file: &fs::File) {
     }
 }
 
+/// Apply a WinFsp `set_basic_info` request to the backing NAS file:
+/// attributes via `SetFileAttributesW` (path-based, works for files and
+/// dirs and needs no writable handle) and timestamps via `SetFileTime`
+/// on `handle` when one is available. WinFsp sentinels: `file_attributes
+/// == u32::MAX` and any `time == 0` mean "leave unchanged". Best-effort —
+/// a failed attribute/time set must NOT fail the callback, or `del` /
+/// `Remove-Item -Force` (which clear attributes before deleting) break.
+fn apply_basic_info(
+    abs: &Path,
+    handle: Option<&fs::File>,
+    file_attributes: u32,
+    creation_time: u64,
+    last_access_time: u64,
+    last_write_time: u64,
+) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, SetFileTime};
+
+    if file_attributes != u32::MAX {
+        // 0 has no valid "set" meaning; normalize to FILE_ATTRIBUTE_NORMAL.
+        let attrs = if file_attributes == 0 { 0x80 } else { file_attributes };
+        let wide: Vec<u16> = abs.as_os_str().encode_wide().chain([0]).collect();
+        unsafe {
+            let _ = SetFileAttributesW(wide.as_ptr(), attrs);
+        }
+    }
+
+    let ft = |t: u64| FILETIME {
+        dwLowDateTime: (t & 0xFFFF_FFFF) as u32,
+        dwHighDateTime: (t >> 32) as u32,
+    };
+    let (c, a, w) = (ft(creation_time), ft(last_access_time), ft(last_write_time));
+    let cp = if creation_time != 0 { &c as *const FILETIME } else { std::ptr::null() };
+    let ap = if last_access_time != 0 { &a as *const FILETIME } else { std::ptr::null() };
+    let wp = if last_write_time != 0 { &w as *const FILETIME } else { std::ptr::null() };
+    if let Some(h) = handle {
+        if !cp.is_null() || !ap.is_null() || !wp.is_null() {
+            use std::os::windows::io::AsRawHandle;
+            unsafe {
+                // Needs FILE_WRITE_ATTRIBUTES on the handle; if the open
+                // was read-only this no-ops, which is fine (best-effort).
+                let _ = SetFileTime(h.as_raw_handle() as _, cp, ap, wp);
+            }
+        }
+    }
+}
+
 /// Open the backing NAS file once for the lifetime of a WinFsp open.
 /// `writable` opens read+write (reused by both read and write callbacks);
 /// on failure it falls back to read-only so a write-intent open of a
@@ -666,7 +714,7 @@ impl FileSystemContext for PassthroughFs {
     fn read_directory(
         &self,
         ctx: &Self::FileContext,
-        _pattern: Option<&U16CStr>,
+        pattern: Option<&U16CStr>,
         marker: DirMarker,
         buffer: &mut [u8],
     ) -> winfsp::Result<u32> {
@@ -674,6 +722,10 @@ impl FileSystemContext for PassthroughFs {
             OpenCtx::Dir { abs, dir_buffer, .. } => (abs, dir_buffer),
             OpenCtx::File { .. } => return Err(err_access_denied()),
         };
+
+        // pass_query_directory_pattern(false): WinFsp does the matching
+        // against the full buffer we fill, so the pattern is unused here.
+        let _ = pattern;
 
         if marker.is_none() {
             let rel = self.rel_from_abs(abs);
@@ -1103,6 +1155,47 @@ impl FileSystemContext for PassthroughFs {
                 self.cache.update_metadata_by_rel(&rel, meta.len(), mtime);
                 populate_file_info(&meta, file_info, &rel);
             }
+        }
+        Ok(())
+    }
+
+    fn set_basic_info(
+        &self,
+        ctx: &Self::FileContext,
+        file_attributes: u32,
+        creation_time: u64,
+        last_access_time: u64,
+        last_write_time: u64,
+        _last_change_time: u64,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        // The crate's default returns STATUS_INVALID_DEVICE_REQUEST,
+        // which apps see as "Incorrect function" — and `del` /
+        // `Remove-Item -Force` clear the file's attributes here BEFORE
+        // deleting, so without this every classic delete fails. Apply
+        // the change to the NAS best-effort and always return Ok.
+        if !self.health.is_online() {
+            return Err(err_offline());
+        }
+        let abs = ctx.abs().clone();
+        let handle = match &**ctx {
+            OpenCtx::File { handle, .. } => Some(handle),
+            OpenCtx::Dir { .. } => None,
+        };
+        apply_basic_info(
+            &abs,
+            handle,
+            file_attributes,
+            creation_time,
+            last_access_time,
+            last_write_time,
+        );
+        // Repopulate FileInfo from the (possibly changed) file.
+        let rel = self.rel_from_abs(&abs);
+        if let Ok(meta) = fs::metadata(&abs) {
+            populate_file_info(&meta, file_info, &rel);
+        } else if let Some(attr) = self.cache.cached_attr_by_path(&rel) {
+            populate_file_info_from_cached(&attr, file_info, &rel);
         }
         Ok(())
     }
@@ -1717,6 +1810,16 @@ pub fn start(
             // Without this WinFsp handles pattern matching itself on every
             // enum, which drops entries when the client iterates with a
             // filter and exploded recursion in the spike.
+            //
+            // KNOWN RESIDUAL (2026-09): cmd.exe `dir`/`del` with an
+            // exact name and `Remove-Item -Recurse` fail to find entries
+            // via FindFirstFile, while all PowerShell/.NET/Explorer paths
+            // work. Neither pass=true nor pass=false, nor honoring the
+            // pattern ourselves, changed it — the matcher returned the
+            // right entries but they never reached the FindFirst client.
+            // Looks like a cmd-specific / 8.3-short-name enumeration quirk
+            // of the passthrough, not the delete path. Tracked in the
+            // Windows live-sync audit doc.
             .pass_query_directory_pattern(true)
             // Permissive SDDL is served via `get_security_by_name`; tell
             // Windows those SDs actually mean something so ACL checks take
