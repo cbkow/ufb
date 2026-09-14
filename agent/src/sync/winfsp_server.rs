@@ -245,6 +245,57 @@ impl PassthroughFs {
         }
     }
 
+    /// Reconcile a cached file row against a fresh SMB `stat`, so a peer's
+    /// edit becomes visible without waiting for a directory re-enumeration.
+    /// If the live size/mtime drift from the cached row, update the cached
+    /// metadata and drop the block cache (next read re-hydrates); otherwise
+    /// just stamp `last_verified_at` to arm the TTL gate. No-op for unknown
+    /// rows and the root. `meta` must come from a live stat the caller
+    /// already performed. Returns the refreshed attr when it changed.
+    fn reconcile_drift(
+        &self,
+        rel: &str,
+        meta: &fs::Metadata,
+    ) -> Option<crate::sync::cache_core::CachedAttr> {
+        if rel.is_empty() || meta.is_dir() {
+            return None;
+        }
+        let cached = self.cache.cached_attr_by_path(rel)?;
+        let live_size = meta.len();
+        let live_mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 1 s slop: SMB mtime granularity, and our own write path stamps
+        // the cached mtime from the local clock.
+        let drifted =
+            live_size != cached.size || (live_mtime as f64 - cached.mtime).abs() > 1.0;
+        if !drifted {
+            self.cache.record_verification_by_rel(rel);
+            return None;
+        }
+        log::info!(
+            "[winfsp] {}: freshness drift {} (cached size={} mtime={:.0}, \
+             NAS size={} mtime={}) — refreshing + dropping block cache",
+            self.domain, rel, cached.size, cached.mtime, live_size, live_mtime
+        );
+        self.cache.update_metadata_by_rel(rel, live_size, live_mtime);
+        self.cache.invalidate_cache_by_path(rel);
+        self.cache.cached_attr_by_path(rel)
+    }
+
+    /// True if `rel` has never been verified or its last verification is
+    /// older than `FRESHNESS_TTL_SECS` — the gate for the `get_file_info`
+    /// re-stat.
+    fn freshness_stale(&self, rel: &str) -> bool {
+        match self.cache.last_verified_by_rel(rel) {
+            Some(lv) => crate::sync::cache_core::unix_now_secs() - lv >= FRESHNESS_TTL_SECS,
+            None => true,
+        }
+    }
+
     /// Convert the file name to a cache-normalized relative path
     /// (forward-slash separators, no leading slash — root is the empty
     /// string). Must be kept in sync with `CacheIndex::cached_attr_by_path`
@@ -283,6 +334,12 @@ impl PassthroughFs {
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 const FILETIME_EPOCH_OFFSET: u64 = 116_444_736_000_000_000;
+
+/// TTL for the per-file freshness re-stat in `get_file_info`. A file's
+/// row is re-checked against SMB at most once per this window, so a
+/// peer's edit surfaces within ~5 s on a held-open handle without a stat
+/// storm. `open` reconciles unconditionally (it already stats).
+const FRESHNESS_TTL_SECS: i64 = 5;
 
 /// Stable 64-bit ID for a relative path. `FSP_FSCTL_FILE_INFO.IndexNumber`
 /// must be unique and non-zero for .NET's recursive enumerator to avoid
@@ -461,6 +518,12 @@ impl FileSystemContext for PassthroughFs {
         let rel = Self::rel_path(file_name);
         let meta = fs::metadata(&abs).map_err(|_| err_not_found())?;
         populate_file_info(&meta, file_info.as_mut(), &rel);
+        // Freshness: open already paid the SMB stat, so reconcile the
+        // cached row against it. If a peer edited the file, this refreshes
+        // the cached size/mtime and drops the block cache here, so reads
+        // on this handle see the new length and re-hydrate instead of
+        // being bounded by a stale cached size.
+        self.reconcile_drift(&rel, &meta);
         let ctx = if meta.is_dir() {
             OpenCtx::Dir {
                 abs,
@@ -492,6 +555,18 @@ impl FileSystemContext for PassthroughFs {
     ) -> winfsp::Result<()> {
         let rel = self.rel_from_abs(ctx.abs());
         if let Some(attr) = self.cache.cached_attr_by_path(&rel) {
+            // TTL-gated freshness: a handle held open across a peer's edit
+            // (e.g. media scrubbing) would otherwise serve the cached
+            // size forever. Re-stat at most once per FRESHNESS_TTL_SECS
+            // and reconcile drift.
+            let attr = if self.health.is_online() && self.freshness_stale(&rel) {
+                match fs::metadata(ctx.abs()) {
+                    Ok(meta) => self.reconcile_drift(&rel, &meta).unwrap_or(attr),
+                    Err(_) => attr,
+                }
+            } else {
+                attr
+            };
             populate_file_info_from_cached(&attr, file_info, &rel);
             return Ok(());
         }

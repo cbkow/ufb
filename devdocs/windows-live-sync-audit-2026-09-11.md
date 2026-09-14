@@ -200,7 +200,21 @@ match `rel_path` (canonicalize to no-slash, root = `""`). One-time
 migration: strip the leading `/` from `known_files.path`/`parent_path` and
 `visited_folders.nas_path`, dedupe collisions keeping the hydrated row.
 
-### 4. File metadata has no freshness path of its own
+### 4. File metadata has no freshness path of its own — FIXED 2026-09-11
+
+**Status: fixed and verified live.** The existing `stat_and_refresh`
+primitive keys by full path and never matched the WinFsp rel keys, so a
+rel-keyed reconcile was wired in instead. `open` already pays an SMB
+stat, so it now calls `reconcile_drift`: on a size/mtime change from the
+cached row it refreshes the cached metadata and drops the block cache, so
+reads on that handle see the new length and re-hydrate. `get_file_info`
+does the same behind a `last_verified_at` TTL gate (`FRESHNESS_TTL_SECS`,
+5 s) so a held-open handle picks up peer edits without a stat storm.
+Verified with no directory listing: a peer overwrite (same size, new
+mtime) is read back correctly through `U:`, and a peer append is seen at
+the new length. Ships in agent ≥1.2.1. Original analysis below.
+
+
 
 A peer appended 1 MB to a file via UNC. Through `U:`, `open` returned the
 new size but reads stayed bounded by the **cached** size (old length), and

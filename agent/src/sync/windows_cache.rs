@@ -1127,6 +1127,25 @@ impl CacheIndex {
             .map(|mut stmt| stmt.execute(params![size as i64, mtime, now, rel]));
     }
 
+    /// `last_verified_at` (unix secs) for a rel key, or None if unknown.
+    /// Drives the TTL gate on the freshness re-stat.
+    pub fn last_verified_by_rel(&self, rel: &str) -> Option<i64> {
+        let db = self.db();
+        db.prepare_cached("SELECT last_verified_at FROM known_files WHERE path = ?1")
+            .ok()
+            .and_then(|mut stmt| stmt.query_row(params![rel], |row| row.get(0)).ok())
+    }
+
+    /// Stamp last_verified_at = now for a rel key — a fresh SMB stat
+    /// confirmed the cached metadata still matches (no drift).
+    pub fn record_verification_by_rel(&self, rel: &str) {
+        let now = Self::unix_now();
+        let db = self.db();
+        let _ = db
+            .prepare_cached("UPDATE known_files SET last_verified_at = ?1 WHERE path = ?2")
+            .map(|mut stmt| stmt.execute(params![now, rel]));
+    }
+
     /// Invalidate cache for a file (write-through path).
     pub fn invalidate_cache_by_path(&self, rel: &str) {
         // Resolve the rowid FIRST so the per-key lock covers both the
