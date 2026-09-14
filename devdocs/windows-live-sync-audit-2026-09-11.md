@@ -319,3 +319,46 @@ Test scripts live in the session scratchpad (`wbench*.ps1`, `rbench.ps1`)
 and drive `U:\z_CBtemp\_ufb_audit_tmp` (Chris-approved scratch folder).
 Cache DB queried directly with `sqlite3 D:\z_UFB\Jobs_Live.db`. Sparse
 check: `fsutil sparse queryflag D:\z_UFB\by_key\Jobs_Live\<rowid-hex>`.
+
+## Cross-platform reconciliation with the macOS audit (2026-09-14)
+
+The macOS live-sync audit landed on `main` first (927d0e3). This Windows
+branch was rebased onto it. Key facts for the joint merge:
+
+- **File sets are disjoint.** The Windows fixes touch only Windows-only
+  files (`winfsp_server.rs`, `windows_cache.rs`, `ipc/server.rs`,
+  `Cargo.toml` windows block) plus `UfbMenu.qml` and the shared
+  `cache_core.rs` (additive helpers only). The macOS commit changed the
+  shared orchestrator/state/config/mount_service/mount_client and the
+  macOS twins. No file is edited by both — the rebase was conflict-free.
+- **The macOS commit's Windows `cfg` arms compile.** It added Windows
+  arms it could not build on a Mac (deferred WinFsp start failure,
+  Handoff/release_drive, GetDiskFreeSpaceExW cache clamp, `load_config`
+  returning Result, persist_drive_letter, GUI mount-service heal). Agent
+  and full app both build clean on Windows after the rebase.
+- **Cache-twin bugs ported** (macOS is the reference; see the commit
+  "port macOS cache-audit twin fixes"): LIKE escaping (C-2), case-only
+  rename source-row deletion (C-3/C-4b), rename conflict sidecar (C-4a),
+  drift-adopted-before-invalidation, evictor partial-blob accounting via
+  the shared `bitmap_cached_bytes`, and the orphan-prune per-key lock.
+  Verified live: renaming `shot_010`→`shot_020` leaves `shot-010_*`
+  siblings untouched (the LIKE trap), cascade re-paths descendants, 0
+  slash rows.
+- **Shared helpers** `like_escape` / `like_prefix` / `bitmap_cached_bytes`
+  now live in `cache_core.rs`. macOS still has identical local copies in
+  `macos_cache.rs`; **at merge, dedup those to the shared ones.**
+
+### Deferred to the joint review
+- **`db()` pool-exhaustion panic** (`windows_cache.rs`): still
+  `expect("SQLite pool exhausted")`. macOS made its `conn()` return a
+  Result. The Windows equivalent is a ~50-callsite refactor; low
+  frequency at POOL_SIZE=32. Do it in coordination.
+- **`stat_and_refresh`** in `windows_cache.rs` is dead (never called;
+  the freshness path uses `reconcile_drift`). Delete or wire it.
+- **cmd.exe exact-name enumeration** (`dir`/`del`, `Remove-Item -Recurse`)
+  — the open FindFirstFile/8.3-short-name residual noted above.
+
+### Still to verify on Windows (macOS reviewer's list)
+- 7-Zip Extract/Compress — smoke-tested working earlier this cycle.
+- Web links (.url create, double-click, glyph, clipboard) — pending.
+- Menu icons + footer chips at 150% scaling — pending.
