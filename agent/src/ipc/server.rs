@@ -87,6 +87,14 @@ pub struct IpcServer {
     pub command_rx: mpsc::Receiver<UfbToAgent>,
     /// Outgoing messages — the I/O thread drains this via try_recv.
     outgoing_tx: Arc<std::sync::Mutex<std::sync::mpsc::Sender<AgentToUfb>>>,
+    /// Whether a UFB client is currently attached. Between sessions the
+    /// `outgoing_tx` sender still points at a channel whose receiver was
+    /// dropped, so every `send` would fail "sending on a closed channel"
+    /// — which, at the 2 s state-emit cadence, spammed the log with
+    /// "Failed to forward to UFB" (187 of 224 lines in a quiet run) and
+    /// truncated real history. `send` no-ops while disconnected; the
+    /// client gets a full MountStateSnapshot on connect anyway.
+    connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl IpcServer {
@@ -98,7 +106,10 @@ impl IpcServer {
         let (out_tx, _out_rx) = std::sync::mpsc::channel::<AgentToUfb>();
         let shared_out_tx = Arc::new(std::sync::Mutex::new(out_tx));
 
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let shared_out_tx_clone = shared_out_tx.clone();
+        let connected_task = connected.clone();
         tokio::spawn(async move {
             loop {
                 // Create pipe instance
@@ -136,6 +147,7 @@ impl IpcServer {
                 };
 
                 log::info!("UFB client connected");
+                connected_task.store(true, std::sync::atomic::Ordering::Relaxed);
 
                 // Create a fresh outgoing channel for this client session.
                 let (new_tx, new_rx) = std::sync::mpsc::channel::<AgentToUfb>();
@@ -192,6 +204,7 @@ impl IpcServer {
 
                 // Wait for this client session to end
                 let _ = io_done.await;
+                connected_task.store(false, std::sync::atomic::Ordering::Relaxed);
                 unsafe { let _ = CloseHandle(send_handle.to_handle()); }
             }
         });
@@ -199,10 +212,17 @@ impl IpcServer {
         Self {
             command_rx: cmd_rx,
             outgoing_tx: shared_out_tx,
+            connected,
         }
     }
 
     pub async fn send(&self, msg: AgentToUfb) -> Result<(), String> {
+        // No client attached: drop silently. The next client to connect
+        // is sent a full snapshot, so nothing is lost, and this avoids
+        // the per-emit "closed channel" error spam between sessions.
+        if !self.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         let lock = self.outgoing_tx.lock().unwrap();
         lock.send(msg).map_err(|e| format!("Failed to queue response: {}", e))
     }

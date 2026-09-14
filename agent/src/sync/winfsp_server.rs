@@ -776,7 +776,9 @@ impl FileSystemContext for PassthroughFs {
             };
             let cached_mtime = self.cache.cached_folder_mtime(&rel);
             let needs = self.cache.folder_needs_reenum(&rel, nas_mtime_now);
-            log::info!(
+            // Per-folder listing trace — DEBUG, not INFO: it fires on
+            // every directory the user navigates and drowned the log.
+            log::debug!(
                 "[winfsp] {}: read_directory({}) cached_mtime={:?} live_mtime={} \
                  needs_reenum={}",
                 self.domain, rel, cached_mtime, nas_mtime_now, needs
