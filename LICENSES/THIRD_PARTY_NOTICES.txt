@@ -17,11 +17,13 @@ itself to be Free/Libre Open Source Software.
 Direct runtime dependencies (shipped as binary alongside UFB)
 ===============================================================================
 
-1. Qt 6 (Qt Framework, Qt Quick, Qt Quick Controls, Qt Qml, Qt Network)
+1. Qt 6.11.1 (Qt Core, Gui, Qml, Quick, Quick Controls, Network, Sql,
+   WebEngine, Multimedia and their dependencies)
    Copyright (C) The Qt Company Ltd. and other contributors
    License: LGPL-3.0
    File:    Qt-LGPL-3.0.txt
    https://www.qt.io
+   Source:  https://download.qt.io/official_releases/qt/6.11/6.11.1/single/
    Linkage: dynamic. Users have the right under LGPL-3 to relink UFB
             against a modified Qt build of their own. The Qt 6 DLLs
             (Qt6Core, Qt6Gui, Qt6Qml, Qt6Quick*, Qt6Network, etc.)
@@ -47,6 +49,16 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    License: GPL-2.0-or-later (build includes GPL components: libx264)
    File:    FFmpeg-LICENSE.txt
    https://ffmpeg.org
+   Source:  macOS builds FFmpeg 9.0.1 from
+            https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz with the
+            configure flags in scripts/build-external-ffmpeg-mac.sh.
+            Windows ships BtbN's "ffmpeg-n9.0-latest-win64-gpl-shared"
+            build of the FFmpeg release/9.0 branch
+            (https://github.com/BtbN/FFmpeg-Builds; the build recipe
+            and the FFmpeg git revision are published with each
+            BtbN release). No "nonfree" components are enabled on
+            either platform. Tarballs are attached to each UFB
+            GitHub release (scripts/fetch-third-party-sources.sh).
    Linkage: dynamic. Windows vendors BtbN's GPL shared prebuilt next
             to ufb.exe; macOS builds from source with libx264 linked
             in (scripts/build-external-ffmpeg-mac.sh). Used by the
@@ -58,22 +70,41 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    Copyright (C) 2003-2026 x264 project
    License: GPL-2.0-or-later
    https://code.videolan.org/videolan/x264
+   Source:  macOS builds the x264 "stable" branch (X264_BUILD 165 as
+            of the 2026-09 FFmpeg 9.0.1 build) from
+            https://code.videolan.org/videolan/x264/-/archive/stable/x264-stable.tar.bz2;
+            the exact tarball used is attached to each UFB GitHub
+            release. Windows: the copy inside BtbN's FFmpeg build.
 
-4b. 7-Zip (7zz on macOS; 7z.exe + 7z.dll on Windows)
+4b. 7-Zip 26.03 (7zz on macOS; 7z.exe + 7z.dll on Windows)
    Copyright (C) 1999-2026 Igor Pavlov
-   License: GNU LGPL 2.1 (or later), with the unRAR restriction for
-            the RAR decompression code and BSD-3-Clause for the
-            LZFSE portions
-   File:    SevenZip-LICENSE.txt
+   License: GNU LGPL 2.1 (or later), with the "unRAR license
+            restriction" for the RAR decompression code
+            (CPP/7zip/Compress/Rar*), and BSD-3-Clause for the LZFSE
+            decoder and the Zstandard decoder (C/ZstdDec.c)
+   Files:   SevenZip-LICENSE.txt   (7-Zip's own license notice, incl.
+                                    the unRAR restriction text)
+            LGPL-2.1.txt           (full text of the GNU LGPL 2.1)
    https://www.7-zip.org
-   Linkage: none — standalone command-line tool spawned as a
-            subprocess by the Archive service (core/src/archive.rs)
-            for "Extract Here" and "Compress to ZIP". Shipped
-            unmodified; macOS builds the universal binary from the
-            official source tarball (scripts/build-external-7zip-
-            mac.sh) solely to pin the deployment target. The unRAR
-            restriction means UFB extracts RAR archives but never
-            creates them.
+   Source:  https://www.7-zip.org/a/7z2603-src.tar.xz (the exact
+            release UFB ships). The Windows binaries are the
+            unmodified official build. The macOS binary is compiled
+            from that unmodified source by
+            scripts/build-external-7zip-mac.sh with no code changes —
+            only MACOSX_DEPLOYMENT_TARGET=14.0 and a universal
+            (arm64 + x86_64) lipo — so the upstream tarball is the
+            complete corresponding source.
+   Linkage: none. A standalone command-line program spawned as a
+            separate process by the Archive service
+            (core/src/archive.rs) for "Extract Here" and "Compress to
+            ZIP"; UFB neither links 7-Zip's code nor is derived from
+            it, so UFB's own GPL-3.0-or-later terms are unaffected and
+            the LGPL applies to the 7-Zip binary alone. Users may
+            replace the bundled binary with any compatible 7-Zip build
+            (UFB also falls back to a 7-Zip found on PATH).
+   unRAR:   the restriction forbids using the unRAR sources to create
+            a RAR-compatible archiver. UFB only ever extracts RAR
+            archives; it creates ZIP archives exclusively.
 
 5. PDFium
    Copyright 2014 The PDFium Authors
@@ -91,9 +122,18 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    Linkage: dynamic. OpenEXR / Imath / Iex / IlmThread DLLs ship next
             to ufb.exe. Used by the C++ EXR thumbnail backend.
 
-6a. libheif + libde265 (HEIF/HEIC decode)
+6a. libheif 1.21.2 + libde265 1.0.18 (HEIF/HEIC decode)
    libheif: Copyright (c) Dirk Farin and contributors
    libde265: Copyright (c) struktur AG, Dirk Farin
+   Source:  https://github.com/strukturag/libheif/archive/refs/tags/v1.21.2.tar.gz
+            https://github.com/strukturag/libde265/archive/refs/tags/v1.0.18.tar.gz
+            (built by vcpkg per vcpkg.json; attached to each UFB
+            GitHub release). Both are LGPL-3.0 and are STATICALLY
+            linked into the macOS binary (vcpkg overlay triplet), and
+            shipped as DLLs on Windows. Static linking satisfies
+            LGPL-3 §4(d)(0) because UFB's complete source is public
+            under GPL-3.0-or-later, so any user can relink against a
+            modified libheif / libde265.
    License: LGPL-3.0-only (both)
    File:    Libheif-LICENSE.txt
    https://github.com/strukturag/libheif
@@ -139,6 +179,34 @@ Direct runtime dependencies (shipped as binary alongside UFB)
             minNotes .mnpkg packages for the lightbox preview
             (app/MndbDoc.cpp).
 
+11. ExifTool 13.58 (macOS) / 13.59 (Windows)
+   Copyright 2003-2026, Phil Harvey
+   License: Perl Artistic License 1.0 (or, at the user's option, GPL)
+   File:    ExifTool-LICENSE.txt
+   https://exiftool.org
+   Linkage: none. Unmodified standalone distribution spawned as a
+            separate process by the transcode pipeline to copy metadata
+            onto the output MP4. macOS ships the Perl script + lib/
+            tree (runs on the system perl); Windows ships the official
+            exiftool(-k).exe package renamed to exiftool.exe.
+
+12. Sparkle 2.9.2 (macOS auto-update framework)
+   Copyright (c) 2006-2013 Andy Matuschak and contributors (see file)
+   License: MIT (with bundled components under their own permissive
+            terms, all listed in the file)
+   File:    Sparkle-LICENSE.txt
+   https://sparkle-project.org
+   Linkage: dynamic. Sparkle.framework is embedded in UFB.app/
+            Contents/Frameworks/ and drives in-app updates from the
+            ufbrowser.com appcast.
+
+13. WinSparkle 0.9.3 (Windows auto-update library)
+   Copyright (c) 2009-2026 Vaclav Slavik
+   License: MIT
+   File:    WinSparkle-LICENSE.txt
+   https://winsparkle.org
+   Linkage: dynamic. WinSparkle.dll ships next to ufb.exe.
+
 ===============================================================================
 Indirect dependencies — Qt runtime libraries
 ===============================================================================
@@ -176,10 +244,14 @@ graph of dependencies via Cargo. The vast majority are dual-licensed
 MIT OR Apache-2.0; a minority are BSD-2 / BSD-3 / ISC / Unlicense /
 CC0. None impose copyleft obligations.
 
-For an authoritative listing run:
-    cargo install cargo-license
-    cargo license --manifest-path bindings/Cargo.toml
-    cargo license --manifest-path agent/Cargo.toml
+The complete, generated attribution for every crate compiled into
+UFB's binaries — package, version, license, and the full license text
+with each crate's copyright notice — ships alongside this file as:
+
+    RustCrates-NOTICES.txt        (regenerate: scripts/gen-rust-notices.sh)
+
+It is produced by cargo-about from Cargo.lock (about.toml at the repo
+root) and must be regenerated whenever Cargo.lock changes.
 
 Notable transitive dependencies that ship as part of UFB binaries:
 

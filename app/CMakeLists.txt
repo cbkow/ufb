@@ -996,6 +996,23 @@ if(APPLE)
         message(STATUS "ufb: external/7zip/bin/7zz missing — run scripts/setup-external-mac.sh (archive extract/compress disabled)")
     endif()
 
+    # License texts → UFB.app/Contents/Resources/LICENSES/ (plus the
+    # top-level LICENSE as LICENSE.txt). Mirrors the Windows installer,
+    # which ships LICENSES\* into {app}\LICENSES. Qt (LGPL-3) and 7-Zip
+    # (LGPL-2.1 + unRAR restriction) both require the license text to
+    # travel with the binaries, and THIRD_PARTY_NOTICES.txt is the
+    # human-readable index. Runs before the signing POST_BUILD so the
+    # files are part of the sealed bundle.
+    add_custom_command(TARGET ufb POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/LICENSES"
+            "$<TARGET_BUNDLE_CONTENT_DIR:ufb>/Resources/LICENSES"
+        COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_SOURCE_DIR}/LICENSE"
+            "$<TARGET_BUNDLE_CONTENT_DIR:ufb>/Resources/LICENSE.txt"
+        COMMENT "Sync LICENSE + LICENSES/ into UFB.app/Contents/Resources/"
+    )
+
     set(_ufb_exiftool_mac "${CMAKE_SOURCE_DIR}/external/exiftool")
     if(EXISTS "${_ufb_exiftool_mac}/exiftool")
         add_custom_command(TARGET ufb POST_BUILD
