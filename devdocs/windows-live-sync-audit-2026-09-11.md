@@ -120,7 +120,26 @@ set a chunk bit once its whole logical range is covered across callbacks.
 0.8 MB/s number was the 240 s close stall divided into the file size, not a
 per-operation rate.
 
-### 2. Cache blobs are not sparse; the budget ignores partial blobs
+### 2. Cache blobs are not sparse; the budget ignores partial blobs — FIXED 2026-09-11
+
+**Status: fixed and verified live.** Blobs are now marked sparse
+(`FSCTL_SET_SPARSE`) before the `set_len(nas_size)` pre-extend at both
+creation sites, so only fetched chunks occupy disk. Verified: a 500 MB
+file read for its first 128 KB produced a blob that is flagged sparse and
+allocates **2.00 MB on disk** (was 500 MB). The evictor now sizes and
+evicts partial blobs too — its budget query covers `is_hydrated=1 OR
+chunk_bitmap IS NOT NULL` and sizes partials by `popcount(bitmap) *
+CHUNK_SIZE` (capped at nas_size) instead of counting only fully-hydrated
+rows. Ships in agent ≥1.2.1.
+
+Caveat: this box's ~5,100 pre-existing partial blobs were written
+non-sparse and stay fully allocated until they are re-fetched (which
+writes a fresh sparse blob) or the cache is cleared/drained. New blobs
+are sparse from here on; no retro-sparse pass was added (deallocating
+already-written ranges would mean rewriting each blob). Original analysis
+below.
+
+
 
 Blob files are created and `set_len()` to `nas_size` — on NTFS that
 **allocates the full length**. A 2.9 GB movie with one 1 MiB header chunk

@@ -1194,17 +1194,19 @@ impl CacheIndex {
         if self.cache_limit == 0 {
             return (0, 0);
         }
-        let total = self.total_cached_bytes();
-        if total <= self.cache_limit {
-            return (0, 0);
-        }
-        let target = (self.cache_limit as f64 * EVICTION_TARGET_PERCENT) as u64;
 
-        let candidates: Vec<(i64, String, u64)> = {
+        // Every blob-bearing row: fully hydrated OR partially hydrated
+        // (chunk_bitmap set). Size each by what it actually occupies on
+        // disk — hydrated_size for complete files, popcount(bitmap) *
+        // CHUNK_SIZE (capped at nas_size) for partials. The old query
+        // counted only is_hydrated=1 rows, so thousands of partial blobs
+        // reserved disk the budget never saw and never evicted.
+        let candidates: Vec<(i64, u64)> = {
             let db = self.db();
             let mut stmt = match db.prepare(
-                "SELECT rowid, path, hydrated_size FROM known_files
-                 WHERE is_hydrated=1 AND is_dir=0
+                "SELECT rowid, is_hydrated, hydrated_size, nas_size, chunk_bitmap
+                 FROM known_files
+                 WHERE is_dir=0 AND (is_hydrated=1 OR chunk_bitmap IS NOT NULL)
                  ORDER BY last_accessed ASC",
             ) {
                 Ok(s) => s,
@@ -1214,17 +1216,36 @@ impl CacheIndex {
                 }
             };
             stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)? as u64))
+                let hydrated: i64 = row.get(1)?;
+                let hydrated_size: i64 = row.get(2)?;
+                let nas_size: i64 = row.get(3)?;
+                let bitmap: Option<Vec<u8>> = row.get(4)?;
+                let bytes = if hydrated != 0 {
+                    hydrated_size as u64
+                } else {
+                    let fetched = bitmap
+                        .map(|b| b.iter().map(|byte| byte.count_ones() as u64).sum::<u64>())
+                        .unwrap_or(0)
+                        .saturating_mul(cache_core::CHUNK_SIZE);
+                    fetched.min(nas_size as u64)
+                };
+                Ok((row.get::<_, i64>(0)?, bytes))
             })
             .ok()
             .map(|it| it.filter_map(|r| r.ok()).collect())
             .unwrap_or_default()
         };
 
+        let total: u64 = candidates.iter().map(|(_, b)| *b).sum();
+        if total <= self.cache_limit {
+            return (0, 0);
+        }
+        let target = (self.cache_limit as f64 * EVICTION_TARGET_PERCENT) as u64;
+
         let mut remaining = total;
         let mut files_evicted = 0usize;
 
-        for (rowid, _path, size) in &candidates {
+        for (rowid, size) in &candidates {
             if remaining <= target {
                 break;
             }

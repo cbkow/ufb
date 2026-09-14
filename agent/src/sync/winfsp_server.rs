@@ -64,6 +64,32 @@ const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 const WRITE_ACCESS_MASK: u32 =
     FILE_WRITE_DATA | FILE_APPEND_DATA | GENERIC_WRITE | GENERIC_ALL | MAXIMUM_ALLOWED;
 
+/// Mark a freshly-created cache blob as a sparse file, so the following
+/// `set_len(nas_size)` reserves NO disk until real chunks are written.
+/// Without this, NTFS allocates the full logical length up front — a
+/// 3 GB movie with a single 1 MiB header chunk still occupies 3 GB, and
+/// 5k+ partially-hydrated files reserve ~80 GB for a few MB of data (the
+/// laptop-disk-fill bug). Best-effort and idempotent; a blob that fails
+/// to go sparse just wastes space.
+fn set_file_sparse(file: &fs::File) {
+    use std::os::windows::io::AsRawHandle;
+    // FSCTL_SET_SPARSE — CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 49, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+    let mut bytes_returned: u32 = 0;
+    unsafe {
+        let _ = windows_sys::Win32::System::IO::DeviceIoControl(
+            file.as_raw_handle() as _,
+            FSCTL_SET_SPARSE,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        );
+    }
+}
+
 /// Open the backing NAS file once for the lifetime of a WinFsp open.
 /// `writable` opens read+write (reused by both read and write callbacks);
 /// on failure it falls back to read-only so a write-intent open of a
@@ -772,6 +798,9 @@ impl FileSystemContext for PassthroughFs {
                     .open(&cache_path)
                 {
                     if cf.metadata().map(|m| m.len()).unwrap_or(0) < new_size {
+                        // Sparse BEFORE set_len so the extend reserves no
+                        // disk past the bytes we actually mirror.
+                        set_file_sparse(&cf);
                         let _ = cf.set_len(new_size);
                     }
                     let mut m = 0usize;
@@ -1336,8 +1365,11 @@ impl PassthroughFs {
             .truncate(false)
             .open(&cache_path)?;
         // Pre-extend to nas_size so pread near EOF doesn't short-read on
-        // a sparse hole past the current file length.
+        // a sparse hole past the current file length. Mark sparse first
+        // so the extension is a hole, not a full allocation — only the
+        // chunks we fetch below occupy disk.
         if cache_file.metadata().map(|m| m.len()).unwrap_or(0) < file_size {
+            set_file_sparse(&cache_file);
             cache_file.set_len(file_size)?;
         }
 
