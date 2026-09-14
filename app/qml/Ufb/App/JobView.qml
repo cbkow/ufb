@@ -34,9 +34,30 @@ Item {
     /// folder when the user clicks a tab.
     Directory { id: tabsProbe }
 
+    /// While refreshTabs rebuilds tabsModel, _activeFolderPath keeps
+    /// reporting the path that was active before the rebuild, so the
+    /// shared FolderTabView never sees a transient "" (which would
+    /// reload the whole tab: item list, prefs, browser panes).
+    property bool _tabsRebuilding: false
+    property string _heldFolderPath: ""
+
     function refreshTabs() {
+        // Remember what was active BY PATH (or the Tracker, which
+        // sits at index == tabsModel.count). A refresh that discovers
+        // a new top-level folder sorting before the active one must
+        // not silently switch the user to a different folder
+        // (audit 2026-09-14: index was kept, path was not).
+        var wasTracker = tabsModel.count > 0
+            && jobTabBar.currentIndex === tabsModel.count
+        var activePath = root._activeFolderPath
+        root._heldFolderPath = activePath
+        root._tabsRebuilding = true
+
         tabsModel.clear()
-        if (!tabsProbe.entries_json) return
+        if (!tabsProbe.entries_json) {
+            root._tabsRebuilding = false
+            return
+        }
         try {
             var arr = JSON.parse(tabsProbe.entries_json)
             for (var i = 0; i < arr.length; ++i) {
@@ -48,10 +69,25 @@ Item {
         } catch (e) {
             console.warn("JobView: tabs parse failed:", e)
         }
-        // Default-select the first folder tab on initial load.
-        if (jobTabBar.currentIndex < 0 || jobTabBar.currentIndex > tabsModel.count) {
-            jobTabBar.currentIndex = 0
+        // Restore the previous selection by path; fall back to the
+        // first folder tab (initial load, or the active folder was
+        // deleted).
+        if (wasTracker) {
+            jobTabBar.currentIndex = tabsModel.count
+        } else {
+            var restored = -1
+            if (activePath.length > 0) {
+                for (var r = 0; r < tabsModel.count; ++r) {
+                    if (tabsModel.get(r).path === activePath) { restored = r; break }
+                }
+            }
+            if (restored >= 0) {
+                jobTabBar.currentIndex = restored
+            } else if (jobTabBar.currentIndex < 0 || jobTabBar.currentIndex > tabsModel.count) {
+                jobTabBar.currentIndex = 0
+            }
         }
+        root._tabsRebuilding = false
         // Per-job subtab memory: the job remembers which folder tab
         // (or the Tracker) was active, stored in the same per-folder
         // prefs entry as the job root's view state. Runs once per
@@ -91,6 +127,7 @@ Item {
     /// Tracker tab / before any tabs have loaded). Drives the shared
     /// FolderTabView's tabPath property.
     readonly property string _activeFolderPath: {
+        if (root._tabsRebuilding) return root._heldFolderPath
         var idx = jobTabBar.currentIndex
         if (idx < 0 || idx >= tabsModel.count) return ""
         return tabsModel.get(idx).path
@@ -234,42 +271,6 @@ Item {
                     Layout.maximumWidth: 360
                     Layout.rightMargin: 8
                 }
-                // Google Drive notes / folder shortcuts. Both open
-                // in the system browser via Apps Script — Google Docs
-                // doesn't render usefully in a webview. When the user
-                // hasn't filled in scriptUrl / parentFolderId, the
-                // first click opens a config dialog instead.
-                FlatButton {
-                    id: notesDocBtn
-                    iconName: "file-text"
-                    Layout.preferredHeight: Theme.dim.toolStripHeight
-                    tooltip: Settings.has_google_drive()
-                        ? qsTr("Open project notes doc in browser")
-                        : qsTr("Configure Google Drive (click to set up)")
-                    onClicked: {
-                        if (!Settings.has_google_drive()) {
-                            googleDriveDialog.openFor()
-                            return
-                        }
-                        var url = Settings.build_notes_url(root.jobName, "doc")
-                        if (url.length > 0) Qt.openUrlExternally(url)
-                    }
-                }
-                FlatButton {
-                    iconName: "folder-simple"
-                    Layout.preferredHeight: Theme.dim.toolStripHeight
-                    tooltip: Settings.has_google_drive()
-                        ? qsTr("Open project notes folder in browser")
-                        : qsTr("Configure Google Drive (click to set up)")
-                    onClicked: {
-                        if (!Settings.has_google_drive()) {
-                            googleDriveDialog.openFor()
-                            return
-                        }
-                        var url = Settings.build_notes_url(root.jobName, "folder")
-                        if (url.length > 0) Qt.openUrlExternally(url)
-                    }
-                }
                 FlatButton {
                     iconName: "archive"
                     text: qsTr("Backups")
@@ -303,78 +304,6 @@ Item {
         }
 
         BackupManagerDialog { id: backupDialog }
-
-        // ── Google Drive config ─────────────────────────────────────
-        // Surfaced inline here until a proper Settings dialog exists.
-        // Writes to settings.json via Settings.set_google_drive.
-        Dialog {
-            id: googleDriveDialog
-            title: qsTr("Google Drive Integration")
-            modal: true
-            parent: Overlay.overlay
-            x: (parent ? (parent.width  - width)  / 2 : 0)
-            y: (parent ? (parent.height - height) / 2 : 0)
-            width: 520
-            standardButtons: Dialog.Save | Dialog.Cancel
-            function openFor() {
-                scriptUrlField.text = Settings.google_drive_script_url()
-                parentFolderField.text = Settings.google_drive_parent_folder_id()
-                gDriveStatus.text = ""
-                open()
-            }
-            ColumnLayout {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                spacing: 8
-                Label {
-                    text: qsTr("Apps Script URL and parent folder ID for the project-notes integration. Both buttons in the job header use these to construct a per-job URL that opens in your default browser.")
-                    color: "#aaa"
-                    font.pixelSize: 11
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                }
-                GridLayout {
-                    columns: 2
-                    columnSpacing: 8
-                    rowSpacing: 6
-                    Layout.fillWidth: true
-                    Label { text: qsTr("Script URL"); color: "#dddddd" }
-                    TextField {
-                        id: scriptUrlField
-                        Layout.fillWidth: true
-                        placeholderText: "https://script.google.com/macros/s/…/exec"
-                        font.family: "Consolas"
-                        font.pixelSize: 11
-                    }
-                    Label { text: qsTr("Parent Folder ID"); color: "#dddddd" }
-                    TextField {
-                        id: parentFolderField
-                        Layout.fillWidth: true
-                        placeholderText: "1AbCdEf…"
-                        font.family: "Consolas"
-                        font.pixelSize: 11
-                    }
-                }
-                Label {
-                    id: gDriveStatus
-                    text: ""
-                    color: text.indexOf("failed") >= 0 || text.indexOf("error") >= 0
-                        ? "#c04040" : "#7ed321"
-                    font.pixelSize: 11
-                    visible: text.length > 0
-                    Layout.fillWidth: true
-                }
-            }
-            onAccepted: {
-                var err = Settings.set_google_drive(
-                    scriptUrlField.text.trim(),
-                    parentFolderField.text.trim())
-                if (err.length > 0) {
-                    gDriveStatus.text = qsTr("Save failed: %1").arg(err)
-                    open()  // re-open so the user can fix
-                }
-            }
-        }
 
         // ── Inner tab bar ─────────────────────────────────────────────
         // Custom-styled (matches Main.qml top tab bar) — Qt's default

@@ -286,6 +286,27 @@ pub mod qobject {
         #[qsignal]
         fn dirs_changed(self: Pin<&mut FileOps>, dirs_json: QString);
 
+        /// Create `<dir>/<name>.url` pointing at `url` (Windows
+        /// InternetShortcut format — Explorer and Finder both open it).
+        /// Returns the created path, or "" on failure (logged). Emits
+        /// `dirs_changed` for `dir`.
+        #[qinvokable]
+        fn create_web_link(
+            self: Pin<&mut FileOps>,
+            dir: QString,
+            name: QString,
+            url: QString,
+        ) -> QString;
+
+        /// Target URL of a .url / .webloc file, or "" if unreadable.
+        #[qinvokable]
+        fn read_web_link(self: &FileOps, path: QString) -> QString;
+
+        /// Plain text on the clipboard ("" if none). Cheap; used to
+        /// prefill the New Web Link dialog.
+        #[qinvokable]
+        fn clipboard_text(self: &FileOps) -> QString;
+
         /// Re-broadcast `dirs_changed` on behalf of another service
         /// (Archive jobs finish on their own QObject; views only listen
         /// here). `dirs_json` is a JSON array of directory paths.
@@ -313,6 +334,33 @@ impl Default for FileOpsRust {
 impl qobject::FileOps {
     fn notify_dirs_changed(self: Pin<&mut qobject::FileOps>, dirs_json: cxx_qt_lib::QString) {
         self.dirs_changed(dirs_json);
+    }
+
+    fn create_web_link(
+        mut self: Pin<&mut qobject::FileOps>,
+        dir: cxx_qt_lib::QString,
+        name: cxx_qt_lib::QString,
+        url: cxx_qt_lib::QString,
+    ) -> cxx_qt_lib::QString {
+        let dir_s = dir.to_string();
+        match file_ops::create_web_link(&dir_s, &name.to_string(), &url.to_string()) {
+            Ok(path) => {
+                emit_dirs_changed(self.as_mut(), &[&path]);
+                cxx_qt_lib::QString::from(&path)
+            }
+            Err(e) => {
+                log::warn!("FileOps.create_web_link({}): {}", dir_s, e);
+                cxx_qt_lib::QString::from("")
+            }
+        }
+    }
+
+    fn read_web_link(self: &qobject::FileOps, path: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        cxx_qt_lib::QString::from(&file_ops::read_web_link(&path.to_string()).unwrap_or_default())
+    }
+
+    fn clipboard_text(self: &qobject::FileOps) -> cxx_qt_lib::QString {
+        cxx_qt_lib::QString::from(&file_ops::clipboard_text())
     }
 
     fn to_uri_list(self: &qobject::FileOps, paths_json: cxx_qt_lib::QString) -> cxx_qt_lib::QString {

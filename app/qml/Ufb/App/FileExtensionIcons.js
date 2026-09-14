@@ -58,6 +58,7 @@ var category = {
 
     // Text
     "txt":"text",
+    "url":"weblink", "webloc":"weblink",
     "md":"md", "markdown":"md",
     "rtf":"text", "log":"text",
     "ini":"text", "cfg":"text", "conf":"text",
@@ -98,6 +99,7 @@ var styles = {
     "zip":     { glyph: "file-zip",     color: "#ffb74d" },
     "archive": { glyph: "file-archive", color: "#ffb74d" },
 
+    "weblink": { glyph: "globe",        color: "#1de9b6" }, // mint — deliberately unlike any doc/media colour
     "pdf":     { glyph: "file-pdf",     color: "#ef5350" }, // red
     "doc":     { glyph: "file-doc",     color: "#64b5f6" }, // word-blue
     "xls":     { glyph: "file-xls",     color: "#81c784" }, // excel-green
@@ -126,6 +128,15 @@ var styles = {
 };
 
 var DEFAULT = { glyph: "file", color: "" };
+
+// Extensions whose OS icon is deliberately NOT used: the Phosphor
+// glyph is shown instead so the type stands out in every view. Web
+// links get this because the OS icons for .url/.webloc are generic
+// document sheets that vanish among real documents.
+var alwaysGlyph = { "url": true, "webloc": true };
+function forceGlyph(ext) {
+    return !!(ext && alwaysGlyph[String(ext).toLowerCase()]);
+}
 
 function styleForExtension(ext) {
     if (!ext) return DEFAULT;

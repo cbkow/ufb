@@ -1315,6 +1315,180 @@ pub fn clipboard_copy_text(text: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to write text to clipboard: {}", e))
 }
 
+/// Plain text currently on the clipboard, or "" (no text / error).
+/// Used to prefill the New Web Link dialog when the clipboard holds
+/// a URL.
+pub fn clipboard_text() -> String {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.get_text())
+        .unwrap_or_default()
+}
+
+// ── Web links (.url / .webloc) ──────────────────────────────────────
+//
+// UFB creates Windows-style `.url` files (`[InternetShortcut]` INI):
+// Explorer AND Finder both open them natively, whereas the macOS
+// `.webloc` plist is Mac-only. UFB opens both kinds itself (see
+// `open_file`) so a double-click behaves identically on both OSes
+// and on shares populated from either side.
+
+/// Extensions `open_file` treats as web links.
+pub const WEB_LINK_EXTENSIONS: &[&str] = &["url", "webloc"];
+
+pub fn is_web_link_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| WEB_LINK_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Parse the target URL out of a `.url` (INI) or `.webloc` (XML or
+/// binary plist) file. Returns `None` for anything that isn't a
+/// recognisable link.
+pub fn read_web_link(path: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "url" => parse_url_ini(&String::from_utf8_lossy(&bytes)),
+        "webloc" => {
+            if bytes.starts_with(b"bplist") {
+                // Binary plist (what recent Safari drag-outs write).
+                // plutil is always present on macOS; elsewhere a
+                // binary .webloc simply isn't openable by UFB.
+                #[cfg(target_os = "macos")]
+                {
+                    let out = std::process::Command::new("plutil")
+                        .args(["-convert", "xml1", "-o", "-", path])
+                        .output()
+                        .ok()?;
+                    if !out.status.success() {
+                        return None;
+                    }
+                    return parse_webloc_xml(&String::from_utf8_lossy(&out.stdout));
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            } else {
+                parse_webloc_xml(&String::from_utf8_lossy(&bytes))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `[InternetShortcut]` / `URL=…` — case-insensitive key, tolerant of
+/// CRLF, BOM, and keys before the section header.
+fn parse_url_ini(text: &str) -> Option<String> {
+    let text = text.trim_start_matches('\u{feff}');
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim().eq_ignore_ascii_case("URL") {
+                let v = v.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `<key>URL</key>` followed by `<string>…</string>` in an XML plist.
+fn parse_webloc_xml(text: &str) -> Option<String> {
+    let key_at = text.find("<key>URL</key>")?;
+    let rest = &text[key_at..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")? + start;
+    let raw = rest[start..end].trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        raw.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'"),
+    )
+}
+
+/// Turn a user-typed link name into a safe `.url` file name: path
+/// separators and control characters become "-", a trailing ".url"
+/// is not doubled, and an empty name falls back to the URL's host.
+pub fn web_link_file_name(name: &str, url: &str) -> String {
+    let mut base: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => '-',
+            c => c,
+        })
+        .collect();
+    base = base.trim().trim_end_matches('.').to_string();
+    if base.to_ascii_lowercase().ends_with(".url") {
+        base.truncate(base.len() - 4);
+    }
+    if base.is_empty() {
+        base = url
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("www.")
+            .to_string();
+    }
+    if base.is_empty() {
+        base = "Link".to_string();
+    }
+    format!("{}.url", base)
+}
+
+/// Create `<dir>/<name>.url` pointing at `url`. Never overwrites: a
+/// collision gets a " 2", " 3", … suffix. Returns the created path.
+pub fn create_web_link(dir: &str, name: &str, url: &str) -> Result<String, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("URL is empty".into());
+    }
+    // Prepend a scheme for bare hosts so both OSes hand it to a
+    // browser rather than a file handler.
+    let url = if url.contains("://") || url.starts_with("mailto:") {
+        url.to_string()
+    } else {
+        format!("https://{}", url)
+    };
+    let parent = Path::new(dir);
+    if !parent.is_dir() {
+        return Err(format!("Not a directory: {}", dir));
+    }
+    let file_name = web_link_file_name(name, &url);
+    let stem = &file_name[..file_name.len() - 4];
+    let mut target = parent.join(&file_name);
+    let mut n = 2;
+    while target.exists() {
+        target = parent.join(format!("{} {}.url", stem, n));
+        n += 1;
+        if n > 10_000 {
+            return Err("Could not find a free file name".into());
+        }
+    }
+    // CRLF: what Windows writes, and what every reader accepts.
+    let body = format!("[InternetShortcut]\r\nURL={}\r\n", url);
+    std::fs::write(&target, body).map_err(|e| format!("Failed to write link: {}", e))?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 /// Video extensions that, on macOS, are handed off to QCView.app
 /// instead of the OS default handler. Lowercase, no leading dot.
 #[cfg(target_os = "macos")]
@@ -1342,6 +1516,17 @@ fn is_qcview_video(path: &str) -> bool {
 /// (not installed, etc.) we fall back to the OS default handler so
 /// the user still gets *something*.
 pub fn open_file(path: &str) -> Result<(), String> {
+    // Web links: open the TARGET in the default browser ourselves so
+    // .url and .webloc behave the same on both OSes (Finder ignores
+    // .webloc files created elsewhere on some versions, Explorer
+    // never understood .webloc at all).
+    if is_web_link_path(path) {
+        return match read_web_link(path) {
+            Some(url) => opener::open(&url)
+                .map_err(|e| format!("Failed to open link {}: {}", url, e)),
+            None => Err(format!("{} is not a readable web link", path)),
+        };
+    }
     #[cfg(target_os = "macos")]
     {
         if is_qcview_video(path) {
@@ -1867,4 +2052,48 @@ pub async fn delete_to_trash_with_progress(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod web_link_tests {
+    use super::*;
+
+    #[test]
+    fn parses_url_ini_and_webloc() {
+        assert_eq!(
+            parse_url_ini("\u{feff}[InternetShortcut]\r\nURL=https://a.b/c?d=1\r\nIconIndex=0\r\n").as_deref(),
+            Some("https://a.b/c?d=1")
+        );
+        assert_eq!(parse_url_ini("[InternetShortcut]\nurl = https://x\n").as_deref(), Some("https://x"));
+        assert_eq!(parse_url_ini("[InternetShortcut]\n"), None);
+        let plist = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>URL</key><string>https://e.f/?a=1&amp;b=2</string></dict></plist>";
+        assert_eq!(parse_webloc_xml(plist).as_deref(), Some("https://e.f/?a=1&b=2"));
+        assert_eq!(parse_webloc_xml("<plist/>"), None);
+        assert!(is_web_link_path("/x/Site.URL"));
+        assert!(is_web_link_path("/x/site.webloc"));
+        assert!(!is_web_link_path("/x/site.html"));
+    }
+
+    #[test]
+    fn link_file_names_are_safe() {
+        assert_eq!(web_link_file_name("Client / Brief: v2", "https://x"), "Client - Brief- v2.url");
+        assert_eq!(web_link_file_name("notes.url", "https://x"), "notes.url");
+        assert_eq!(web_link_file_name("", "https://www.frame.io/proj?x"), "frame.io.url");
+        assert_eq!(web_link_file_name("  ", ""), "Link.url");
+    }
+
+    #[test]
+    fn create_and_read_round_trip() {
+        let dir = std::env::temp_dir().join(format!("ufb-weblink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let p1 = create_web_link(&d, "Brief", "frame.io/x").unwrap();
+        assert!(p1.ends_with("Brief.url"));
+        assert_eq!(read_web_link(&p1).as_deref(), Some("https://frame.io/x"));
+        let p2 = create_web_link(&d, "Brief", "https://other").unwrap();
+        assert!(p2.ends_with("Brief 2.url"), "{}", p2);
+        assert!(create_web_link(&d, "x", "   ").is_err());
+        assert!(create_web_link(&format!("{}/missing", d), "x", "https://y").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

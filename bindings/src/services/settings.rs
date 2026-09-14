@@ -1,8 +1,9 @@
 //! `Settings` QObject — wraps `core::settings::AppSettings`.
 //!
-//! Phase 12 first slice: just enough to construct the per-job
-//! Google Drive notes / folder URLs that JobView's header buttons
-//! open in the system browser. Full settings UI lands later.
+//! Mesh sync, identity, browser folder prefs and the other
+//! settings.json-backed knobs QML reads. (The Google Drive notes
+//! integration that first motivated this object was removed
+//! 2026-09-14.)
 
 use std::sync::{Arc, OnceLock, RwLock};
 use ufb_core::settings::AppSettings;
@@ -19,42 +20,6 @@ pub mod qobject {
         #[qml_element]
         #[qml_singleton]
         type Settings = super::SettingsRust;
-
-        /// Build the Google Drive Apps Script URL for a job's notes
-        /// document or notes folder. Returns "" if either the
-        /// scriptUrl or parentFolderId setting is unset (caller
-        /// should display a "configure in settings" prompt).
-        ///
-        /// `mode` is "doc" or "folder" — matches the Apps Script's
-        /// expected query parameter.
-        #[qinvokable]
-        fn build_notes_url(
-            self: &Settings,
-            job_name: QString,
-            mode: QString,
-        ) -> QString;
-
-        /// True when both scriptUrl and parentFolderId are populated.
-        /// JobView uses this to gate visibility / enabled state of
-        /// the notes / folder buttons.
-        #[qinvokable]
-        fn has_google_drive(self: &Settings) -> bool;
-
-        /// Read-only accessors for the Google Drive config dialog.
-        #[qinvokable]
-        fn google_drive_script_url(self: &Settings) -> QString;
-        #[qinvokable]
-        fn google_drive_parent_folder_id(self: &Settings) -> QString;
-
-        /// Persist the Google Drive Apps Script URL + parent folder
-        /// ID. Writes to settings.json. Returns "" on success or an
-        /// error message.
-        #[qinvokable]
-        fn set_google_drive(
-            self: &Settings,
-            script_url: QString,
-            parent_folder_id: QString,
-        ) -> QString;
 
         // ── Mesh sync ───────────────────────────────────────────────
         // Backing settings live in settings.json under `meshSync`.
@@ -249,68 +214,6 @@ fn ensure_folder_prefs_table(db: &ufb_core::db::Database) {
 }
 
 impl qobject::Settings {
-    fn build_notes_url(
-        self: &qobject::Settings,
-        job_name: cxx_qt_lib::QString,
-        mode: cxx_qt_lib::QString,
-    ) -> cxx_qt_lib::QString {
-        let settings = shared_settings();
-        let s = settings.read().unwrap();
-        let script = s.google_drive.script_url.trim();
-        let parent = s.google_drive.parent_folder_id.trim();
-        if script.is_empty() || parent.is_empty() {
-            return cxx_qt_lib::QString::from("");
-        }
-        let url = format!(
-            "{}?job={}&parent={}&mode={}",
-            script,
-            urlencode(&job_name.to_string()),
-            urlencode(parent),
-            urlencode(&mode.to_string())
-        );
-        cxx_qt_lib::QString::from(&url)
-    }
-
-    fn has_google_drive(self: &qobject::Settings) -> bool {
-        let settings = shared_settings();
-        let s = settings.read().unwrap();
-        !s.google_drive.script_url.trim().is_empty()
-            && !s.google_drive.parent_folder_id.trim().is_empty()
-    }
-
-    fn google_drive_script_url(self: &qobject::Settings) -> cxx_qt_lib::QString {
-        let settings = shared_settings();
-        let s = settings.read().unwrap();
-        cxx_qt_lib::QString::from(&s.google_drive.script_url)
-    }
-
-    fn google_drive_parent_folder_id(self: &qobject::Settings) -> cxx_qt_lib::QString {
-        let settings = shared_settings();
-        let s = settings.read().unwrap();
-        cxx_qt_lib::QString::from(&s.google_drive.parent_folder_id)
-    }
-
-    fn set_google_drive(
-        self: &qobject::Settings,
-        script_url: cxx_qt_lib::QString,
-        parent_folder_id: cxx_qt_lib::QString,
-    ) -> cxx_qt_lib::QString {
-        let settings = refresh_cache_from_disk();
-        let mut s = settings.write().unwrap();
-        s.google_drive.script_url = script_url.to_string();
-        s.google_drive.parent_folder_id = parent_folder_id.to_string();
-        match s.save() {
-            Ok(()) => {
-                log::info!("settings: google_drive updated");
-                cxx_qt_lib::QString::from("")
-            }
-            Err(e) => {
-                log::warn!("settings: google_drive save failed: {}", e);
-                cxx_qt_lib::QString::from(&e)
-            }
-        }
-    }
-
     fn mesh_enabled(self: &qobject::Settings) -> bool {
         let settings = shared_settings();
         let s = settings.read().unwrap();
@@ -619,23 +522,4 @@ impl qobject::Settings {
             }
         }
     }
-}
-
-/// Minimal URL component encoder for the small set of characters
-/// likely to appear in job names / folder IDs (spaces, ampersands,
-/// equals signs). Avoids pulling a full url-encoding crate for one
-/// callsite.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
 }

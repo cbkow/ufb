@@ -91,9 +91,75 @@ Item {
         root.activePane = pane
     }
 
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // ── Header ────────────────────────────────────────────────────
+        // Same strip the project views wear (JobView's header): icon,
+        // bold title, mono location, actions — so a Files tab and a
+        // project tab read as the same kind of surface. The title is
+        // the tab's own name ("Files", as on the tab pill); the mono
+        // label tracks the active pane's folder, the way the job
+        // header shows the job path.
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Theme.dim.toolStripHeight
+            color: Theme.colors.toolbar
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: Theme.dim.divider
+                color: Theme.colors.divider
+            }
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 0
+                spacing: 0
+
+                Icon {
+                    name: "folder-simple"
+                    size: Theme.icon.sizeMedium
+                    color: Theme.colors.textMuted
+                    Layout.rightMargin: 6
+                }
+                Label {
+                    text: qsTr("Files")
+                    color: Theme.colors.textBright
+                    font.pixelSize: Theme.font.sizeHeading
+                    font.bold: true
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                }
+                Label {
+                    text: root.activePath
+                    color: Theme.colors.textSubtle
+                    font.pixelSize: Theme.font.sizeSmall
+                    font.family: Theme.font.mono
+                    elide: Text.ElideMiddle
+                    Layout.maximumWidth: 360
+                    Layout.rightMargin: 8
+                }
+                FlatButton {
+                    iconName: "arrow-clockwise"
+                    Layout.preferredHeight: Theme.dim.toolStripHeight
+                    tooltip: qsTr("Refresh both panes")
+                    onClicked: {
+                        if (leftDirObj.current_path.length > 0) leftDirObj.refresh()
+                        if (rightDirObj.current_path.length > 0) rightDirObj.refresh()
+                    }
+                }
+            }
+        }
+
     SplitView {
         id: panesSplit
-        anchors.fill: parent
+        Layout.fillWidth: true
+        Layout.fillHeight: true
         orientation: Qt.Horizontal
 
         // Flat splitter — see Main.qml outerSplit's handle for the full
@@ -208,4 +274,5 @@ Item {
             onOpenInNewTabRequested: (path) => root.openInNewTabRequested(path)
         }
     }
+    }  // ColumnLayout
 }

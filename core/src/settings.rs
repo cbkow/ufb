@@ -104,15 +104,6 @@ pub struct MeshSyncSettings {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GoogleDriveSettings {
-    #[serde(default, alias = "script_url")]
-    pub script_url: String,
-    #[serde(default, alias = "parent_folder_id")]
-    pub parent_folder_id: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SyncSettings {
     #[serde(default)]
     pub enabled: bool,
@@ -239,8 +230,6 @@ pub struct AppSettings {
     pub sync: SyncSettings,
     #[serde(default, alias = "mesh_sync")]
     pub mesh_sync: MeshSyncSettings,
-    #[serde(default, alias = "google_drive")]
-    pub google_drive: GoogleDriveSettings,
     #[serde(default, alias = "path_mappings")]
     pub path_mappings: Vec<PathMapping>,
     #[serde(default, alias = "job_views")]
@@ -347,7 +336,6 @@ impl Default for AppSettings {
             ui: UiSettings::default(),
             sync: SyncSettings::default(),
             mesh_sync: MeshSyncSettings::default(),
-            google_drive: GoogleDriveSettings::default(),
             path_mappings: vec![],
             job_views: vec![],
             aggregated_tracker_open: false,

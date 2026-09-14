@@ -998,6 +998,11 @@ Rectangle {
         onTriggered: newFolderDialog.openFor(root._effectiveTargetDir())
     }
     Action {
+        id: newWebLinkAction
+        text: qsTr("New Web Link…")
+        onTriggered: newWebLinkDialog.openFor(root._effectiveTargetDir())
+    }
+    Action {
         id: newDateFolderAction
         text: qsTr("New Date Folder")
         onTriggered: {
@@ -1210,6 +1215,11 @@ Rectangle {
         MenuSeparator {}
         UfbMenuItem { iconName: "folder-simple"; action: revealAction }
         UfbMenuItem { iconName: "dots-three-outline"; action: showShellMenuAction }
+        MenuSeparator {}
+        // Creation from the item menu too — lands in the current
+        // folder (or the selected tree folder), same as the
+        // background menu entry.
+        UfbMenuItem { iconName: "link"; action: newWebLinkAction }
     }
 
     UfbMenu {
@@ -1219,6 +1229,7 @@ Rectangle {
         onAboutToShow: _pasteAvailable = root._clipboardHasPaths()
         UfbMenuItem { iconName: "folder-simple-plus"; action: newFolderAction }
         UfbMenuItem { iconName: "folder-simple-star"; action: newUfbFolderAction }
+        UfbMenuItem { iconName: "link"; action: newWebLinkAction }
         UfbMenuItem { iconName: "calendar-plus"; action: newDateFolderAction }
         UfbMenuItem { iconName: "clock"; action: newTimeFolderAction }
         UfbMenuItem {
@@ -1285,6 +1296,65 @@ Rectangle {
                 return
             }
             refreshAfterDropTimer.restart()
+        }
+    }
+
+    // New Web Link — writes a Windows-style .url file (opens natively
+    // in Explorer AND Finder; UFB also opens .url/.webloc itself via
+    // FileOps.open_file so double-click is OS-agnostic). Prefills the
+    // URL from the clipboard when it holds one.
+    Dialog {
+        id: newWebLinkDialog
+        property string parentPath: ""
+        title: qsTr("New Web Link")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        function _looksLikeUrl(s) {
+            return /^(https?:\/\/|mailto:)/i.test(s.trim())
+                || /^[a-z0-9.-]+\.[a-z]{2,}(\/\S*)?$/i.test(s.trim())
+        }
+        function openFor(parent) {
+            parentPath = parent
+            linkNameField.text = ""
+            var clip = FileOps.clipboard_text()
+            linkUrlField.text = (clip && clip.length < 2048 && _looksLikeUrl(clip)) ? clip.trim() : ""
+            open()
+            if (linkUrlField.text.length > 0) linkNameField.forceActiveFocus()
+            else linkUrlField.forceActiveFocus()
+        }
+        ColumnLayout {
+            spacing: 8
+            Label {
+                text: qsTr("Create link in:\n%1").arg(newWebLinkDialog.parentPath)
+                color: Theme.colors.textMuted
+                font.pixelSize: 11
+            }
+            TextField {
+                id: linkUrlField
+                Layout.fillWidth: true
+                Layout.preferredWidth: 380
+                placeholderText: qsTr("https://…")
+                onAccepted: linkNameField.forceActiveFocus()
+            }
+            TextField {
+                id: linkNameField
+                Layout.fillWidth: true
+                placeholderText: qsTr("Name (optional — defaults to the site)")
+                onAccepted: newWebLinkDialog.accept()
+            }
+        }
+        onAccepted: {
+            var url = linkUrlField.text.trim()
+            if (url.length === 0) return
+            var created = FileOps.create_web_link(parentPath, linkNameField.text, url)
+            if (created.length === 0) {
+                console.warn("New Web Link failed for", url)
+                return
+            }
+            // dirs_changed already refreshes the listing; select the
+            // new file once it lands.
+            root.selectAfterLoadPath = created
         }
     }
 

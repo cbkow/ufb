@@ -34,6 +34,11 @@ Item {
         ? "folder"
         : (extension && extension.length ? extension.toLowerCase() : "file")
 
+    // Some types skip the OS icon on purpose (web links) — see
+    // FileExtensionIcons.forceGlyph. No provider request is made for
+    // them; the Phosphor glyph is the icon.
+    readonly property bool _glyphOnly: !isDir && FileIcons.forceGlyph(extension)
+
     Image {
         id: osIcon
         anchors.fill: parent
@@ -44,7 +49,7 @@ Item {
         mipmap: true          // load-bearing for the 256px -> 16px list-view downscale
         sourceSize.width: root.sourceSizePx
         sourceSize.height: root.sourceSizePx
-        source: "image://ufb-icons/" + root._key
+        source: root._glyphOnly ? "" : ("image://ufb-icons/" + root._key)
         visible: status === Image.Ready
     }
 
@@ -55,7 +60,7 @@ Item {
     // explicit sourceSize request, not whether real pixels arrived.)
     Loader {
         anchors.fill: parent
-        active: osIcon.status === Image.Error
+        active: root._glyphOnly || osIcon.status === Image.Error
         visible: active
         sourceComponent: Icon {
             anchors.centerIn: parent
