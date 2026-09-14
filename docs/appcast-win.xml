@@ -10,6 +10,45 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.2.2</title>
+      <sparkle:version>1.2.2</sparkle:version>
+      <sparkle:shortVersionString>1.2.2</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.2.2</h2>
+<ul>
+  <li><b>Extract and compress archives:</b> right-click a zip, 7z, rar
+      or tar archive and choose <i>Extract Here</i>; select any files
+      or folders and choose <i>Compress to ZIP</i>. Powered by a bundled
+      7-Zip on both platforms. Results land beside the originals and
+      are selected when done; nothing is ever overwritten.</li>
+  <li><b>Background tasks stay out of your way:</b> transcodes,
+      extractions and zips no longer switch you to another tab. Their
+      progress shows as chips in the bottom status bar, the same way
+      copy and move do, with a click-through to the Tasks tab (the
+      renamed Transcode tab) for details, cancel and history. Failures
+      stay visible until you look at them.</li>
+  <li><b>Web links:</b> <i>New Web Link…</i> in the file context menus
+      creates a link file that opens in your browser with a double-click
+      on Mac and Windows alike. Links get their own mint globe icon so
+      they stand out among documents.</li>
+  <li><b>Context menus have icons</b> and every list, menu and status
+      chip now uses the app's icon set instead of emoji.</li>
+  <li><b>Files tabs</b> wear the same header as project tabs, with the
+      active folder's path and a refresh for both panes.</li>
+  <li><b>Sync mount hardening (both platforms):</b> a broad audit of the
+      live-sync layer — peer edits can no longer be served from stale
+      cache, renames of folders with underscores or case-only renames
+      no longer corrupt the index, safe-saves over a peer's edit now
+      keep a conflict copy, mounts that drop offline reconnect on their
+      own, and quitting the app can no longer leave the system's mount
+      helper hung.</li>
+  <li><b>Fixes:</b> refreshing a project keeps your active folder tab
+      when new folders appear; the Google Drive notes buttons were
+      removed.</li>
+</ul>]]></description>
+      <pubDate>Mon, 14 Sep 2026 17:05:05 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.2.2/UFB-1.2.2-x64.exe" type="application/octet-stream" sparkle:edSignature="iMzA0n1GVPveyhtTBsE9N0EKmW5ZL5MjkO7Til5DMppwgbCLIV0eDazRwPS4dFwzgPKTzVNCx1PoVpUQ+P3mAw==" length="188395974" />
+    </item>
+    <item>
       <title>Version 1.2.0</title>
       <sparkle:version>1.2.0</sparkle:version>
       <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
