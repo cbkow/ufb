@@ -11,6 +11,31 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.2.3</title>
+      <sparkle:version>1.2.3</sparkle:version>
+      <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>UFB 1.2.3</h2>
+<ul>
+  <li><b>Ready for minNotes 1.0:</b> <i>Add Note…</i> now creates the
+      new <code>.mnd</code> documents minNotes 1.0 opens (notes made by
+      earlier UFB versions are refused by minNotes 1.0). The spacebar
+      preview understands the new format too — tables with images,
+      colours, choice chips and check boxes, side-by-side columns, and
+      ink drawn over them — and <code>.mnpkg</code> packages from either
+      generation.</li>
+  <li><b>Older notes stay readable:</b> <code>.mndb</code> notes from
+      before minNotes 1.0 still preview in UFB, even though minNotes
+      itself no longer opens them.</li>
+  <li><b>Word documents preview on Windows and Mac:</b> press Space on a
+      <code>.docx</code> to read the whole document — headings, lists,
+      tables, images and links — instead of a first-page thumbnail (or,
+      on Windows, just the file icon).</li>
+</ul>]]></description>
+      <pubDate>Thu, 17 Sep 2026 11:14:21 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.2.3/UFB-1.2.3-arm64.pkg" type="application/octet-stream" sparkle:edSignature="f2UMrg8PBV2/hgyzU70SVmaUdVb+9rO9MT/9UkJui7QjPJWT6p1PyJwj2hRs3d+fzoKYwKRMJww5anlz0FWEBg==" length="335572082" />
+    </item>
+    <item>
       <title>Version 1.2.2</title>
       <sparkle:version>1.2.2</sparkle:version>
       <sparkle:shortVersionString>1.2.2</sparkle:shortVersionString>
