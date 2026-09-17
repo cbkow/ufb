@@ -12,7 +12,6 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
-#include <QUrl>
 #include <QXmlStreamReader>
 
 #include <algorithm>
@@ -26,7 +25,7 @@ namespace {
 
 // Bump when the renderer's output changes — part of the stage stamp, so
 // an app update re-renders instead of serving the old build's HTML.
-constexpr const char* kRendererRev = "r1";
+constexpr const char* kRendererRev = "r2";
 
 using X = QXmlStreamReader;
 
@@ -40,15 +39,22 @@ QString escapeHtml(QString s) {
 }
 
 // Link targets are doc data and the page runs with JS on in a file://
-// origin. Web + mail only; sniffed on a control-stripped copy (Chromium
-// strips those before resolving, so "java\nscript:" would slip through).
-bool hrefSchemeOk(const QString& u) {
-    QString probe = u;
-    static const QRegularExpression ctl(QStringLiteral("[\\x00-\\x20]"));
-    probe.remove(ctl);
-    const QString scheme = QUrl(probe).scheme().toLower();
-    return scheme == QLatin1String("http") || scheme == QLatin1String("https")
-        || scheme == QLatin1String("mailto");
+// origin — and a rejected navigation is handed to the OS, so a link that
+// resolves to a local path LAUNCHES that file. Web + mail only, decided
+// on the exact string that is emitted: it must literally begin with the
+// scheme. (Sniffing a whitespace-stripped copy is wrong — "ht tp:/../x"
+// reads as http to the sniffer but Chromium keeps the space, sees no
+// valid scheme and resolves it as a path relative to the file:// page.)
+// Control characters anywhere disqualify; length-capped (the href repeats
+// once per reference, so an unbounded one amplifies the output).
+QString safeWebHref(const QString& target) {
+    const QString t = target.trimmed();
+    if (t.isEmpty() || t.size() > 2048) return {};
+    for (const QChar c : t)
+        if (c.unicode() < 0x20 || c.unicode() == 0x7f) return {};
+    static const QRegularExpression ok(QStringLiteral("^(https?://|mailto:)"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return ok.match(t).hasMatch() ? t : QString();
 }
 
 // Attribute by LOCAL name — tolerant of the transitional vs strict OOXML
@@ -499,7 +505,7 @@ void parseNumbering(Package& pkg, const QByteArray& xml) {
                 Level lv;
                 while (x.readNextStartElement()) {
                     const auto c = x.name();
-                    if (c == QLatin1String("start")) lv.start = attr(x, QLatin1String("val")).toInt();
+                    if (c == QLatin1String("start")) lv.start = std::clamp(attr(x, QLatin1String("val")).toInt(), 0, 1000000);
                     else if (c == QLatin1String("numFmt")) lv.fmt = attr(x, QLatin1String("val"));
                     else if (c == QLatin1String("lvlText")) lv.text = attr(x, QLatin1String("val")).left(64);
                     else if (c == QLatin1String("pStyle")) lv.pStyle = attr(x, QLatin1String("val"));
@@ -527,7 +533,7 @@ void parseNumbering(Package& pkg, const QByteArray& xml) {
                     const int il = attr(x, QLatin1String("ilvl")).toInt();
                     while (x.readNextStartElement()) {
                         if (x.name() == QLatin1String("startOverride"))
-                            ni.startOverride.insert(il, attr(x, QLatin1String("val")).toInt());
+                            ni.startOverride.insert(il, std::clamp(attr(x, QLatin1String("val")).toInt(), 0, 1000000));
                         x.skipCurrentElement();
                     }
                     continue;
@@ -604,7 +610,11 @@ public:
     Renderer(Package& pkg, const QString& stageDir) : pkg_(pkg), stage_(stageDir) {}
 
     PageGeom page;
+    // truncated: a budget ran out — everything after is skipped, not
+    // rendered. omitted: something too deep/wide was dropped in place.
+    // Either way the page says so.
     bool truncated = false;
+    bool omitted = false;
 
     // Entered on a container's start tag (body, tc, txbxContent); returns
     // on its end tag.
@@ -615,7 +625,9 @@ public:
             const auto t = x.readNext();
             if (t == X::StartElement) {
                 const auto n = x.name();
-                if (n == QLatin1String("p")) html += paragraph(x);
+                if ((n == QLatin1String("p") || n == QLatin1String("tbl")) && truncated)
+                    x.skipCurrentElement();
+                else if (n == QLatin1String("p")) html += paragraph(x);
                 else if (n == QLatin1String("tbl")) html += table(x);
                 else if (n == QLatin1String("tcPr") && cell) parseTcPr(x, *cell);
                 else if (n == QLatin1String("sectPr")) parseSect(x, page);
@@ -636,6 +648,12 @@ public:
 private:
     Package& pkg_;
     QString stage_;
+    // Output budgets. The paragraph count alone bounds nothing: one
+    // paragraph can hold millions of references that each expand to a
+    // long tag (a 2 KB docx made 100 MB of HTML on the GUI thread).
+    static constexpr qsizetype kInlineBudget = 4 * 1024 * 1024;    // chars per paragraph / run
+    static constexpr qint64 kOutputBudget = 48LL * 1024 * 1024;    // chars per document
+    qint64 emitted_ = 0;
     int paragraphs_ = 0;
     int tableDepth_ = 0;
     int boxDepth_ = 0;
@@ -729,12 +747,13 @@ private:
             const auto t = x.readNext();
             if (t == X::StartElement) {
                 const auto n = x.name();
+                if (inner.size() > kInlineBudget) { truncated = true; x.skipCurrentElement(); continue; }
                 if (n == QLatin1String("pPr")) parsePPr(x, direct);
                 else if (n == QLatin1String("r")) inner += run(x, after);
                 else if (n == QLatin1String("hyperlink")) {
                     QString href;
                     const auto rel = pkg_.rels.constFind(relAttr(x, QLatin1String("id")));
-                    if (rel != pkg_.rels.constEnd() && hrefSchemeOk(rel->target)) href = rel->target;
+                    if (rel != pkg_.rels.constEnd()) href = safeWebHref(rel->target);
                     if (href.isEmpty()) { inner += QStringLiteral("<span>"); closers.push_back(QStringLiteral("</span>")); }
                     else {
                         inner += QStringLiteral("<a href=\"%1\">").arg(escapeHtml(href));
@@ -827,7 +846,10 @@ private:
         QString html;
         if (pp.pageBreakBefore && *pp.pageBreakBefore) html += QStringLiteral("<div class=\"pb\"></div>");
         html += QStringLiteral("<%1 style=\"%2\">%3</%1>").arg(tag, css.join(QLatin1Char(';')), inner);
-        return html + after;
+        html += after;
+        emitted_ += html.size();
+        if (emitted_ > kOutputBudget) truncated = true;
+        return html;
     }
 
     QString run(X& x, QString& after) {
@@ -835,6 +857,7 @@ private:
         QString content;
         while (x.readNextStartElement()) {
             const auto n = x.name();
+            if (content.size() > kInlineBudget) { truncated = true; x.skipCurrentElement(); continue; }
             if (n == QLatin1String("rPr")) { parseRPr(x, direct, pkg_.majorFont, pkg_.minorFont); continue; }
             if (n == QLatin1String("t")) {
                 content += escapeHtml(x.readElementText(X::SkipChildElements));
@@ -901,7 +924,7 @@ private:
                 const auto n = x.name();
                 if (n == QLatin1String("txbxContent")) {
                     if (++boxDepth_ <= 4) after += QStringLiteral("<div class=\"txbx\">") + blocks(x) + QStringLiteral("</div>");
-                    else x.skipCurrentElement();
+                    else { omitted = true; x.skipCurrentElement(); }
                     --boxDepth_;
                     continue;
                 }
@@ -987,7 +1010,7 @@ private:
     }
 
     QString table(X& x) {
-        if (++tableDepth_ > 6) { x.skipCurrentElement(); --tableDepth_; return {}; }
+        if (++tableDepth_ > 6) { omitted = true; x.skipCurrentElement(); --tableDepth_; return {}; }
         std::optional<bool> borders;
         QString styleId, jc;
         std::vector<double> grid;
@@ -1027,7 +1050,8 @@ private:
                 std::vector<Cell> row;
                 int gridCol = 0;
                 while (x.readNextStartElement()) {
-                    if (x.name() != QLatin1String("tc") || row.size() >= 256) { x.skipCurrentElement(); continue; }
+                    if (x.name() != QLatin1String("tc")) { x.skipCurrentElement(); continue; }
+                    if (row.size() >= 256) { omitted = true; x.skipCurrentElement(); continue; }
                     Cell cell;
                     cell.html = blocks(x, &cell);
                     cell.gridCol = gridCol;
@@ -1157,7 +1181,15 @@ QString DocxDoc::htmlPreviewPath(const QString& docxPath) const {
             docxPath.toUtf8(), QCryptographicHash::Sha1).toHex().left(16)));
     const QString htmlOut = dir + QStringLiteral("/index.html");
 
-    // Reap week-old stages (the temp dir is never purged on Windows).
+    {
+        QFile st(dir + QStringLiteral("/.stamp"));
+        if (st.open(QIODevice::ReadOnly) && QString::fromUtf8(st.readAll()) == stamp
+            && QFileInfo::exists(htmlOut))
+            return htmlOut;
+    }
+    // Rendering for real (not a cache hit): reap week-old stages first —
+    // the temp dir is never purged on Windows. Kept off the fast path: it
+    // lists the whole temp dir.
     {
         const QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(-7);
         for (const QFileInfo& d : QDir(tmpRoot).entryInfoList({QStringLiteral("ufb-docx-*")},
@@ -1167,12 +1199,6 @@ QString DocxDoc::htmlPreviewPath(const QString& docxPath) const {
             if (!st.exists() || st.lastModified() < cutoff)
                 QDir(d.absoluteFilePath()).removeRecursively();
         }
-    }
-    {
-        QFile st(dir + QStringLiteral("/.stamp"));
-        if (st.open(QIODevice::ReadOnly) && QString::fromUtf8(st.readAll()) == stamp
-            && QFileInfo::exists(htmlOut))
-            return htmlOut;
     }
     QDir(dir).removeRecursively();
     if (!QDir().mkpath(dir + QStringLiteral("/media"))) return {};
@@ -1226,6 +1252,8 @@ QString DocxDoc::htmlPreviewPath(const QString& docxPath) const {
     if (!sawBody) return fail();   // a zip, but not a word document
     if (r.truncated)
         body += QStringLiteral("<div class=\"trunc\">Preview truncated — open the document to see the rest.</div>");
+    else if (r.omitted)
+        body += QStringLiteral("<div class=\"trunc\">Some deeply nested content is not shown in this preview.</div>");
 
     const PageGeom& pg = r.page;
     const double pageW = std::clamp(pg.w / 15.0, 320.0, 2400.0);
@@ -1244,8 +1272,10 @@ QString DocxDoc::htmlPreviewPath(const QString& docxPath) const {
 
     QFile f(htmlOut);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return fail();
-    f.write(html.toUtf8());
+    const QByteArray bytes = html.toUtf8();
+    const bool wrote = f.write(bytes) == bytes.size();
     f.close();
+    if (!wrote) return fail();   // disk full: never stamp a torn page as fresh
     QFile st(dir + QStringLiteral("/.stamp"));
     if (st.open(QIODevice::WriteOnly | QIODevice::Truncate)) st.write(stamp.toUtf8());
     return htmlOut;

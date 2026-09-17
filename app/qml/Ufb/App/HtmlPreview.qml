@@ -26,6 +26,13 @@ Item {
 
     property string source: ""
 
+    // Schemes a clicked link may be handed to the OS with; [] = any (the
+    // long-standing behaviour for .html and minNotes previews). Handing
+    // a file: URL to the OS LAUNCHES that file, so a route rendering
+    // documents from outside the team (Word files) narrows this to the
+    // web — the backstop behind the renderer's own href allowlist.
+    property var externalSchemes: []
+
     // file:// URL via the shared sanitizer (drive letters, UNC, POSIX).
     // Hand-building "file://" + path breaks on Windows: the drive
     // letter parses as the URL host. "" = no safe URL form.
@@ -151,7 +158,13 @@ Item {
                         && request.navigationType
                         !== WebEngineNavigationRequest.ReloadNavigation) {
                     request.reject()
-                    Qt.openUrlExternally(request.url)
+                    var m = /^([a-z][a-z0-9+.-]*):/i.exec(request.url.toString())
+                    var scheme = m ? m[1].toLowerCase() : ""
+                    if (root.externalSchemes.length === 0
+                            || root.externalSchemes.indexOf(scheme) >= 0)
+                        Qt.openUrlExternally(request.url)
+                    else
+                        console.warn("HtmlPreview: blocked link to", scheme + ":")
                 }
             }
         }

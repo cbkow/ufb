@@ -852,7 +852,16 @@ pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String
             if full_path.exists() {
                 continue;
             }
-            write_minnotes_document(&full_path)?;
+            if let Err(e) = write_minnotes_document(&full_path) {
+                // Never leave a torn file behind: it would hold the
+                // date-letter slot and minNotes refuses it ("isn't a
+                // minNotes document").
+                let _ = std::fs::remove_file(&full_path);
+                let mut journal = full_path.clone().into_os_string();
+                journal.push("-journal");
+                let _ = std::fs::remove_file(journal);
+                return Err(e);
+            }
             return Ok(full_path.to_string_lossy().into_owned());
         }
     }
@@ -910,6 +919,7 @@ fn write_minnotes_document(path: &Path) -> Result<(), String> {
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys=ON;
+        BEGIN;
         CREATE TABLE IF NOT EXISTS blocks (
             id       TEXT PRIMARY KEY,
             rank     TEXT NOT NULL,
@@ -966,6 +976,10 @@ fn write_minnotes_document(path: &Path) -> Result<(), String> {
     )
     .map_err(|e| format!("seed block {:?}: {}", path, e))?;
 
+    // One transaction for schema + stamp + seed: one journal round trip
+    // on a share instead of one per statement, and all-or-nothing.
+    conn.execute_batch("COMMIT")
+        .map_err(|e| format!("commit {:?}: {}", path, e))?;
     conn.close().map_err(|(_, e)| format!("close {:?}: {}", path, e))?;
     Ok(())
 }

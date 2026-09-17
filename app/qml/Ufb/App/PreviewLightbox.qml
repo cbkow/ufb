@@ -239,7 +239,11 @@ Item {
         // A white sheet (the document's own page width, 816 px for
         // Letter) centered on a dark canvas — room for the sheet, its
         // gutters and the scrollbar.
-        HtmlPreview { source: root._docxHtml; maxViewWidth: 1100 }
+        HtmlPreview {
+            source: root._docxHtml
+            maxViewWidth: 1100
+            externalSchemes: ["http", "https", "mailto"]
+        }
     }
 
     Component {

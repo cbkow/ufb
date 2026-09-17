@@ -1529,24 +1529,21 @@ QString gridTableHtml(RenderCtx& ctx, const std::vector<Row>& rows,
                                   1, int(recs.size()));
     int cols = std::min<int>(int(spec.size()), 64);
 
-    // Column = the stored cell index (ragged rows keep their gaps); a
-    // revisited column becomes the next one, as the app's repair does.
+    // Column = the run's order of appearance in its row — the app's load
+    // repair (planStructure) renumbers table rows that way too, so a gap
+    // or a revisited index on disk is simply the next column. (The app
+    // never writes gaps: it fills a row's cells up to the last one.)
     std::vector<std::vector<CellRun>> cells(recs.size());
     for (size_t r = 0; r < recs.size(); ++r) {
         int prevRaw = -2;
         for (size_t j = recs[r].first + 1; j < recs[r].second; ++j) {
-            const int raw = rows[j].cell;
-            if (raw != prevRaw) {
-                int col = std::clamp(raw, 0, 63);
-                if (!cells[r].empty() && col <= cells[r].back().col)
-                    col = std::min(cells[r].back().col + 1, 63);
-                if (cells[r].empty() || col != cells[r].back().col)
-                    cells[r].push_back({col, j, j});
-                prevRaw = raw;
+            if (rows[j].cell != prevRaw && cells[r].size() < 64) {
+                prevRaw = rows[j].cell;
+                cells[r].push_back({int(cells[r].size()), j, j});
             }
             cells[r].back().b = j + 1;
-            cols = std::max(cols, cells[r].back().col + 1);
         }
+        cols = std::max(cols, int(cells[r].size()));
     }
     cols = std::clamp(cols, 1, 64);
     auto colSpec = [&](int c) { return c < spec.size() ? spec.at(c).toObject() : QJsonObject(); };
@@ -1574,17 +1571,33 @@ QString gridTableHtml(RenderCtx& ctx, const std::vector<Row>& rows,
     }();
     std::vector<double> widest(size_t(cols), 0.0), width(size_t(cols), 0.0), colX(size_t(cols), 0.0);
     std::vector<char> measurable(size_t(cols), 0);
-    for (size_t r = 0; r < recs.size(); ++r)
+    // Text measurement is the expensive part and runs on the GUI thread:
+    // skip columns whose answer is already known (authored width, or
+    // already at the 360 clamp), look at a block's first lines only, and
+    // stop at a per-table budget — unmeasured columns fall back to 160.
+    // (50k long cells took 18–37 s unbounded.)
+    std::vector<char> authored(size_t(cols), 0);
+    for (int c = 0; c < cols; ++c)
+        authored[size_t(c)] = colSpec(c).value(QStringLiteral("w")).toInt(0) > 0;
+    constexpr double kWidestUseful = 360.0 - (2 * kCellInset + 6);
+    int measureBudget = 20000;
+    for (size_t r = 0; r < recs.size() && measureBudget > 0; ++r)
         for (const CellRun& cr : cells[r]) {
-            if (cr.col >= cols) continue;
-            for (size_t j = cr.a; j < cr.b; ++j) {
+            if (cr.col >= cols || authored[size_t(cr.col)]
+                || widest[size_t(cr.col)] >= kWidestUseful)
+                continue;
+            for (size_t j = cr.a; j < cr.b && measureBudget > 0; ++j) {
                 const Row& b = rows[j];
                 if (b.type == QLatin1String("media") || b.type == QLatin1String("divider")
                     || b.content.isEmpty())
                     continue;
+                --measureBudget;
                 double w = 0.0;
-                for (const QString& ln : b.content.left(2000).split(QLatin1Char('\n')))
-                    w = std::max(w, fm.horizontalAdvance(ln));
+                int lines = 0;
+                for (const QString& ln : b.content.left(2000).split(QLatin1Char('\n'))) {
+                    w = std::max(w, fm.horizontalAdvance(ln.left(200)));
+                    if (++lines >= 16) break;
+                }
                 widest[size_t(cr.col)] = std::max(widest[size_t(cr.col)],
                                                   std::round(w) + (r == 0 ? 18.0 : 0.0));
                 measurable[size_t(cr.col)] = 1;
@@ -1630,8 +1643,12 @@ QString gridTableHtml(RenderCtx& ctx, const std::vector<Row>& rows,
     auto colorAt = [](const QJsonArray& arr, int i) {
         return i < arr.size() ? arr.at(i).toString() : QString();
     };
+    // rows × columns is doc-controlled (one stray far cell widens every
+    // row): past the budget the remaining rows are cut, with a note.
+    constexpr size_t kCellBudget = 250000;
+    const size_t rowLimit = std::max<size_t>(size_t(header), kCellBudget / size_t(cols));
     bool inBody = false;
-    for (size_t r = 0; r < recs.size(); ++r) {
+    for (size_t r = 0; r < recs.size() && r < rowLimit; ++r) {
         const Row& rec = rows[recs[r].first];
         const bool isHeader = int(r) < header;
         if (!isHeader && !inBody) { out += QStringLiteral("</thead><tbody>"); inBody = true; }
@@ -1694,7 +1711,11 @@ QString gridTableHtml(RenderCtx& ctx, const std::vector<Row>& rows,
         out += QStringLiteral("</tr>");
     }
     out += inBody ? QStringLiteral("</tbody>") : QStringLiteral("</thead>");
-    return out + QStringLiteral("</table></div>");
+    out += QStringLiteral("</table>");
+    if (recs.size() > rowLimit)
+        out += QStringLiteral("<p class=\"cut\">%1 more rows not shown in this preview.</p>")
+                   .arg(recs.size() - rowLimit);
+    return out + QStringLiteral("</div>");
 }
 
 // The document walk: top-level blocks, layout split rows, derived tables.
@@ -1713,12 +1734,13 @@ QString renderRows(RenderCtx& ctx, const std::vector<Row>& rows) {
     size_t i = 0;
     while (i < n) {
         if (!rows[i].isSplit()) { top.add(rows[i]); ++i; continue; }
+        if (childrenEnd(i) == i + 1) { ++i; continue; }   // childless: the app drops it
         if (headerOf(i) > 0) {
             std::vector<std::pair<size_t, size_t>> recs;
             size_t k = i;
             do {
                 const size_t e = childrenEnd(k);
-                recs.push_back({k, e});
+                if (e > k + 1) recs.push_back({k, e});    // (childless row: dropped)
                 k = e;
             } while (k < n && rows[k].isSplit() && headerOf(k) <= 0);
             top.raw(gridTableHtml(ctx, rows, recs));
@@ -1811,6 +1833,7 @@ const char* kCss =
     ".gridwrap p+p{margin-top:12px}"
     ".gridwrap img:not(.ink){max-width:100%}"
     ".gridwrap .cb{margin-right:0}"
+    ".cut{color:var(--muted);font-size:13px}"
     // Split rows: a flex row of lanes at the record's ratios, 24 px gaps.
     ".lanes{display:flex;gap:24px;align-items:flex-start;position:relative}"
     ".lane{min-width:0}"
@@ -1946,6 +1969,7 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
             if (q.exec(QStringLiteral(
                     "SELECT id, type, attrs, content, depth FROM blocks ORDER BY rank"))) {
                 ok = true;
+                bool cut = false;
                 std::vector<Row> rows;
                 while (q.next()) {
                     Row r;
@@ -1957,8 +1981,13 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                     const QJsonValue cell = r.attrs.value(QStringLiteral("cell"));
                     if (cell.isDouble()) r.cell = std::clamp(cell.toInt(-1), -1, 63);
                     rows.push_back(std::move(r));
+                    // The list is held whole (look-ahead); bound it. Real
+                    // documents run to tens of thousands of blocks.
+                    if (rows.size() >= 300000) { cut = true; break; }
                 }
                 body = renderRows(ctx, rows);
+                if (cut)
+                    body += QStringLiteral("<p class=\"cut\">Preview truncated — open the document to see the rest.</p>");
             }
 
             if (!cc.order.isEmpty()) {
