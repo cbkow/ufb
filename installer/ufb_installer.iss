@@ -144,7 +144,7 @@ Source: "{#ReleaseDir}\tls\*";              DestDir: "{app}\tls";              F
 Source: "{#ReleaseDir}\sqldrivers\*";       DestDir: "{app}\sqldrivers";       Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\generic\*";          DestDir: "{app}\generic";          Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\translations\*";     DestDir: "{app}\translations";     Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
-; Qt WebEngine (rendered HTML/.mndb lightbox preview, 1.1.0+). The
+; Qt WebEngine (rendered HTML / minNotes / .docx lightbox previews). The
 ; Chromium renderer runs as a separate process and reads its .pak
 ; bundles + icudtl.dat from resources\. Its locales land under
 ; translations\qtwebengine_locales\ (covered by the translations line

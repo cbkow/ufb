@@ -813,7 +813,7 @@ pub fn create_date_prefixed_item(parent: &str, base_name: &str) -> Result<String
 }
 
 /// Create a date-prefixed minNotes note. Format:
-/// `{YYMMDD}{letter}_{base_name}.mndb` — the same shared a–z slot
+/// `{YYMMDD}{letter}_{base_name}.mnd` — the same shared a–z slot
 /// walk as [`create_date_prefixed_item`], with two differences:
 /// the result is a file rather than a directory, and the slot scan
 /// counts every entry (files AND folders) with today's prefix so a
@@ -823,8 +823,9 @@ pub fn create_date_prefixed_item(parent: &str, base_name: &str) -> Result<String
 /// minNotes only seeds a first block for documents it creates itself
 /// (`BlockModel::newDocument` → `seedEmptyDoc`), so an empty file gave
 /// it nothing to put a cursor in and the note never opened. This writes
-/// what minNotes' own new-document path writes — the v3 schema, a
-/// stamped `doc_meta` row, and one empty paragraph block — as a plain
+/// what minNotes' own new-document path writes — the `.mnd` schema, a
+/// stamped `doc_meta` row (format marker included — minNotes 1.0+
+/// refuses a file without it), and one empty paragraph block — as a plain
 /// rollback-journal SQLite file (minNotes normalises saves to that
 /// form; it never runs SQLite on the share itself, it stages a copy).
 ///
@@ -846,7 +847,7 @@ pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String
     for c in 'a'..='z' {
         let prefix = format!("{}{}", today, c);
         if !existing.iter().any(|n| n.starts_with(&prefix)) {
-            let file_name = format!("{}_{}.mndb", prefix, base_name);
+            let file_name = format!("{}_{}.mnd", prefix, base_name);
             let full_path = parent_path.join(&file_name);
             if full_path.exists() {
                 continue;
@@ -863,8 +864,14 @@ pub fn create_date_prefixed_note(parent: &str, base_name: &str) -> Result<String
 }
 
 /// minNotes document format version this writer produces
-/// (`Document::kSchemaVersion` in the minNotes repo).
-const MINNOTES_SCHEMA_VERSION: i64 = 3;
+/// (`Document::kSchemaVersion` in the minNotes repo). The numbering
+/// restarted at 1 with the 1.0 `.mnd` clean break.
+const MINNOTES_SCHEMA_VERSION: i64 = 1;
+
+/// `doc_meta.format` marker (`Document::kFormat`). minNotes 1.0+ opens
+/// only files stamped with it (`BlockModel::acceptOpenedFormat`); a
+/// file without it is refused as "made with an earlier minNotes".
+const MINNOTES_FORMAT: &str = "mnd";
 
 /// ULID (48-bit ms timestamp + 80 random bits, Crockford base32, 26
 /// chars) — the block-id shape minNotes' `makeUlid()` produces, so ids
@@ -918,7 +925,7 @@ fn write_minnotes_document(path: &Path) -> Result<(), String> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             title TEXT, schema_version INTEGER, app_version TEXT,
             created INTEGER, modified INTEGER, last_cursor TEXT,
-            page_width INTEGER
+            page_width INTEGER, format TEXT
         );
         CREATE TABLE IF NOT EXISTS block_ink (
             block_id TEXT PRIMARY KEY REFERENCES blocks(id) ON DELETE CASCADE,
@@ -944,8 +951,8 @@ fn write_minnotes_document(path: &Path) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
     let app_version = format!("ufb {}", crate::version());
     conn.execute(
-        "INSERT INTO doc_meta (id, schema_version, app_version, created, modified)          VALUES (1, ?1, ?2, ?3, ?3)",
-        params![MINNOTES_SCHEMA_VERSION, app_version, now],
+        "INSERT INTO doc_meta (id, schema_version, app_version, created, modified, format)          VALUES (1, ?1, ?2, ?3, ?3, ?4)",
+        params![MINNOTES_SCHEMA_VERSION, app_version, now, MINNOTES_FORMAT],
     )
     .map_err(|e| format!("doc_meta {:?}: {}", path, e))?;
 

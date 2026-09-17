@@ -228,7 +228,7 @@ Rectangle {
     property bool allowOpenInMainBrowser: false
 
     /// Adds "Add Note…" to the background context menu — creates a
-    /// date-prefixed `.mndb` minNotes document (schema + one empty
+    /// date-prefixed `.mnd` minNotes document (schema + one empty
     /// paragraph, so minNotes opens it) via
     /// FileOps.create_date_prefixed_note and opens it in the default
     /// app. On only for the notes tab's browser (FolderTabView gates
@@ -1455,7 +1455,7 @@ Rectangle {
         ColumnLayout {
             spacing: 8
             Label {
-                text: qsTr("Create note in:\n%1\n\nFinal name will be %2{a-z}_<name>.mndb")
+                text: qsTr("Create note in:\n%1\n\nFinal name will be %2{a-z}_<name>.mnd")
                     .arg(addNoteDialog.parentPath)
                     .arg(root._formatYYMMDD(new Date()))
                 color: Theme.colors.textMuted
@@ -1478,7 +1478,7 @@ Rectangle {
                 return
             }
             refreshAfterDropTimer.restart()
-            // Hand the new note to the default .mndb handler (minNotes
+            // Hand the new note to the default .mnd handler (minNotes
             // registers the extension; without it this is an OS shrug).
             FileOps.open_file(newPath)
         }

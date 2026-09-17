@@ -326,7 +326,7 @@ Item {
                 // Column widths persist per FOLDER via the shared
                 // browser_folder_prefs memory (see FileBrowser) — the
                 // per-pane settingsPaneKey system is retired.
-                // "Add Note…" (date-prefixed .mndb file) only in the
+                // "Add Note…" (date-prefixed .mnd file) only in the
                 // docs/notes tab. Mode C never applies — both are
                 // flat folders, so they always render as Mode B.
                 allowAddNote: {

@@ -44,12 +44,22 @@ Item {
         && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
     // minNotes documents: MndbDoc reads the SQLite block list and emits
     // a temp HTML render; "" (unreadable/corrupt) falls through to the
-    // file icon. WebEngine-only route, like _isHtml. .mnpkg packages
-    // (zip: document.mndb + media/) are staged to a temp dir first.
-    readonly property string _mndbHtml: ((_ext === "mndb" || _ext === "mnpkg")
+    // file icon. WebEngine-only route, like _isHtml. .mnd = minNotes
+    // 1.0+, .mndb = the pre-1.0 extension (still in job folders; minNotes
+    // refuses them now, so this preview is how they stay readable).
+    // .mnpkg packages (zip: document.mnd + media/) stage to a temp dir.
+    readonly property string _mndbHtml: ((_ext === "mnd" || _ext === "mndb" || _ext === "mnpkg")
         && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
         && currentPath.length > 0) ? MndbDoc.htmlPreviewPath(currentPath) : ""
     readonly property bool _isMndb: _mndbHtml.length > 0
+    // Word documents: DocxDoc renders the OOXML to a staged HTML page
+    // (same WebEngine route). Without it a .docx is only the OS shell
+    // thumbnail — QuickLook's page 1 on macOS, and on Windows nothing at
+    // all unless Word embedded a thumbnail. "" → falls through to that.
+    readonly property string _docxHtml: ((_ext === "docx" || _ext === "docm" || _ext === "dotx")
+        && typeof _webEngineAvailable !== "undefined" && _webEngineAvailable
+        && currentPath.length > 0) ? DocxDoc.htmlPreviewPath(currentPath) : ""
+    readonly property bool _isDocx: _docxHtml.length > 0
     // Text routing lives in C++ (TextInfo.isText): known text/code exts,
     // plus a bounded content sniff so extensionless files (README,
     // .gitignore, renamed logs) preview instead of icon-ing. The guards
@@ -178,6 +188,7 @@ Item {
                          : root._isPdf  ? pdfComp
                          : root._isHtml ? htmlComp
                          : root._isMndb ? mndbComp
+                         : root._isDocx ? docxComp
                          : root._isText ? textComp
                                         : stillComp
     }
@@ -221,6 +232,14 @@ Item {
         // 1600) on a full-bleed canvas, so a wider view shows canvas, not
         // a hole — let it breathe past the 940 export-letterbox cap.
         HtmlPreview { source: root._mndbHtml; maxViewWidth: 1440 }
+    }
+
+    Component {
+        id: docxComp
+        // A white sheet (the document's own page width, 816 px for
+        // Letter) centered on a dark canvas — room for the sheet, its
+        // gutters and the scrollbar.
+        HtmlPreview { source: root._docxHtml; maxViewWidth: 1100 }
     }
 
     Component {

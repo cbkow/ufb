@@ -268,7 +268,7 @@ pub mod qobject {
         ) -> QString;
 
         /// Create a date-prefixed note FILE using the same
-        /// `YYMMDD<letter>_<name>` slot walk, but with a `.mndb`
+        /// `YYMMDD<letter>_<name>` slot walk, but with a `.mnd`
         /// extension — a real minNotes document (schema + seed block). Returns
         /// the new path or "" on error.
         #[qinvokable]

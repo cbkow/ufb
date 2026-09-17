@@ -1,5 +1,6 @@
 //! `create_date_prefixed_note` must produce a document minNotes can open:
-//! the v3 schema, a stamped doc_meta row, and one empty paragraph block
+//! the .mnd schema, a doc_meta row stamped with the format marker (minNotes
+//! 1.0+ refuses a file without it), and one empty paragraph block
 //! with a 26-char ULID id and the initial rank "V".
 
 use rusqlite::Connection;
@@ -11,7 +12,7 @@ fn note_is_a_real_minnotes_document() {
 
     let path = ufb_core::file_ops::create_date_prefixed_note(dir.to_str().unwrap(), "test")
         .expect("note created");
-    assert!(path.ends_with("_test.mndb"), "{path}");
+    assert!(path.ends_with("_test.mnd"), "{path}");
 
     let conn = Connection::open(&path).unwrap();
     let tables: Vec<String> = conn
@@ -25,12 +26,15 @@ fn note_is_a_real_minnotes_document() {
         assert!(tables.iter().any(|x| x == t), "missing table {t}: {tables:?}");
     }
 
-    let (schema, app): (i64, String) = conn
-        .query_row("SELECT schema_version, app_version FROM doc_meta WHERE id=1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let (schema, app, format): (i64, String, String) = conn
+        .query_row(
+            "SELECT schema_version, app_version, format FROM doc_meta WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .unwrap();
-    assert_eq!(schema, 3);
+    assert_eq!(schema, 1);
+    assert_eq!(format, "mnd");
     assert!(app.starts_with("ufb "), "{app}");
 
     let (id, rank, ty, content): (String, String, String, String) = conn

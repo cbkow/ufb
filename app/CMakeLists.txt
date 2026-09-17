@@ -94,10 +94,13 @@ qt_add_qml_module(ufb
         TextInfo.h
         MediaInfo.cpp
         MediaInfo.h
+        DocxDoc.cpp
+        DocxDoc.h
         MndbDoc.cpp
         MndbDoc.h
-        # miniz: zip reader for .mnpkg packages (MndbDoc staging); vendored
-        # single-file amalgamation, same copy minNotes ships (external/miniz).
+        # miniz: zip reader for .mnpkg packages (MndbDoc staging) and .docx
+        # (DocxDoc); vendored single-file amalgamation, same copy minNotes
+        # ships (external/miniz).
         ${CMAKE_SOURCE_DIR}/external/miniz/miniz.c
     QML_FILES
         qml/Ufb/App/Main.qml

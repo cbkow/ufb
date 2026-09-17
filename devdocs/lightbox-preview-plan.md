@@ -352,6 +352,59 @@ minimal — these are decode/audio-layer units).
 
 Append newest entries at the top. Each milestone updates this as part of its commit.
 
+### 2026-09-17 — minNotes 1.0 (`.mnd`) catch-up + Word (`.docx`) preview (macOS session; Windows unbuilt)
+
+**minNotes 1.0 clean break** (minNotes c4de6c4, verified against 2eb969a /
+v1.0.2). Documents are `.mnd`; `doc_meta` gains `format = "mnd"` and
+`schema_version` restarts at 1; minNotes refuses any file without the marker;
+packages are format v2 with `document.mnd` inside. The SQLite schema is
+otherwise unchanged — but the **`table` block is gone**: tables and layout
+columns are now runs of `split` records followed by `attrs.cell = k` blocks
+(tables derive from a record with `attrs.header >= 1`; styling in
+`attrs.table`). Against the old contract a 1.0 table rendered as thousands of
+loose paragraphs.
+- **Add Note** (`core/src/file_ops.rs`) wrote a schema-3, marker-less `.mndb` —
+  a file minNotes 1.0 refuses. Now writes `.mnd`, schema 1, `format = "mnd"`
+  (`core/tests/minnotes_note.rs` asserts it).
+- **`MndbDoc`** reads `.mnd` + `.mndb` + `.mnpkg` (either db entry name) and
+  never gates on format/version. New: `BlockRun` (per-container block emitter),
+  `lanesHtml` (flex lanes at the record's ratios), `gridTableHtml` (the app's
+  px column geometry, header rows, cell → row → column colors, choice chips,
+  check boxes, ragged rows), ink anchored to split records (first cell / lanes
+  div, 32 px pocket lift on a table's first row), media fitted to lane/cell.
+  The pre-1.0 grid-JSON `table` renderer stays: every `.mndb` in a job folder
+  still needs it, and this preview is now the only thing that reads them.
+- Verified with the standalone harness (recipe in the 1.1.3 notes: moc + clang
+  link, headless Chrome screenshot) on real 1.0 docs (8,000 blocks / 608 table
+  rows in 117 ms), a legacy `.mndb`, and a fabricated doc covering lanes, typed
+  columns and the load-repair cases.
+
+**`.docx` preview — why it "didn't work on Windows".** There never was a docx
+renderer: docx routed to `ImagePreview`, whose fallback is the OS shell
+thumbnail. macOS QuickLook renders page 1 of any docx; the Windows shell
+handler returns only the thumbnail Word embeds when "Save Thumbnail" is ticked
+(and only with Office installed), so Windows showed the file icon. Fix is
+cross-platform: **`app/DocxDoc.{h,cpp}`** renders OOXML → a staged HTML page
+(`$TMP/ufb-docx-<sha>/index.html` + `media/`, stamped size:mtime:rev, reaped
+after a week) through the same `HtmlPreview` WebEngine route as `.mnpkg`.
+miniz + `QXmlStreamReader` only — no new dependency. Scope and the hardening
+properties (escape everything, QColor colors, allowlisted fonts/hrefs, no
+external relationship fetches, capped entries, our own staged file names) are
+in the header. `.docx/.docm/.dotx`; without WebEngine the old thumbnail path
+still applies. xlsx/pptx remain thumbnail-only.
+- Bump `kRendererRev` in `DocxDoc.cpp` whenever its output changes, or fresh
+  stages keep serving the old HTML.
+- Found on the way: minNotes' own `.docx` export writes `<w:tableCol>` in
+  `tblGrid` where OOXML wants `<w:gridCol>` (UFB reads both, and falls back
+  to the cells' `tcW`; worth fixing in minNotes — how strict Word is about it
+  was not checked).
+
+**Windows session — to do:** build (first MSVC compile of `DocxDoc.cpp`; it
+uses only QtCore/QtGui + the already-vendored miniz), then in the lightbox:
+a `.docx` with tables + images, a 1.0 `.mnd` with a table, an old `.mndb`, an
+`.mnpkg`; **Add Note** in a job's docs tab → opens in minNotes 1.0+. Paths
+with non-ASCII characters exercise miniz's `_wfopen_s` branch for docx too.
+
 ### 2026-09-10 — macOS session: 1.2.0 verified on Mac + audio servo carry fix
 Followed `devdocs/macos-session-primer-2026-09-10.md`. FFmpeg 9.0.1 rebuilt
 from source (`rm -rf external/ffmpeg /tmp/ufb-ffmpeg-build` first — the

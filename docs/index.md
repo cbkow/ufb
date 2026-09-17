@@ -15,7 +15,8 @@ visual-effects and post-production workflows — on macOS and Windows.
   HDR, PDF, AI, and video, rendered directly from C++ decoders, with a
   persistent thumbnail cache.
 - **Spacebar preview** — a QuickLook-style lightbox for images, video,
-  PDFs, and text, including an EXR layer grid, without leaving the app.
+  PDFs, text, HTML, Word documents, and minNotes notes, including an EXR
+  layer grid, without leaving the app.
 - **Mount NAS shares** — SMB mounts with credentials in the OS
   keychain/credential store, plus a user-mode VFS for synced project
   folders (WinFsp on Windows, NFS loopback on macOS).

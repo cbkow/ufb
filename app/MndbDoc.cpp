@@ -847,8 +847,11 @@ QString referenceFigure(const QJsonObject& o, const QString& kind,
                                        : kindLabel + QStringLiteral(" · ") + meta.join(QStringLiteral(" · "))));
 }
 
+// `fit`: the block sits in a split-row lane or a table cell — `pageWidth`
+// is then that container's width and nothing may exceed it (the app fits
+// media to its lane / its column minus the cell inset).
 QString mediaHtml(const QString& content, const QString& docDir,
-                  const InkAnchor& ink, int pageWidth) {
+                  const InkAnchor& ink, int pageWidth, bool fit = false) {
     const QJsonObject o = QJsonDocument::fromJson(content.toUtf8()).object();
     const QString kind = o.value(QStringLiteral("kind")).toString();
 
@@ -860,7 +863,8 @@ QString mediaHtml(const QString& content, const QString& docDir,
         const QString src = dataUri(renderSketch(o, docDir));
         if (!src.isEmpty()) {
             const int dw = o.value(QStringLiteral("dw")).toInt(0);
-            const int shown = std::clamp(dw > 0 ? dw : pageWidth, 1, 65535);
+            int shown = std::clamp(dw > 0 ? dw : pageWidth, 1, 65535);
+            if (fit) shown = std::min(shown, std::max(1, pageWidth));
             return QStringLiteral(
                 "<figure><img class=\"sketch\" src=\"%1\" alt=\"Sketch\" "
                 "style=\"width:%2px\"></figure>")
@@ -878,9 +882,9 @@ QString mediaHtml(const QString& content, const QString& docDir,
         // Honour the user-set display width (dw); untouched images stay
         // responsive via max-width:100%.
         const int dw = o.value(QStringLiteral("dw")).toInt(0);
-        const QString wstyle = dw > 0
-            ? QStringLiteral(" style=\"width:%1px;max-width:none\"").arg(std::min(dw, 65535))
-            : QString();
+        const QString wstyle = dw <= 0 ? QString()
+            : fit ? QStringLiteral(" style=\"width:%1px;max-width:100%\"").arg(std::min(dw, std::max(1, pageWidth)))
+                  : QStringLiteral(" style=\"width:%1px;max-width:none\"").arg(std::min(dw, 65535));
         const QString imgUrl =
             QUrl::fromLocalFile(abs).toString(QUrl::FullyEncoded);
         // Frame-space margin ink overlays the image (z-stack), rendered at
@@ -891,9 +895,10 @@ QString mediaHtml(const QString& content, const QString& docDir,
         const int iw = o.value(QStringLiteral("w")).toInt(0);
         const FrameInk fi = renderFrameInk(ink, iw, o.value(QStringLiteral("h")).toInt(0));
         if (!fi.img.isNull()) {
-            const QString wrapStyle = dw > 0
-                ? QStringLiteral(" style=\"width:%1px;max-width:none\"").arg(std::min(dw, 65535))
-                : QStringLiteral(" style=\"width:%1px;max-width:100%\"").arg(std::min(pageWidth, iw));
+            const QString wrapStyle = dw <= 0
+                ? QStringLiteral(" style=\"width:%1px;max-width:100%\"").arg(std::min(pageWidth, iw))
+                : fit ? QStringLiteral(" style=\"width:%1px;max-width:100%\"").arg(std::min(dw, std::max(1, pageWidth)))
+                      : QStringLiteral(" style=\"width:%1px;max-width:none\"").arg(std::min(dw, 65535));
             return QStringLiteral(
                 "<figure><div class=\"inkwrap\"%1><img src=\"%2\" alt=\"%3\" style=\"width:100%\">"
                 "<img class=\"ink\" src=\"%4\" alt=\"\"%5></div></figure>")
@@ -905,7 +910,11 @@ QString mediaHtml(const QString& content, const QString& docDir,
     return referenceFigure(o, kind, abs);
 }
 
-// ── Tables ─────────────────────────────────────────────────────────────
+// ── Legacy tables (.mndb, pre-1.0) ─────────────────────────────────────
+// A `table` block whose content is grid JSON. minNotes 1.0 (.mnd) stores
+// no such block — tables derive from split rows (see below) — but every
+// .mndb in a job folder still does, and minNotes itself refuses those
+// files now, so this preview is the one place they still read.
 // Grid JSON (TableGrid::toJson): {cols:N, header:H, w:[px|0], a:[0|1|2],
 // rbg/rfg/cbg/cfg:[hex|""], ct:{"<col>":{k:1|2,o:[{id,l,c}]}},
 // rows:[[cell…]]} where a cell is a bare string or {t,bg,fg,s,m,v}:
@@ -1117,10 +1126,11 @@ QString tableHtml(const QString& gridJson, const QString& docDir,
 
 // ── .mnpkg packages ────────────────────────────────────────────────────
 // minNotes' interchange package = a zip (vendored miniz reader) carrying
-// `document.mndb` (DEFLATE) + a `media/` tree (STORE, the doc's
+// `document.mnd` (format v2, minNotes 1.0+; `document.mndb` in the
+// pre-1.0 v1 packages, still staged) (DEFLATE) + a `media/` tree (STORE, the doc's
 // `.minnotes/` assets under a dot-free name) + manifest.json. The preview
 // stages it to a per-package temp dir laid out like an on-disk document
-// (document.mndb + .minnotes/<asset>) so the renderer is untouched:
+// (document.mnd + .minnotes/<asset>) so the renderer is untouched:
 // every ".minnotes/…" src resolves against the stage dir. Only media
 // the document actually references AND the renderer can show is
 // extracted (the db comes out first and is scanned for ".minnotes/…"
@@ -1150,7 +1160,8 @@ bool packageEntryWanted(const QString& rel, qint64 size) {
         QStringLiteral("mxf"), QStringLiteral("mts"), QStringLiteral("mp3"),
         QStringLiteral("wav"), QStringLiteral("aif"), QStringLiteral("aiff"),
         QStringLiteral("m4a"), QStringLiteral("flac"), QStringLiteral("pdf"),
-        QStringLiteral("zip"), QStringLiteral("mnpkg"), QStringLiteral("mndb")};
+        QStringLiteral("zip"), QStringLiteral("mnpkg"), QStringLiteral("mndb"),
+        QStringLiteral("mnd")};
     return !skip.contains(QFileInfo(rel).suffix().toLower());
 }
 
@@ -1163,7 +1174,7 @@ QString stagePackage(const QString& pkgPath) {
         + QStringLiteral("/ufb-mnpkg-%1")
               .arg(QString::fromLatin1(QCryptographicHash::hash(
                   pkgPath.toUtf8(), QCryptographicHash::Sha1).toHex().left(16)));
-    const QString dbOut = dir + QStringLiteral("/document.mndb");
+    const QString dbOut = dir + QStringLiteral("/document.mnd");
     // Reap stale stages (other packages, moved/deleted ones): anything
     // whose stamp is older than a week goes — the temp dir is otherwise
     // never purged on Windows.
@@ -1195,7 +1206,11 @@ QString stagePackage(const QString& pkgPath) {
 
     // Pass 1: the document itself (size-gated: a DEFLATE bomb posing as
     // the db must not inflate into the temp volume).
-    const int dbIdx = mz_zip_reader_locate_file(&zip, "document.mndb", nullptr, 0);
+    // Either generation stages under the one name. minNotes refuses a v1
+    // package (and any without a v2 manifest); a read-only preview has no
+    // reason to — the renderer below reads both block contracts.
+    int dbIdx = mz_zip_reader_locate_file(&zip, "document.mnd", nullptr, 0);
+    if (dbIdx < 0) dbIdx = mz_zip_reader_locate_file(&zip, "document.mndb", nullptr, 0);
     mz_zip_archive_file_stat dbSt;
     if (dbIdx < 0 || !mz_zip_reader_file_stat(&zip, mz_uint(dbIdx), &dbSt)
         || dbSt.m_uncomp_size > 256ULL * 1024 * 1024
@@ -1273,6 +1288,454 @@ QString commentStamp(qint64 t) {
     return dt.toString(QStringLiteral("yyyy-MM-dd hh:mm"));
 }
 
+// ── Block runs, split rows, derived tables (.mnd, minNotes 1.0+) ───────
+// The 1.0 contract (minNotes BlockModel.cpp planStructure / tableHeads /
+// buildTableGeom, Exporter.cpp; verified 2026-09-17 against minNotes
+// 2eb969a): structure is DFS-flat in rank order. A `split` record
+// (content '') is followed by its lane blocks, each carrying
+// attrs.cell = k; a block without `cell` is top level. A record's
+// attrs.ratios are the lane shares (24 px gaps).
+//
+// Tables are DERIVED, never stored: a record with attrs.header >= 1 is a
+// table's head (header = header-row count) and every record directly
+// below it is another row, until a top-level block or the next head.
+// cell = column. attrs.table carries the styling — on the head,
+// cols:[{w px|0 auto, a 0/1/2, k 0 text|1 choice|2 check|3 timecode,
+// o, fps, bg, fg}]; on any record, bg/fg and lane-indexed cbg/cfg
+// (cell → row → column). A typed body cell is one paragraph whose whole
+// text is a `choice` span; a check column draws the tri-state box from
+// its v ("1"/"2"; state 0 = empty cell). Ink may anchor to a record: px
+// space against the page with the table at the page's left edge, so it
+// rides inside the row's first cell (lifted by the 32 px pocket on a
+// table's first row) or the lanes div.
+
+struct Row {
+    QString id, type, content;
+    QJsonObject attrs;
+    int depth = 0;
+    int cell = -1;   // attrs.cell — lane / column index; -1 = top level
+    bool isSplit() const { return type == QLatin1String("split"); }
+};
+
+struct RenderCtx {
+    QString docDir;
+    int pageWidth = 760;
+    CommentCtx cc;
+    QHash<QString, QString> inkByBlock;
+};
+
+// Where a run of blocks lands: the page, a split-row lane or a table
+// cell. `x` is the container's left edge in page px (px ink is stored
+// against the page center, so a contained block subtracts it).
+struct Frame { double x = 0.0; int width = 760; bool fit = false; };
+
+constexpr double kLaneGap = 24.0;
+constexpr double kTablePocket = 32.0;
+constexpr double kCellInset = 8.0;
+
+QString textInkTag(const InkAnchor& ink, int pageWidth, double indent, double lift) {
+    const TextInk ti = renderTextInk(ink);
+    if (ti.img.isNull()) return {};
+    return QStringLiteral(
+        "<img class=\"ink\" style=\"position:absolute;left:%1px;"
+        "top:%2px;width:%3px;height:%4px;max-width:none;z-index:2\" src=\"%5\" alt=\"\">")
+        .arg(pageWidth / 2.0 + ti.box.left() - indent)
+        .arg(ti.box.top() - lift)
+        .arg(ti.box.width())
+        .arg(ti.box.height())
+        .arg(dataUri(ti.img));
+}
+
+QString recordInkTag(const RenderCtx& ctx, const Row& rec, double lift) {
+    InkAnchor ink;
+    parseInk(ctx.inkByBlock.value(rec.id), ink);
+    return textInkTag(ink, ctx.pageWidth, 0.0, lift);
+}
+
+// Consecutive blocks of one container → HTML, owning the list nesting
+// (real <ul>/<ol>, one open list per depth level — the minNotes export's
+// listStack; bullet↔ordered at the same depth closes and reopens).
+class BlockRun {
+public:
+    BlockRun(RenderCtx& ctx, Frame frame) : ctx_(ctx), frame_(frame) {}
+
+    void raw(const QString& html) { closeListsTo(0); out_ += html; }
+    QString take() { closeListsTo(0); QString o; o.swap(out_); return o; }
+
+    void add(const Row& row) {
+        const QString& type = row.type;
+        const QJsonObject& attrs = row.attrs;
+        const QString& content = row.content;
+        const bool isList = type == QLatin1String("list_item")
+            || type == QLatin1String("task_item")
+            || type == QLatin1String("ordered_item");
+        if (!isList) closeListsTo(0);
+
+        InkAnchor ink;
+        parseInk(ctx_.inkByBlock.value(row.id), ink);
+
+        const QJsonArray spans = attrs.value(QStringLiteral("spans")).toArray();
+        const auto inl = [&](const QString& t) { return richText(t, spans, ctx_.cc); };
+
+        double indent = 0.0;    // block's own left offset in page px
+        QString blk;
+        bool needsWrap = false; // pre/hr can't host ink children
+        if (type == QLatin1String("heading")) {
+            const int lv = qBound(1, attrs.value(QStringLiteral("level")).toInt(1), 6);
+            blk = QStringLiteral("<h%1>%2</h%1>").arg(lv).arg(inl(content));
+        } else if (type == QLatin1String("quote")) {
+            blk = QStringLiteral("<blockquote>%1</blockquote>").arg(inl(content));
+        } else if (type == QLatin1String("code")) {
+            // The app's language chip (open string domain: KSyntax
+            // definition names and legacy fence tags alike).
+            const QString lang = attrs.value(QStringLiteral("lang")).toString().trimmed();
+            const QString chip = lang.isEmpty()
+                ? QStringLiteral("<span class=\"lang plain\">plain</span>")
+                : QStringLiteral("<span class=\"lang\">%1</span>").arg(escapeHtml(lang.left(40)));
+            blk = QStringLiteral("<div class=\"blkw\">%1<pre><code>%2</code></pre></div>")
+                .arg(chip, escapeHtml(content));
+        } else if (type == QLatin1String("divider")) {
+            blk = QStringLiteral("<hr>");
+            needsWrap = true;
+        } else if (type == QLatin1String("table")) {
+            // Legacy (.mndb) grid-JSON table block.
+            blk = tableHtml(content, ctx_.docDir, ctx_.cc, ctx_.pageWidth);
+            needsWrap = true;   // .tablewrap scrolls (clips) — host ink outside it
+        } else if (type == QLatin1String("media")) {
+            blk = mediaHtml(content, ctx_.docDir, ink, frame_.width, frame_.fit);
+        } else if (type == QLatin1String("split")) {
+            return;             // records are structure; the document walk consumes them
+        } else if (isList) {
+            const int depth = std::clamp(row.depth, 0, 8);
+            const bool ordered = type == QLatin1String("ordered_item");
+            const QString tag = ordered ? QStringLiteral("ol") : QStringLiteral("ul");
+            const size_t want = size_t(depth) + 1;
+            closeListsTo(want);
+            if (listStack_.size() == want && listStack_.back() != tag)
+                closeListsTo(want - 1);
+            while (listStack_.size() < want) {
+                out_ += QStringLiteral("<%1>").arg(tag);
+                listStack_.push_back(tag);
+            }
+            QString li = inl(content);
+            if (type == QLatin1String("task_item")) {
+                const int st = std::clamp(attrs.value(QStringLiteral("state")).toInt(0), 0, 2);
+                if (st == 2)
+                    li = QStringLiteral("<span class=\"tdone\">%1</span>").arg(li);
+                li = taskGlyph(st) + li;
+            }
+            indent = 24.0 * double(depth + 1);
+            blk = (type == QLatin1String("task_item")
+                       ? QStringLiteral("<li class=\"task\">%1</li>")
+                       : QStringLiteral("<li>%1</li>")).arg(li);
+        } else {  // paragraph + unknown future types degrade to text
+            blk = content.isEmpty()
+                ? QStringLiteral("<p>&nbsp;</p>")
+                : QStringLiteral("<p>%1</p>").arg(inl(content));
+        }
+        // (Comment anchors are emitted by the span walk itself:
+        // tinted range + hover card + superscript link.)
+
+        // Text-anchored margin ink: absolutely positioned inside the
+        // (position:relative) block, X from the page center minus the
+        // block's own indent and its container's left edge.
+        const QString tag = textInkTag(ink, ctx_.pageWidth, indent + frame_.x, 0.0);
+        if (!tag.isEmpty())
+            blk = needsWrap ? QStringLiteral("<div class=\"blkw\">%1%2</div>").arg(blk, tag)
+                            : insertBeforeClose(blk, tag);
+        out_ += blk;
+    }
+
+private:
+    void closeListsTo(size_t n) {
+        while (listStack_.size() > n) {
+            out_ += QStringLiteral("</%1>").arg(listStack_.back());
+            listStack_.pop_back();
+        }
+    }
+    RenderCtx& ctx_;
+    Frame frame_;
+    QString out_;
+    std::vector<QString> listStack_;
+};
+
+// A layout split row: children [rec+1, end) grouped into lanes by runs
+// of equal `cell` (minNotes' load repair renumbers the same way — a gap
+// or a revisited lane is simply the next lane). "" = fewer than two
+// lanes: the record is dropped and the caller unwraps its blocks.
+QString lanesHtml(RenderCtx& ctx, const std::vector<Row>& rows, size_t rec, size_t end) {
+    std::vector<std::pair<size_t, size_t>> lanes;
+    int prev = -2;
+    for (size_t j = rec + 1; j < end; ++j) {
+        if (rows[j].cell != prev && lanes.size() < 64) {
+            prev = rows[j].cell;
+            lanes.push_back({j, j});
+        }
+        lanes.back().second = j + 1;
+    }
+    if (lanes.size() < 2) return {};
+
+    const size_t C = lanes.size();
+    std::vector<double> ratios;
+    const QJsonArray rj = rows[rec].attrs.value(QStringLiteral("ratios")).toArray();
+    double sum = 0.0;
+    if (size_t(rj.size()) == C)
+        for (const QJsonValue& v : rj) {
+            const double r = v.toDouble(0.0);
+            if (!std::isfinite(r) || r <= 0.0) { ratios.clear(); break; }
+            ratios.push_back(r);
+            sum += r;
+        }
+    if (ratios.size() != C || !(sum > 0.0)) { ratios.assign(C, 1.0); sum = double(C); }
+
+    const double inner = std::max(1.0, ctx.pageWidth - kLaneGap * double(C - 1));
+    QString html = QStringLiteral("<div class=\"lanes\">") + recordInkTag(ctx, rows[rec], 0.0);
+    double x = 0.0;
+    for (size_t k = 0; k < C; ++k) {
+        const double share = ratios[k] / sum;
+        const double w = share * inner;
+        BlockRun run(ctx, Frame{x, std::max(1, int(w)), true});
+        for (size_t j = lanes[k].first; j < lanes[k].second; ++j) run.add(rows[j]);
+        html += QStringLiteral("<div class=\"lane\" style=\"flex:%1 1 0\">%2</div>")
+                    .arg(std::max(1L, std::lround(share * 1000.0))).arg(run.take());
+        x += w + kLaneGap;
+    }
+    return html + QStringLiteral("</div>");
+}
+
+// Check-column state rides the cell paragraph's choice span ("1"/"2").
+int checkCellState(const Row& b) {
+    for (const QJsonValue& v : b.attrs.value(QStringLiteral("spans")).toArray()) {
+        const QJsonObject sp = v.toObject();
+        if (spanKindName(sp.value(QStringLiteral("k"))) != QLatin1String("choice")) continue;
+        const QJsonObject u = QJsonDocument::fromJson(
+            sp.value(QStringLiteral("u")).toString().toUtf8()).object();
+        return std::clamp(u.value(QStringLiteral("v")).toVariant().toInt(), 0, 2);
+    }
+    return 0;
+}
+
+// One derived table. `recs` = (record index, end of its children), head
+// first. Geometry is the app's buildTableGeom: px columns, authored width
+// else the widest text line at 14 px (+18 on the head record, +22,
+// clamped 48..360; 160 when nothing is measurable); no gaps.
+QString gridTableHtml(RenderCtx& ctx, const std::vector<Row>& rows,
+                      const std::vector<std::pair<size_t, size_t>>& recs) {
+    struct CellRun { int col; size_t a, b; };
+    const Row& head = rows[recs.front().first];
+    const QJsonArray spec = head.attrs.value(QStringLiteral("table")).toObject()
+                                .value(QStringLiteral("cols")).toArray();
+    const int header = std::clamp(head.attrs.value(QStringLiteral("header")).toInt(1),
+                                  1, int(recs.size()));
+    int cols = std::min<int>(int(spec.size()), 64);
+
+    // Column = the stored cell index (ragged rows keep their gaps); a
+    // revisited column becomes the next one, as the app's repair does.
+    std::vector<std::vector<CellRun>> cells(recs.size());
+    for (size_t r = 0; r < recs.size(); ++r) {
+        int prevRaw = -2;
+        for (size_t j = recs[r].first + 1; j < recs[r].second; ++j) {
+            const int raw = rows[j].cell;
+            if (raw != prevRaw) {
+                int col = std::clamp(raw, 0, 63);
+                if (!cells[r].empty() && col <= cells[r].back().col)
+                    col = std::min(cells[r].back().col + 1, 63);
+                if (cells[r].empty() || col != cells[r].back().col)
+                    cells[r].push_back({col, j, j});
+                prevRaw = raw;
+            }
+            cells[r].back().b = j + 1;
+            cols = std::max(cols, cells[r].back().col + 1);
+        }
+    }
+    cols = std::clamp(cols, 1, 64);
+    auto colSpec = [&](int c) { return c < spec.size() ? spec.at(c).toObject() : QJsonObject(); };
+    auto colKind = [&](int c) { return colSpec(c).value(QStringLiteral("k")).toInt(0); };
+
+    // Trailing empty text columns drop; typed columns are structure.
+    while (cols > 1) {
+        const int c = cols - 1;
+        if (colKind(c) != 0) break;
+        bool empty = true;
+        for (size_t r = 0; r < recs.size() && empty; ++r)
+            for (const CellRun& cr : cells[r]) {
+                if (cr.col != c) continue;
+                for (size_t j = cr.a; j < cr.b && empty; ++j)
+                    if (!rows[j].content.isEmpty()) empty = false;
+            }
+        if (!empty) break;
+        --cols;
+    }
+
+    static const QFontMetricsF fm = [] {
+        QFont f(chipFontFamily());
+        f.setPixelSize(14);
+        return QFontMetricsF(f);
+    }();
+    std::vector<double> widest(size_t(cols), 0.0), width(size_t(cols), 0.0), colX(size_t(cols), 0.0);
+    std::vector<char> measurable(size_t(cols), 0);
+    for (size_t r = 0; r < recs.size(); ++r)
+        for (const CellRun& cr : cells[r]) {
+            if (cr.col >= cols) continue;
+            for (size_t j = cr.a; j < cr.b; ++j) {
+                const Row& b = rows[j];
+                if (b.type == QLatin1String("media") || b.type == QLatin1String("divider")
+                    || b.content.isEmpty())
+                    continue;
+                double w = 0.0;
+                for (const QString& ln : b.content.left(2000).split(QLatin1Char('\n')))
+                    w = std::max(w, fm.horizontalAdvance(ln));
+                widest[size_t(cr.col)] = std::max(widest[size_t(cr.col)],
+                                                  std::round(w) + (r == 0 ? 18.0 : 0.0));
+                measurable[size_t(cr.col)] = 1;
+            }
+        }
+    // A choice column also fits its widest option chip (label + the chip's
+    // own padding and border), or the chip clips at the cell edge.
+    for (int c = 0; c < cols; ++c) {
+        if (colKind(c) != 1) continue;
+        for (const QJsonValue& ov : colSpec(c).value(QStringLiteral("o")).toArray()) {
+            const QString label = ov.toObject().value(QStringLiteral("l")).toString().left(200);
+            if (label.isEmpty()) continue;
+            widest[size_t(c)] = std::max(widest[size_t(c)], std::round(fm.horizontalAdvance(label)) + 14.0);
+            measurable[size_t(c)] = 1;
+        }
+    }
+    double total = 0.0;
+    QString colTags;
+    for (int c = 0; c < cols; ++c) {
+        const int manual = std::clamp(colSpec(c).value(QStringLiteral("w")).toInt(0), 0, 8192);
+        const double w = manual > 0 ? double(manual)
+            : measurable[size_t(c)] ? std::clamp(std::round(widest[size_t(c)] + 2 * kCellInset + 6), 48.0, 360.0)
+                                    : 160.0;
+        colX[size_t(c)] = total;
+        width[size_t(c)] = w;
+        total += w;
+        colTags += QStringLiteral("<col style=\"width:%1px\">").arg(qRound(w));
+    }
+
+    // px columns, always (the app: a wide table runs past the page and the
+    // page scrolls). Wider than the measure → centred under it, but never
+    // closer than 24 px to the view's left edge: 100% = the page measure,
+    // and main's own 24 px gutter puts the page at max(24, (100vw−page)/2).
+    const int totalPx = qRound(total);
+    const QString wrapStyle = total > ctx.pageWidth
+        ? QStringLiteral(" style=\"width:%1px;margin-left:max(calc((100% - %1px) / 2),"
+                         "min(0px,calc((100% + 48px - 100vw) / 2)))\"").arg(totalPx)
+        : QString();
+    QString out = QStringLiteral("<div class=\"gridwrap\"%1><table style=\"width:%2px\">"
+                                 "<colgroup>%3</colgroup><thead>")
+                      .arg(wrapStyle).arg(totalPx).arg(colTags);
+
+    auto colorAt = [](const QJsonArray& arr, int i) {
+        return i < arr.size() ? arr.at(i).toString() : QString();
+    };
+    bool inBody = false;
+    for (size_t r = 0; r < recs.size(); ++r) {
+        const Row& rec = rows[recs[r].first];
+        const bool isHeader = int(r) < header;
+        if (!isHeader && !inBody) { out += QStringLiteral("</thead><tbody>"); inBody = true; }
+        const QJsonObject tbl = rec.attrs.value(QStringLiteral("table")).toObject();
+        const QJsonArray cbg = tbl.value(QStringLiteral("cbg")).toArray();
+        const QJsonArray cfg = tbl.value(QStringLiteral("cfg")).toArray();
+        const QString rowBg = tbl.value(QStringLiteral("bg")).toString();
+        const QString rowFg = tbl.value(QStringLiteral("fg")).toString();
+        // Row ink lands in the row's first cell — the positioned box whose
+        // left edge is the table's; the head record starts a pocket above.
+        QString rowInk = recordInkTag(ctx, rec, r == 0 ? kTablePocket : 0.0);
+
+        out += QStringLiteral("<tr>");
+        size_t next = 0;
+        for (int c = 0; c < cols; ++c) {
+            while (next < cells[r].size() && cells[r][next].col < c) ++next;
+            const CellRun* cr = (next < cells[r].size() && cells[r][next].col == c)
+                ? &cells[r][next] : nullptr;
+            const QJsonObject cs = colSpec(c);
+            const int kind = isHeader ? 0 : colKind(c);   // header cells stay text
+
+            QString bg = colorAt(cbg, c);
+            if (bg.isEmpty()) bg = rowBg;
+            if (bg.isEmpty()) bg = cs.value(QStringLiteral("bg")).toString();
+            QString fg = colorAt(cfg, c);
+            if (fg.isEmpty()) fg = rowFg;
+            if (fg.isEmpty()) fg = cs.value(QStringLiteral("fg")).toString();
+            QString st;
+            if (const QColor bc(bg); bc.isValid()) st += QStringLiteral("background:%1;").arg(bc.name());
+            if (const QColor fc(fg); fc.isValid()) st += QStringLiteral("color:%1;").arg(fc.name());
+            const int align = cs.value(QStringLiteral("a")).toInt(0);
+            if (align == 1 || kind == 2) st += QStringLiteral("text-align:center;");
+            else if (align == 2)         st += QStringLiteral("text-align:right;");
+
+            QString inner;
+            if (kind == 2) {
+                inner = taskGlyph(cr ? checkCellState(rows[cr->a]) : 0);
+            } else if (cr) {
+                bool blank = true;
+                for (size_t j = cr->a; j < cr->b && blank; ++j)
+                    if (!rows[j].content.isEmpty()) blank = false;
+                if (kind == 1 && blank) {
+                    inner = QStringLiteral("<span class=\"chip unset\"></span>");
+                } else {
+                    BlockRun run(ctx, Frame{colX[size_t(c)] + kCellInset,
+                                            std::max(24, int(width[size_t(c)] - 2 * kCellInset)), true});
+                    for (size_t j = cr->a; j < cr->b; ++j) run.add(rows[j]);
+                    inner = run.take();
+                }
+            } else if (kind == 1) {
+                inner = QStringLiteral("<span class=\"chip unset\"></span>");
+            }
+            const QString tag = isHeader ? QStringLiteral("th") : QStringLiteral("td");
+            out += QStringLiteral("<%1%2>%3%4</%1>")
+                       .arg(tag,
+                            st.isEmpty() ? QString() : QStringLiteral(" style=\"%1\"").arg(st),
+                            rowInk, inner);
+            rowInk.clear();
+        }
+        out += QStringLiteral("</tr>");
+    }
+    out += inBody ? QStringLiteral("</tbody>") : QStringLiteral("</thead>");
+    return out + QStringLiteral("</table></div>");
+}
+
+// The document walk: top-level blocks, layout split rows, derived tables.
+// Tolerant like the app's load repair — nothing is refused: an orphan
+// `cell` block is top level, a one-lane layout record unwraps, a
+// childless record vanishes.
+QString renderRows(RenderCtx& ctx, const std::vector<Row>& rows) {
+    const size_t n = rows.size();
+    BlockRun top(ctx, Frame{0.0, ctx.pageWidth, false});
+    auto childrenEnd = [&](size_t rec) {
+        size_t j = rec + 1;
+        while (j < n && rows[j].cell >= 0 && !rows[j].isSplit()) ++j;
+        return j;
+    };
+    auto headerOf = [&](size_t i) { return rows[i].attrs.value(QStringLiteral("header")).toInt(0); };
+    size_t i = 0;
+    while (i < n) {
+        if (!rows[i].isSplit()) { top.add(rows[i]); ++i; continue; }
+        if (headerOf(i) > 0) {
+            std::vector<std::pair<size_t, size_t>> recs;
+            size_t k = i;
+            do {
+                const size_t e = childrenEnd(k);
+                recs.push_back({k, e});
+                k = e;
+            } while (k < n && rows[k].isSplit() && headerOf(k) <= 0);
+            top.raw(gridTableHtml(ctx, rows, recs));
+            i = k;
+            continue;
+        }
+        const size_t e = childrenEnd(i);
+        const QString lanes = lanesHtml(ctx, rows, i, e);
+        if (lanes.isEmpty())
+            for (size_t j = i + 1; j < e; ++j) top.add(rows[j]);
+        else
+            top.raw(lanes);
+        i = e;
+    }
+    return top.take();
+}
+
 // The preview's whole look — the minNotes export theme (dark sheet, the
 // document's page measure, blue accent, squared corners everywhere) with
 // the app's in-editor recipes where the export is plainer (heading sizes,
@@ -1335,6 +1798,24 @@ const char* kCss =
     "th{background:#252525;color:var(--bright);font-weight:500}"
     "td .chip{font-size:13px}"
     "img.cellimg{display:block;max-width:100%;margin-bottom:4px}"
+    // Derived tables (.mnd): the app's px columns — never squeezed to the
+    // measure, no inner scroller (a wide table widens the page). Cells are
+    // positioned boxes (row ink rides the first one) holding real blocks
+    // at the app's 8 px inset; 32 px pocket above and below.
+    ".gridwrap{margin:32px 0;position:relative}"
+    ".gridwrap table{table-layout:fixed;min-width:0;max-width:none}"
+    ".gridwrap td,.gridwrap th{position:relative;padding:6px 8px}"
+    ".gridwrap th{font-weight:700}"
+    ".gridwrap p,.gridwrap h1,.gridwrap h2,.gridwrap h3,.gridwrap h4,.gridwrap h5,.gridwrap h6,"
+    ".gridwrap figure,.gridwrap blockquote{margin:0}"
+    ".gridwrap p+p{margin-top:12px}"
+    ".gridwrap img:not(.ink){max-width:100%}"
+    ".gridwrap .cb{margin-right:0}"
+    // Split rows: a flex row of lanes at the record's ratios, 24 px gaps.
+    ".lanes{display:flex;gap:24px;align-items:flex-start;position:relative}"
+    ".lane{min-width:0}"
+    ".lane>:first-child{margin-top:0}"
+    ".lane img:not(.ink){max-width:100%!important}"
     // Media + reference figures.
     "figure{margin:16px 0}img{max-width:100%;display:block}"
     "figure.ref{border:1px solid var(--border);padding:0}"
@@ -1376,14 +1857,14 @@ const char* kCss =
 QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
     if (mndbPath.isEmpty() || !QFileInfo::exists(mndbPath)) return {};
     // .mnpkg → stage to a temp document layout; everything below then
-    // reads the staged document.mndb with the stage as its directory.
+    // reads the staged document.mnd with the stage as its directory.
     const bool isPackage = mndbPath.endsWith(QLatin1String(".mnpkg"), Qt::CaseInsensitive);
     QString dbPath = mndbPath;
     QString docDir = QFileInfo(mndbPath).absolutePath();
     if (isPackage) {
         docDir = stagePackage(mndbPath);
         if (docDir.isEmpty()) return {};
-        dbPath = docDir + QStringLiteral("/document.mndb");
+        dbPath = docDir + QStringLiteral("/document.mnd");
     }
 
     // Unique connection per call; read-only so a doc open in minNotes
@@ -1417,21 +1898,24 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
             }
             if (title.isEmpty()) title = QFileInfo(mndbPath).completeBaseName();
 
-            // Margin ink, one JSON blob per anchored block (schema v2; the
-            // table is absent in v1 docs — a failed exec just means none).
-            QHash<QString, QString> inkByBlock;
+            // Margin ink, one JSON blob per anchored block (absent in the
+            // oldest docs — a failed exec just means none). A block here
+            // may be a split record (ink over a table row / split row).
+            RenderCtx ctx;
+            ctx.docDir = docDir;
+            ctx.pageWidth = pageWidth;
             QSqlQuery inkQ(db);
             if (inkQ.exec(QStringLiteral("SELECT block_id, ink FROM block_ink")))
                 while (inkQ.next())
-                    inkByBlock.insert(inkQ.value(0).toString(),
-                                      inkQ.value(1).toString());
+                    ctx.inkByBlock.insert(inkQ.value(0).toString(),
+                                          inkQ.value(1).toString());
 
-            // Comment threads + messages (also v2-only). Numbered in block
-            // order at anchor time; orphaned threads simply never surface.
+            // Comment threads + messages. Numbered in block order at
+            // anchor time; orphaned threads simply never surface.
             // Messages are pre-built twice: div-wrapped for the trailing
             // section, span-wrapped for the in-text hover cards (a div
             // inside <p> would trip the HTML parser).
-            CommentCtx cc;
+            CommentCtx& cc = ctx.cc;
             QSqlQuery thQ(db);
             if (thQ.exec(QStringLiteral("SELECT id, resolved FROM comment_threads")))
                 while (thQ.next())
@@ -1455,116 +1939,26 @@ QString MndbDoc::htmlPreviewPath(const QString& mndbPath) const {
                         .arg(body, stampHtml);
                 }
 
+            // The whole block list up front: split rows and derived tables
+            // need look-ahead (a table's column widths span all its rows).
             QSqlQuery q(db);
+            q.setForwardOnly(true);
             if (q.exec(QStringLiteral(
                     "SELECT id, type, attrs, content, depth FROM blocks ORDER BY rank"))) {
                 ok = true;
-                // Real <ul>/<ol> nesting: one open list per depth level,
-                // the minNotes export's listStack (bullet↔ordered at the
-                // same depth closes and reopens).
-                std::vector<QString> listStack;
-                auto closeListsTo = [&](size_t n) {
-                    while (listStack.size() > n) {
-                        body += QStringLiteral("</%1>").arg(listStack.back());
-                        listStack.pop_back();
-                    }
-                };
+                std::vector<Row> rows;
                 while (q.next()) {
-                    const QString blockId = q.value(0).toString();
-                    const QString type = q.value(1).toString();
-                    const QJsonObject attrs = QJsonDocument::fromJson(
-                        q.value(2).toString().toUtf8()).object();
-                    const QString content = q.value(3).toString();
-                    const int depth = std::clamp(q.value(4).toInt(), 0, 8);
-                    const bool isList = type == QLatin1String("list_item")
-                        || type == QLatin1String("task_item")
-                        || type == QLatin1String("ordered_item");
-                    if (!isList) closeListsTo(0);
-
-                    InkAnchor ink;
-                    parseInk(inkByBlock.value(blockId), ink);
-
-                    const QJsonArray spans =
-                        attrs.value(QStringLiteral("spans")).toArray();
-                    const auto inl = [&](const QString& t) { return richText(t, spans, cc); };
-
-                    double indent = 0.0;    // block's own left offset in page px
-                    QString blk;
-                    bool needsWrap = false; // pre/hr can't host ink children
-                    if (type == QLatin1String("heading")) {
-                        const int lv = qBound(1, attrs.value(QStringLiteral("level")).toInt(1), 6);
-                        blk = QStringLiteral("<h%1>%2</h%1>").arg(lv).arg(inl(content));
-                    } else if (type == QLatin1String("quote")) {
-                        blk = QStringLiteral("<blockquote>%1</blockquote>").arg(inl(content));
-                    } else if (type == QLatin1String("code")) {
-                        // The app's language chip (open string domain: KSyntax
-                        // definition names and legacy fence tags alike).
-                        const QString lang = attrs.value(QStringLiteral("lang")).toString().trimmed();
-                        const QString chip = lang.isEmpty()
-                            ? QStringLiteral("<span class=\"lang plain\">plain</span>")
-                            : QStringLiteral("<span class=\"lang\">%1</span>").arg(escapeHtml(lang.left(40)));
-                        blk = QStringLiteral("<div class=\"blkw\">%1<pre><code>%2</code></pre></div>")
-                            .arg(chip, escapeHtml(content));
-                    } else if (type == QLatin1String("divider")) {
-                        blk = QStringLiteral("<hr>");
-                        needsWrap = true;
-                    } else if (type == QLatin1String("table")) {
-                        blk = tableHtml(content, docDir, cc, pageWidth);
-                        needsWrap = true;   // .tablewrap scrolls (clips) — host ink outside it
-                    } else if (type == QLatin1String("media")) {
-                        blk = mediaHtml(content, docDir, ink, pageWidth);
-                    } else if (isList) {
-                        const bool ordered = type == QLatin1String("ordered_item");
-                        const QString tag = ordered ? QStringLiteral("ol") : QStringLiteral("ul");
-                        const size_t want = size_t(depth) + 1;
-                        closeListsTo(want);
-                        if (listStack.size() == want && listStack.back() != tag)
-                            closeListsTo(want - 1);
-                        while (listStack.size() < want) {
-                            body += QStringLiteral("<%1>").arg(tag);
-                            listStack.push_back(tag);
-                        }
-                        QString li = inl(content);
-                        if (type == QLatin1String("task_item")) {
-                            const int st = std::clamp(attrs.value(QStringLiteral("state")).toInt(0), 0, 2);
-                            if (st == 2)
-                                li = QStringLiteral("<span class=\"tdone\">%1</span>").arg(li);
-                            li = taskGlyph(st) + li;
-                        }
-                        indent = 24.0 * double(depth + 1);
-                        blk = (type == QLatin1String("task_item")
-                                   ? QStringLiteral("<li class=\"task\">%1</li>")
-                                   : QStringLiteral("<li>%1</li>")).arg(li);
-                    } else {  // paragraph + unknown future types degrade to text
-                        blk = content.isEmpty()
-                            ? QStringLiteral("<p>&nbsp;</p>")
-                            : QStringLiteral("<p>%1</p>").arg(inl(content));
-                    }
-                    // (Comment anchors are emitted by the span walk itself:
-                    // tinted range + hover card + superscript link.)
-
-                    // Text-anchored margin ink: absolutely positioned inside
-                    // the (position:relative) block, X from the page center
-                    // minus the block's own indent.
-                    const TextInk ti = renderTextInk(ink);
-                    if (!ti.img.isNull()) {
-                        const QString tag = QStringLiteral(
-                            "<img class=\"ink\" style=\"position:absolute;left:%1px;"
-                            "top:%2px;width:%3px;height:%4px;max-width:none;z-index:2\" src=\"%5\" alt=\"\">")
-                            .arg(pageWidth / 2.0 + ti.box.left() - indent)
-                            .arg(ti.box.top())
-                            .arg(ti.box.width())
-                            .arg(ti.box.height())
-                            .arg(dataUri(ti.img));
-                        if (needsWrap)
-                            blk = QStringLiteral("<div class=\"blkw\">%1%2</div>").arg(blk, tag);
-                        else
-                            blk = insertBeforeClose(blk, tag);
-                    }
-
-                    body += blk;
+                    Row r;
+                    r.id = q.value(0).toString();
+                    r.type = q.value(1).toString();
+                    r.attrs = QJsonDocument::fromJson(q.value(2).toString().toUtf8()).object();
+                    r.content = q.value(3).toString();
+                    r.depth = q.value(4).toInt();
+                    const QJsonValue cell = r.attrs.value(QStringLiteral("cell"));
+                    if (cell.isDouble()) r.cell = std::clamp(cell.toInt(-1), -1, 63);
+                    rows.push_back(std::move(r));
                 }
-                closeListsTo(0);
+                body = renderRows(ctx, rows);
             }
 
             if (!cc.order.isEmpty()) {
