@@ -82,7 +82,11 @@ echo "[pkg] pkgbuild --analyze"
 pkgbuild --analyze --root "$STAGE/root" "$STAGE/components.plist" >/dev/null
 i=0
 while /usr/libexec/PlistBuddy -c "Print :$i" "$STAGE/components.plist" >/dev/null 2>&1; do
-    /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$STAGE/components.plist"
+    # Set, else Add: pkgbuild on macOS 27 stopped emitting the key in its
+    # analysis (older releases wrote it as true), and Set fails on a
+    # missing key — which under set -e killed the 1.2.3 release run.
+    /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$STAGE/components.plist" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$STAGE/components.plist"
     i=$((i + 1))
 done
 echo "[pkg] $i bundle entries pinned non-relocatable"
