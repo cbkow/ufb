@@ -91,13 +91,18 @@ fi
 # this is just a tarball). Runs on system /usr/bin/perl —
 # verified at the top of bindings/src/services/transcode.rs's
 # bundled_tool fallback.
-EXIFTOOL_VERSION="13.58"
+EXIFTOOL_VERSION="13.59"
 EXIFTOOL_DIR="$EXTERNAL/exiftool"
 if [[ ! -f "$EXIFTOOL_DIR/exiftool" ]]; then
     echo "[setup] fetching exiftool $EXIFTOOL_VERSION..."
     tmp=$(mktemp -d)
-    tarball_url="https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz"
-    if curl -fL "$tarball_url" -o "$tmp/exiftool.tar.gz"; then
+    # exiftool.org points its download links at SourceForge now (2026-10);
+    # the direct exiftool.org path 404s. Try SourceForge first, then the
+    # old direct URL in case the mirror is down.
+    tarball_url="https://sourceforge.net/projects/exiftool/files/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz/download"
+    fallback_url="https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSION}.tar.gz"
+    if curl -fL "$tarball_url" -o "$tmp/exiftool.tar.gz" \
+       || curl -fL "$fallback_url" -o "$tmp/exiftool.tar.gz"; then
         mkdir -p "$EXIFTOOL_DIR"
         # The tarball extracts to Image-ExifTool-<version>/; strip
         # that wrapper so the script + lib/ tree sit directly under
