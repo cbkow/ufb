@@ -51,7 +51,7 @@ foreach ($line in $lines) {
 # VS 18 (2026) vcvars exports ITS bundled vcpkg as VCPKG_ROOT, which the
 # presets' toolchain path then follows into a vcpkg that cannot bootstrap
 # ("Bootstrapping vcpkg before install - failed", 2026-10-23). Keep ours.
-$env:VCPKG_ROOT = $vcpkgRoot
+if ($vcpkgRoot) { $env:VCPKG_ROOT = $vcpkgRoot }
 
 # --- Qt kit + Qt-bundled CMake/Ninja onto PATH ---------------------------
 $cmakeBin = Join-Path $qtTools 'CMake_64\bin'

@@ -98,8 +98,10 @@
 
 namespace {
 
-// Keeps the target alive for the menu's lifetime (NSMenuItem.target is weak),
-// and the share picker that owns the system Share submenu's items.
+// Keeps the target alive (NSMenuItem.target is weak) and the share picker
+// that owns the Share submenu's services. Both live until the NEXT menu
+// replaces them: a chosen sharing service performs on later run-loop
+// turns, after popUpMenuPositioningItem has returned.
 UfbShellMenuTarget* s_target = nil;
 NSSharingServicePicker* s_sharePicker = nil;
 
@@ -229,9 +231,7 @@ void MacShellMenu::show(const QStringList& paths) {
 
     // Screen coordinates (inView:nil): the menu appears at the cursor.
     [menu popUpMenuPositioningItem:nil atLocation:[NSEvent mouseLocation] inView:nil];
-    // The actions have run (or the menu was dismissed); drop the helpers.
-    s_target = nil;
-    s_sharePicker = nil;
+    // Not released here — see s_sharePicker above.
 }
 
 #endif  // __APPLE__

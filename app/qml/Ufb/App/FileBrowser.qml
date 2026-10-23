@@ -1245,7 +1245,7 @@ Rectangle {
             onTriggered: {
                 var paths = root.selectedPaths()
                 if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
-                if (paths.length > 0) Lucid.set_pinned(JSON.stringify(paths), true)
+                if (paths.length > 0) { root._lucidPending = true; Lucid.set_pinned(JSON.stringify(paths), true) }
             }
         }
         UfbMenuItem {
@@ -1256,7 +1256,7 @@ Rectangle {
             onTriggered: {
                 var paths = root.selectedPaths()
                 if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
-                if (paths.length > 0) Lucid.set_pinned(JSON.stringify(paths), false)
+                if (paths.length > 0) { root._lucidPending = true; Lucid.set_pinned(JSON.stringify(paths), false) }
             }
         }
         // LucidLink links: the extension's "Copy link" (the filespace's
@@ -1348,9 +1348,14 @@ Rectangle {
 
     // LucidLink pin / unpin result: silent on success (the row flips on
     // the next popup), a dialog on failure.
+    // Every pane hears the singleton's signal; only the pane that issued
+    // the request shows the dialog (five panes would stack five).
+    property bool _lucidPending: false
     Connections {
         target: Lucid
         function onPin_done(ok, message) {
+            if (!root._lucidPending) return
+            root._lucidPending = false
             if (ok) { console.log("LucidLink:", message); return }
             lucidErrorDialog.message = message
             lucidErrorDialog.open()

@@ -285,9 +285,8 @@ Item {
     // window): keep the corner buttons clear of the OS's own — Windows'
     // caption buttons at the top right, the traffic lights at the top
     // left on macOS (hidden in fullscreen).
-    readonly property int _osRightInset: WindowChrome.captionButtons ? Math.ceil(WindowChrome.captionWidth) : 0
-    readonly property int _osLeftInset: (WindowChrome.nativeLights
-                                         && Window.window && Window.window.visibility !== Window.FullScreen) ? 70 : 0
+    readonly property int _osRightInset: Window.window && Window.window.osRightInset !== undefined ? Window.window.osRightInset : 0
+    readonly property int _osLeftInset: Window.window && Window.window.osLeftInset !== undefined ? Window.window.osLeftInset : 0
 
     FlatButton {
         anchors.top: parent.top

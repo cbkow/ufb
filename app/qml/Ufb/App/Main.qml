@@ -1160,6 +1160,13 @@ ApplicationWindow {
         onCanceled: _armed = false
     }
 
+    // The OS's own controls inside the client area, as widths anything laid
+    // over the top edge must keep clear of: the traffic lights at the left
+    // on macOS (hidden in fullscreen), Qt's caption buttons at the right on
+    // Windows. The title row and the lightbox both read these.
+    readonly property int osLeftInset: WindowChrome.nativeLights && window.visibility !== Window.FullScreen ? 70 : 0
+    readonly property int osRightInset: WindowChrome.captionButtons ? Math.ceil(WindowChrome.captionWidth) : 0
+
     // ── Title row: the tab strip IS the window's title bar ──────────
     // (2026-10-23, the chromeless window — see the flags above and
     // WindowChrome.h.) Left to right: on macOS the inset where the NATIVE
@@ -1194,21 +1201,10 @@ ApplicationWindow {
         // press on a tab never reaches it. Windows needs none — a press no
         // item accepts is the native caption (Qt's expanded-client-area hit
         // test).
-        MouseArea {
+        DragTabMouseArea {
             id: titleDrag
             anchors.fill: parent
             enabled: WindowChrome.nativeLights
-            property real px: 0
-            property real py: 0
-            property bool armed: false
-            onPressed: (mouse) => { px = mouse.x; py = mouse.y; armed = WindowChrome.chromeless }
-            onPositionChanged: (mouse) => {
-                if (!armed || !pressed) return
-                if (Math.abs(mouse.x - px) + Math.abs(mouse.y - py) < 4) return
-                armed = false
-                WindowChrome.startMove(window)
-            }
-            onReleased: armed = false
             onDoubleClicked: (mouse) => { if (WindowChrome.chromeless) WindowChrome.toggleZoom(window) }
         }
 
@@ -1220,8 +1216,7 @@ ApplicationWindow {
             anchors.left: parent.left
             anchors.top: parent.top
             height: parent.height
-            width: (WindowChrome.nativeLights && window.visibility !== Window.FullScreen ? 70 : 0)
-                   + titleBar.buttonGap
+            width: window.osLeftInset + titleBar.buttonGap
         }
 
         // Windows: Qt draws and hit-tests the caption buttons here (three of
@@ -1232,8 +1227,7 @@ ApplicationWindow {
             anchors.right: parent.right
             anchors.top: parent.top
             height: parent.height
-            width: (WindowChrome.captionButtons ? Math.ceil(WindowChrome.captionWidth) : 0)
-                   + titleBar.buttonGap
+            width: window.osRightInset + titleBar.buttonGap
         }
 
             // Horizontal-scroll wrapper so the tab strip degrades

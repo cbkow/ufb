@@ -18,6 +18,14 @@
     <key>com.apple.security.network.server</key>
     <true/>
 
+    <!-- Apple events: the Finder menu's "Get Info" row (MacShellMenu.mm)
+         asks Finder to open its info window in-process; the hardened
+         runtime blocks AppleEvents without this (errAEEventNotPermitted
+         -1743, no consent prompt). The plist's
+         NSAppleEventsUsageDescription supplies the prompt text. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
     <!-- File picker + drag-out target paths. -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>

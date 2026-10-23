@@ -121,7 +121,27 @@ fn run(args: &[&str]) -> Result<String, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let out = cmd.output().map_err(|e| format!("{}: {}", exe.display(), e))?;
+    // A deadline: selection_state runs on the GUI thread at menu open, and
+    // a wedged daemon (VPN drop, reconnect) must cost a bounded wait, not
+    // a frozen app. Poll try_wait, kill at the deadline.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("{}: {}", exe.display(), e))?;
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(15)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("LucidLink CLI timed out after {:?} ({})", CLI_TIMEOUT, args.join(" ")));
+            }
+            Err(e) => return Err(format!("{}: {}", exe.display(), e)),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| format!("{}: {}", exe.display(), e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     if out.status.success() {
@@ -143,6 +163,7 @@ fn cache() -> &'static Mutex<Cache> {
 }
 
 const INSTANCES_TTL: Duration = Duration::from_secs(30);
+const CLI_TIMEOUT: Duration = Duration::from_secs(4);
 const PINS_TTL: Duration = Duration::from_secs(3);
 
 /// (instance id, REST port) rows of `lucid3 list`: "INSTANCE ID
@@ -305,6 +326,11 @@ mod tests {
         assert!(is_pinned("job/ae", &pins));
         assert!(is_pinned("job/ae/comp.aep", &pins));
         assert!(!is_pinned("job/aerial", &pins));
+        // A pinned entry whose byte length lands inside a multi-byte
+        // character of the candidate must not panic (and is not a match).
+        let pins = vec!["job/ab".to_string()];
+        assert!(!is_pinned("job/aé/x.mov", &pins));
+        assert!(is_pinned("job/aé/x.mov", &["job/aé".to_string()]));
     }
 }
 
@@ -329,12 +355,18 @@ pub fn pinned(inst: &Instance) -> Vec<String> {
     v
 }
 
+/// `rel` is pinned when a pinned entry equals it or is one of its ancestor
+/// folders. Compared as whole strings / with strip_prefix — never a byte
+/// slice, which would panic inside a multi-byte character.
 fn is_pinned(rel: &str, pins: &[String]) -> bool {
-    let norm = |s: &str| s.replace('\\', "/");
+    let norm = |s: &str| {
+        let s = s.replace('\\', "/");
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
     let r = norm(rel);
     pins.iter().any(|p| {
         let p = norm(p);
-        same_component(&r, &p) || (r.len() > p.len() && same_component(&r[..p.len()], &p) && r[p.len()..].starts_with('/'))
+        r == p || r.strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))
     })
 }
 
@@ -451,12 +483,16 @@ pub fn create_guest_link(path: &str) -> Result<(), String> {
 /// Pin (`on`) or unpin every path. Stops at the first failure.
 pub fn set_pinned(paths: &[String], on: bool) -> Result<String, String> {
     let mut n = 0;
-    for p in paths {
-        let (inst, rel) = locate(p).ok_or_else(|| format!("{} is not on a LucidLink filespace", p))?;
-        let flag = if on { "--set" } else { "--unset" };
-        run(&["--id", &inst.id, "pin", flag, &rel]).map_err(|e| format!("{}: {}", p, e))?;
-        n += 1;
-    }
+    let result = (|| {
+        for p in paths {
+            let (inst, rel) = locate(p).ok_or_else(|| format!("{} is not on a LucidLink filespace", p))?;
+            let flag = if on { "--set" } else { "--unset" };
+            run(&["--id", &inst.id, "pin", flag, &rel]).map_err(|e| format!("{}: {}", p, e))?;
+            n += 1;
+        }
+        Ok(format!("{} {} item(s)", if on { "Pinned" } else { "Unpinned" }, n))
+    })();
+    // Items before a failure did change: the cached pin list is stale either way.
     cache().lock().unwrap().pins = None;
-    Ok(format!("{} {} item(s)", if on { "Pinned" } else { "Unpinned" }, n))
+    result
 }
