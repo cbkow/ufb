@@ -748,7 +748,7 @@ Rectangle {
                         Layout.alignment: Qt.AlignVCenter
                         Layout.preferredHeight: 22
                         implicitWidth: fixDriftLabel.implicitWidth + 16
-                        radius: 11
+                        radius: Theme.dim.radiusSmall
                         color: fixDriftHover.containsMouse
                             ? Theme.colors.warning
                             : Theme.colors.warningMuted || Theme.colors.warning
@@ -790,7 +790,7 @@ Rectangle {
                         Layout.alignment: Qt.AlignVCenter
                         Layout.preferredHeight: 22
                         implicitWidth: fixCredsLabel.implicitWidth + 16
-                        radius: 11
+                        radius: Theme.dim.radiusSmall
                         color: fixCredsHover.containsMouse
                             ? Theme.colors.error
                             : Theme.colors.errorMuted || Theme.colors.error

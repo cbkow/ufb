@@ -116,7 +116,7 @@ Dialog {
                         color: index % 2 === 0
                             ? Theme.colors.surface
                             : Theme.colors.toolbarAlt
-                        radius: 4
+                        radius: Theme.dim.radiusSmall
 
                         readonly property bool hasError:
                             (dialog._restoreError[String(modelData.id)] || "").length > 0

@@ -122,7 +122,7 @@ Dialog {
             color: Theme.colors.bg
             border.color: Theme.colors.border
             border.width: 1
-            radius: 2
+            radius: Theme.dim.radiusSmall
 
             ListView {
                 id: backupList

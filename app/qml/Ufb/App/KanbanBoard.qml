@@ -493,7 +493,7 @@ Rectangle {
                                     height: 18
                                     width: Math.min(pillLabel.implicitWidth + 12,
                                                     card.width - 16 - dateLabel.width - 8)
-                                    radius: 3
+                                    radius: Theme.dim.radiusSmall
                                     color: lane.hasColor ? lane.modelData.color : "transparent"
                                     border.width: 1
                                     border.color: lane.hasColor ? "#222" : "#333"
@@ -575,7 +575,7 @@ Rectangle {
         Rectangle {
             x: 12
             y: 12
-            radius: 3
+            radius: Theme.dim.radius
             color: Theme.colors.accent
             opacity: 0.92
             width: ghostLabel.implicitWidth + 16

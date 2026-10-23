@@ -132,7 +132,7 @@ Item {
             Rectangle {
                 anchors.fill: parent
                 anchors.margins: 6
-                radius: 4
+                radius: Theme.dim.radius
                 color: "#0b0b0b"
                 border.color: cellHover.containsMouse
                     ? Theme.colors.accent : Theme.colors.divider

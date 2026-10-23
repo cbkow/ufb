@@ -205,7 +205,7 @@ Item {
                 Layout.fillWidth: true
                 Layout.preferredHeight: bannerCol.implicitHeight + 12
                 color: Theme.colors.accentMuted
-                radius: 3
+                radius: Theme.dim.radius
                 ColumnLayout {
                     id: bannerCol
                     anchors.left: parent.left
@@ -342,7 +342,7 @@ Item {
                                 Rectangle {
                                     Layout.preferredWidth: 22
                                     Layout.preferredHeight: 22
-                                    radius: 3
+                                    radius: Theme.dim.radiusSmall
                                     color: optionRow.color.length > 0 ? optionRow.color : "transparent"
                                     border.color: Theme.colors.borderStrong
                                     border.width: 1
@@ -579,7 +579,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 36
                     color: Theme.colors.surfaceAlt
-                    radius: Theme.dim.radius
+                    radius: 0   // a list row: row fills stay square
                     RowLayout {
                         anchors.fill: parent
                         anchors.leftMargin: 10

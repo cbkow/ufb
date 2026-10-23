@@ -1,6 +1,12 @@
-// FlatButton — squared, minimal-padding button matching the Topaz
-// Gigapixel reference style. Replaces Qt Controls' default Button
-// (which renders as a tall pill with ~16px horizontal padding).
+// FlatButton — minimal-padding button matching the Topaz Gigapixel
+// reference style, softly rounded since the humanist pass (2026-10-23).
+// Replaces Qt Controls' default Button (which renders as a tall pill
+// with ~16px horizontal padding).
+//
+// Hover ramps the fill over Theme.dim.hoverMs and a press steps one
+// shade past hover: the button answers the finger, not just the
+// cursor. The idle fill is Theme.colors.hoverIdle (the hover grey at
+// alpha 0), so the ramp only ever fades in.
 //
 // Variants:
 //   variant: "default"  — transparent fill, hover lights up
@@ -58,16 +64,22 @@ Rectangle {
     // surfaceHover swap; primary/danger keep their accent/error
     // fills.
     readonly property color _bgIdle: {
-        if (!enabled_) return "transparent"
+        if (!enabled_) return Theme.colors.hoverIdle
         if (variant === "primary") return Theme.colors.accent
         if (variant === "danger")  return Theme.colors.error
-        return checked ? Theme.colors.accentMuted : "transparent"
+        return checked ? Theme.colors.accentMuted : Theme.colors.hoverIdle
     }
     readonly property color _bgHover: {
         if (!enabled_) return _bgIdle
         if (variant === "primary") return Theme.colors.accentHover
         if (variant === "danger")  return Qt.lighter(Theme.colors.error, 1.15)
         return checked ? Theme.colors.accent : Theme.colors.surfaceHover
+    }
+    // Pressed: one step past hover.
+    readonly property color _bgPressed: {
+        if (!enabled_) return _bgIdle
+        if (variant === "primary" || variant === "danger") return Qt.darker(_bgHover, 1.15)
+        return checked ? Theme.colors.accentHover : Theme.colors.surfacePressed
     }
     readonly property color _fg: {
         if (!enabled_) return Theme.colors.textSubtle
@@ -79,8 +91,10 @@ Rectangle {
     implicitWidth: Math.max(
         Theme.dim.toolStripHeight,
         rowContent.implicitWidth + padding * 2)
-    radius: Theme.dim.radius
-    color: ma.containsMouse ? _bgHover : _bgIdle
+    radius: Theme.dim.radiusSmall
+    color: ma.pressed && ma.containsMouse ? _bgPressed
+         : ma.containsMouse ? _bgHover : _bgIdle
+    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
 
     Row {
         id: rowContent

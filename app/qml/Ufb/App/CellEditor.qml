@@ -241,7 +241,7 @@ Item {
                 anchors.rightMargin: 4
                 anchors.topMargin: 2
                 anchors.bottomMargin: 2
-                radius: 3
+                radius: Theme.dim.radiusSmall
                 color: cell.valueColor.length > 0 ? cell.valueColor : "transparent"
                 border.color: cell.valueColor.length > 0 ? "#222" : "#333"
                 border.width: 1
@@ -379,6 +379,8 @@ Item {
             }
             Popup {
                 id: calendarPopup
+                enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.dim.popupMs } }
+                exit: Transition { }
                 property int year: new Date().getFullYear()
                 property int month: new Date().getMonth()
                 x: 0
@@ -391,7 +393,7 @@ Item {
                     color: Theme.colors.toolbar
                     border.color: Theme.colors.borderStrong
                     border.width: 1
-                    radius: 3
+                    radius: Theme.dim.radius
                 }
                 ColumnLayout {
                     anchors.fill: parent
@@ -473,7 +475,7 @@ Item {
                                 : (cellMa.containsMouse ? Theme.colors.surfaceHover : "transparent")
                             border.color: _today ? Theme.colors.accent : "transparent"
                             border.width: 1
-                            radius: 3
+                            radius: Theme.dim.radiusSmall
                             Label {
                                 anchors.centerIn: parent
                                 text: model.day
@@ -561,6 +563,8 @@ Item {
             }
             Popup {
                 id: notesPopup
+                enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.dim.popupMs } }
+                exit: Transition { }
                 x: 0
                 y: notesRoot.height
                 width: Math.max(280, notesRoot.width)
@@ -578,7 +582,7 @@ Item {
                     color: Theme.colors.toolbar
                     border.color: Theme.colors.borderStrong
                     border.width: 1
-                    radius: 3
+                    radius: Theme.dim.radius
                 }
                 ColumnLayout {
                     anchors.fill: parent
@@ -595,7 +599,7 @@ Item {
                                 color: Theme.colors.bg
                                 border.color: Theme.colors.border
                                 border.width: 1
-                                radius: 2
+                                radius: Theme.dim.radiusSmall
                             }
                             Keys.onPressed: (event) => {
                                 if (event.key === Qt.Key_Return
@@ -683,6 +687,8 @@ Item {
             }
             Popup {
                 id: linksPopup
+                enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.dim.popupMs } }
+                exit: Transition { }
                 x: 0
                 y: linksRoot.height
                 width: Math.max(320, linksRoot.width)
@@ -700,7 +706,7 @@ Item {
                     color: Theme.colors.toolbar
                     border.color: Theme.colors.borderStrong
                     border.width: 1
-                    radius: 3
+                    radius: Theme.dim.radius
                 }
                 ColumnLayout {
                     anchors.fill: parent
@@ -720,7 +726,7 @@ Item {
                         color: Theme.colors.bg
                         border.color: Theme.colors.border
                         border.width: 1
-                        radius: 2
+                        radius: Theme.dim.radiusSmall
                         ListView {
                             anchors.fill: parent
                             anchors.margins: 2
@@ -763,7 +769,7 @@ Item {
                                 color: Theme.colors.bg
                                 border.color: Theme.colors.border
                                 border.width: 1
-                                radius: 2
+                                radius: Theme.dim.radiusSmall
                             }
                             Keys.onPressed: (event) => {
                                 if (event.key === Qt.Key_Escape) {

@@ -1307,7 +1307,7 @@ ApplicationWindow {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 16
                                 height: 16
-                                radius: 3
+                                radius: Theme.dim.radiusSmall
                                 color: filesCloseMa.containsMouse
                                     ? Theme.colors.surfaceHover : "transparent"
                                 Label {
@@ -1413,7 +1413,7 @@ ApplicationWindow {
                                 anchors.verticalCenter: parent.verticalCenter
                                 width: 16
                                 height: 16
-                                radius: 3
+                                radius: Theme.dim.radiusSmall
                                 color: closeMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
                                 Label {
                                     anchors.centerIn: parent
@@ -1583,7 +1583,7 @@ ApplicationWindow {
                             visible: taskJobs.activeCount > 0
                             width: Math.max(16, chipLabel.implicitWidth + 8)
                             height: 16
-                            radius: 8
+                            radius: Theme.dim.radiusSmall
                             color: Theme.colors.accent
                             anchors.verticalCenter: parent.verticalCenter
                             Label {
@@ -1602,7 +1602,7 @@ ApplicationWindow {
                         anchors.right: parent.right
                         anchors.rightMargin: 6
                         anchors.verticalCenter: parent.verticalCenter
-                        width: 16; height: 16; radius: 3
+                        width: 16; height: 16; radius: Theme.dim.radiusSmall
                         color: transcodeCloseMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
                         Label {
                             anchors.centerIn: parent
@@ -1691,7 +1691,7 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         width: 16
                         height: 16
-                        radius: 3
+                        radius: Theme.dim.radiusSmall
                         color: trackerCloseMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
                         Label {
                             anchors.centerIn: parent
@@ -1905,7 +1905,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 16
                     Layout.preferredWidth: chipRow.implicitWidth + 12
                     Layout.alignment: Qt.AlignVCenter
-                    radius: 8
+                    radius: Theme.dim.radiusSmall
                     // Flat dimmed-accent pill — no border. Same "info
                     // chip" idiom but without the chrome.
                     color: Theme.colors.accentMuted
@@ -1965,7 +1965,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 16
                     Layout.preferredWidth: taskChipRow.implicitWidth + 12
                     Layout.alignment: Qt.AlignVCenter
-                    radius: 8
+                    radius: Theme.dim.radiusSmall
                     color: taskChipMa.containsMouse
                         ? Theme.colors.surfaceHover : Theme.colors.accentMuted
                     RowLayout {
@@ -2026,7 +2026,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 16
                 Layout.preferredWidth: moreLabel.implicitWidth + 12
                 Layout.alignment: Qt.AlignVCenter
-                radius: 8
+                radius: Theme.dim.radiusSmall
                 color: moreMa.containsMouse
                     ? Theme.colors.surfaceHover : Theme.colors.accentMuted
                 Label {
@@ -2056,7 +2056,7 @@ ApplicationWindow {
                     Layout.preferredHeight: 16
                     Layout.preferredWidth: failChipRow.implicitWidth + 12
                     Layout.alignment: Qt.AlignVCenter
-                    radius: 8
+                    radius: Theme.dim.radiusSmall
                     color: failChipMa.containsMouse
                         ? Theme.colors.error
                         : Qt.rgba(Theme.colors.error.r, Theme.colors.error.g,

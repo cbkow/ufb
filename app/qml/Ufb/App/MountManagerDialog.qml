@@ -215,7 +215,7 @@ Dialog {
             color: Theme.colors.bg
             border.color: Theme.colors.border
             border.width: Theme.dim.border
-            radius: Theme.dim.radius
+            radius: Theme.dim.radiusSmall
             implicitHeight: cacheCol.implicitHeight + 16
 
             ColumnLayout {
@@ -327,7 +327,7 @@ Dialog {
             color: Theme.colors.bg
             border.color: Theme.colors.border
             border.width: Theme.dim.border
-            radius: Theme.dim.radius
+            radius: Theme.dim.radiusSmall
 
             ListView {
                 id: mountList
@@ -652,7 +652,7 @@ Dialog {
                 color: Theme.colors.surface
                 border.color: Theme.colors.border
                 border.width: Theme.dim.border
-                radius: Theme.dim.radius
+                radius: Theme.dim.radiusSmall
 
                 RowLayout {
                     anchors.fill: parent

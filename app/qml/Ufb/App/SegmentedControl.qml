@@ -36,7 +36,7 @@ Rectangle {
     // is selected. Matches the borderless FlatButton idiom: the row of
     // toggles reads as adjacent cells, with the active one filled.
     color: "transparent"
-    radius: Theme.dim.radius
+    radius: Theme.dim.radiusSmall
 
     Row {
         id: row
@@ -51,13 +51,15 @@ Rectangle {
                 width: Math.max(Theme.dim.toolStripHeight,
                     seg.implicitWidth + 16)
                 height: parent.height
+                radius: Theme.dim.radiusSmall
                 color: active
                     ? (root.variant === "accent"
                         ? Theme.colors.accent
                         : Theme.colors.surfaceHover)
                     : (segMa.containsMouse
                         ? Theme.colors.surface
-                        : "transparent")
+                        : Theme.colors.hoverIdle)
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
 
                 Row {
                     id: seg

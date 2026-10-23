@@ -1,6 +1,6 @@
 // FlatSlider — slim flat slider matching the sister app (QCView): a 2px
 // track in borderStrong, a bright fill from the origin to the handle, and a
-// 10×10 squared handle. Squared corners, no animation, instant color swaps.
+// 10×10 softly rounded handle (the humanist pass). The track stays square.
 //
 // Usage:
 //   FlatSlider { from: 0; to: 1; value: 0.5; onMoved: ... }
@@ -29,7 +29,7 @@ Slider {
         x: root.leftPadding + root.visualPosition * (root.availableWidth - width)
         y: root.topPadding + root.availableHeight / 2 - height / 2
         width: 10; height: 10
-        radius: Theme.dim.radius
+        radius: Theme.dim.radiusSmall
         color: !root.enabled
                  ? Theme.colors.textSubtle
                  : (root.pressed ? Theme.colors.text : Theme.colors.textBright)

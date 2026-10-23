@@ -3,8 +3,11 @@
 // `Theme.icon.size.toolbar` without re-importing.
 //
 // The visual direction follows the Topaz Gigapixel reference: dark,
-// flat, squared corners, blue accent for primary affordances, full-
-// row-height action strips. Each value here exists ONCE; refactor
+// flat, blue accent for primary affordances, full-row-height action
+// strips — with the family's humanist pass (minNotes' ruling of
+// 2026-10-21, QCView 2026-10-23, here 2026-10-23): three corner radii
+// applied by surface class, a short hover / pressed colour ramp, and
+// popups that fade in. Each value here exists ONCE; refactor
 // magic strings ("#4a90e2", "#1a1a1a", padding numbers) elsewhere
 // to reference these instead so a future visual sweep stays cheap.
 //
@@ -38,6 +41,12 @@ QtObject {
         readonly property color surface:      "#1a1a1a"   // panels
         readonly property color surfaceAlt:   "#1d1d1d"   // alt rows
         readonly property color surfaceHover: "#252525"   // hover bg
+        readonly property color surfacePressed: "#323232" // pressed: one step past hover
+        // A ramp's idle end is never "transparent": that is black at
+        // alpha 0, so the colour animation would dip dark before it
+        // lightens. This is surfaceHover at alpha 0 — the ramp only
+        // ever fades in.
+        readonly property color hoverIdle:    Qt.rgba(0x25 / 255, 0x25 / 255, 0x25 / 255, 0)
         readonly property color toolbar:      "#1f1f1f"   // header strips
         readonly property color toolbarAlt:   "#262626"   // sub-header
 
@@ -133,9 +142,16 @@ QtObject {
         // tail on the right that long paths can never cover.
         readonly property int pathBarTail:       48
 
-        // Radii — squared by default; small radius reserved for pills.
-        readonly property int radius:            0
-        readonly property int radiusPill:       10
+        // Radii — three, by surface class (the humanist pass). Hairlines,
+        // drop lines, progress tracks and glyph circles stay as they are.
+        readonly property int radiusSmall:       3    // buttons, segments, chips, pills, wells, fields, menu rows, handles, scrollbar thumbs
+        readonly property int radius:            6    // popups, menus, dialogs, toasts, cards, lanes, banners, grid tiles
+        readonly property int radiusLarge:      10    // reserved (a notice card, a switch's pill track) — never invent a fourth value
+
+        // Motion.
+        readonly property int hoverMs:         100    // the hover / pressed colour ramp
+        readonly property int popupMs:          80    // a popup's fade-in. No exit fade: it keeps a
+                                                      // modal popup alive for its length and eats the next click.
 
         // Borders / dividers.
         readonly property int border:            1

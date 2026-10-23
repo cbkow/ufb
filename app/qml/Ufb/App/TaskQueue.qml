@@ -297,7 +297,7 @@ Rectangle {
                         Rectangle {
                             Layout.preferredWidth: 88
                             Layout.preferredHeight: 22
-                            radius: 10
+                            radius: Theme.dim.radiusSmall
                             color: root._statusColor(jobRow.status)
                             Label {
                                 anchors.centerIn: parent

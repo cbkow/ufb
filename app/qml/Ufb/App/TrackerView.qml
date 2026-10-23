@@ -724,7 +724,7 @@ Rectangle {
                         readonly property bool active: root._dueFilter === modelData.key
                         Layout.preferredHeight: 20
                         implicitWidth: chipLabel.implicitWidth + 16
-                        radius: 10
+                        radius: Theme.dim.radiusSmall
                         // No border — fill alone communicates state.
                         // Active chip: accent fill. Hover: surfaceHover.
                         // Resting: transparent (chip strip's toolbarAlt
@@ -1646,7 +1646,7 @@ Rectangle {
                     implicitHeight: 24
                     implicitWidth: 32
                     color: cellMa.containsMouse ? Theme.colors.accentMuted : "transparent"
-                    radius: 3
+                    radius: Theme.dim.radiusSmall
                     Label {
                         anchors.centerIn: parent
                         text: model.day

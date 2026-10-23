@@ -64,7 +64,7 @@ Item {
             + Theme.dim.scrollBarWidth + "px;background:__PAGE_BG__}"
         + "::-webkit-scrollbar-track{background:__PAGE_BG__}"
         + "::-webkit-scrollbar-thumb{background:" + _cssColor(Theme.colors.borderStrong)
-            + ";border-radius:" + Theme.dim.radius + "px}"
+            + ";border-radius:" + Theme.dim.radiusSmall + "px}"
         + "::-webkit-scrollbar-thumb:hover{background:" + _cssColor(Theme.colors.textSubtle) + "}"
         + "::-webkit-scrollbar-thumb:active{background:" + _cssColor(Theme.colors.textMuted) + "}"
         + "::-webkit-scrollbar-corner{background:__PAGE_BG__}"

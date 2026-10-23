@@ -2537,7 +2537,7 @@ Rectangle {
             Layout.preferredHeight: errLabel.implicitHeight + 12
             color: "#3a1e1e"
             border.color: "#c04040"
-            radius: 3
+            radius: Theme.dim.radius
             Label {
                 id: errLabel
                 anchors.verticalCenter: parent.verticalCenter
@@ -3126,7 +3126,7 @@ Rectangle {
                     Rectangle {
                         anchors.fill: parent
                         anchors.margins: 4
-                        radius: 4
+                        radius: Theme.dim.radius
                         color: cell.dropTarget
                             ? Theme.colors.accentSelected
                             : cell.selected
