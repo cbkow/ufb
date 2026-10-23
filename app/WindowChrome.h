@@ -46,8 +46,13 @@ public:
     qreal captionHeight() const { return captionHeight_; }
     qreal captionWidth() const { return captionWidth_; }
     // Apply what the flags can't once the window exists (macOS: hide the
-    // title text) and start tracking the caption metrics.
+    // title text) and start tracking the caption metrics. Re-applied
+    // every time the NATIVE window is created again: an accepted close
+    // (close-to-tray) destroys the NSWindow / HWND behind the QWindow, and
+    // the one the next show() creates is a stock one — on macOS it drew
+    // the title text over the tab strip again (2026-10-23).
     void attach(QWindow* w);
+    bool eventFilter(QObject* obj, QEvent* ev) override;
     // The row's gestures: a drag past the threshold hands the press to the
     // OS move loop; a double-click zooms.
     Q_INVOKABLE bool startMove(QWindow* w);
@@ -61,6 +66,7 @@ private:
     QWindow* window_ = nullptr;
     bool nativeWindow_ = false;   // a real cocoa / win32 window (not the offscreen platform's)
     void updateCaptionMetrics();  // on attach, a screen change (dpi), a state change
+    void applyNative();           // the native side, once the platform window exists
 #ifdef Q_OS_MACOS
     void attachMac(QWindow* w);   // WindowChrome_mac.mm
 #endif

@@ -1,6 +1,8 @@
 #include "WindowChrome.h"
 
+#include <QEvent>
 #include <QGuiApplication>
+#include <QPlatformSurfaceEvent>
 #include <QWindow>
 
 WindowChrome::WindowChrome(bool chromeless, QObject* parent)
@@ -28,14 +30,38 @@ void WindowChrome::attach(QWindow* w) {
     const QString platform = QGuiApplication::platformName();
     window_ = w;
     nativeWindow_ = platform == QLatin1String("cocoa") || platform == QLatin1String("windows");
-#ifdef Q_OS_MACOS
-    if (chromeless_ && nativeWindow_) attachMac(w);
-#endif
-    // Windows: nothing for the chrome — the window flags (Main.qml) create
-    // the caption-less window; Qt owns the buttons and the caption drag.
+    // The platform window comes and goes under the QWindow: QWindow
+    // destroys it on an accepted close (QWindow::event, QEvent::Close →
+    // destroy()) and creates a new one on the next show(). Every creation
+    // ends with a SurfaceCreated event — the one hook that fires AFTER the
+    // native window exists (visibleChanged fires before create()).
+    w->installEventFilter(this);
+    applyNative();
     updateCaptionMetrics();
     connect(w, &QWindow::windowStateChanged, this, [this] { updateCaptionMetrics(); });
     connect(w, &QWindow::screenChanged, this, [this] { updateCaptionMetrics(); });
+}
+
+bool WindowChrome::eventFilter(QObject* obj, QEvent* ev) {
+    if (obj == window_ && ev->type() == QEvent::PlatformSurface
+        && static_cast<QPlatformSurfaceEvent*>(ev)->surfaceEventType()
+               == QPlatformSurfaceEvent::SurfaceCreated) {
+        applyNative();
+        updateCaptionMetrics();
+    }
+    return QObject::eventFilter(obj, ev);
+}
+
+void WindowChrome::applyNative() {
+    // Not before the platform window exists (a --background launch keeps
+    // the window hidden and uncreated past attach(); SurfaceCreated
+    // catches it later) — attachMac's winId() would force the creation.
+    if (!window_ || !window_->handle()) return;
+#ifdef Q_OS_MACOS
+    if (chromeless_ && nativeWindow_) attachMac(window_);
+#endif
+    // Windows: nothing for the chrome — the window flags (Main.qml) create
+    // the caption-less window; Qt owns the buttons and the caption drag.
 }
 
 void WindowChrome::updateCaptionMetrics() {
