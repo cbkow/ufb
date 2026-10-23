@@ -74,13 +74,14 @@ cards) to browse files.</string>
     <string>UFB needs access to network volumes (NAS shares, mounted
 drives) to browse files.</string>
 
-    <!-- AppleEvents: needed by core/src/shell_context_menu.rs (slice 07
-         AppleScript reveal) so osascript can drive Finder + System
-         Events. macOS gates this behind a separate consent prompt;
-         the message tells the user what's being requested. -->
+    <!-- AppleEvents: the Finder menu's "Get Info" row (app/MacShellMenu.mm)
+         asks Finder to open its info window by Apple event. macOS gates
+         this behind a one-time Automation consent; the message tells the
+         user what's being requested. (The old AppleScript + System Events
+         route, which also needed Accessibility, is gone — 2026-10-23.) -->
     <key>NSAppleEventsUsageDescription</key>
-    <string>UFB uses AppleScript to drive Finder for the
-"Show Shell Menu" action.</string>
+    <string>UFB asks Finder to open the Get Info window for the
+selected files.</string>
 
     <!-- Sparkle auto-update (Phase 2). The appcast is the committed
          docs/appcast-mac.xml, served by GitHub Pages at ufbrowser.com;

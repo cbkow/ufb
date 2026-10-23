@@ -183,54 +183,16 @@ fn show_menu_blocking(path: &str, cursor_x: i32, cursor_y: i32) -> Result<(), St
     }
 }
 
-/// macOS: reveal in Finder + simulate Ctrl+click via AppleScript.
-/// Note: requires Accessibility permissions for System Events on first use.
+/// macOS: the Finder menu is native in the GUI (app/MacShellMenu.mm —
+/// Open With / Share / Tags / Get Info from AppKit, popped at the
+/// cursor). The AppleScript + System Events route that lived here (reveal
+/// in Finder, Ctrl+Return) needed the Accessibility permission and an app
+/// switch; it was retired 2026-10-23. Kept so the FileOps binding has one
+/// signature on both OSes.
 #[cfg(target_os = "macos")]
 pub fn show_shell_context_menu(path: &str) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    if !p.exists() {
-        return Err(format!("Path does not exist: {}", path));
-    }
-
-    log::info!("show_shell_context_menu (macOS): {}", path);
-
-    let escaped_path = path.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"tell application "Finder"
-    activate
-    reveal POSIX file "{}"
-end tell
-delay 0.3
-tell application "System Events"
-    tell process "Finder"
-        set frontmost to true
-        keystroke return using {{control down}}
-    end tell
-end tell"#,
-        escaped_path
-    );
-
-    let path_owned = path.to_string();
-    std::thread::spawn(move || {
-        let result = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .output();
-
-        match result {
-            Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!(
-                    "Context menu script failed for {}: {}",
-                    path_owned,
-                    stderr.trim()
-                );
-            }
-            Err(e) => {
-                log::warn!("Failed to run osascript for {}: {}", path_owned, e);
-            }
-            _ => {}
-        }
-    });
-
-    Ok(())
+    Err(format!(
+        "show_shell_context_menu({}): handled natively by MacShellMenu on macOS",
+        path
+    ))
 }

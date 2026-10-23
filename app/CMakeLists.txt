@@ -277,13 +277,14 @@ elseif(APPLE)
         # NetFSMountURLSync for GUI-owned plain SMB mounts (plans/17
         # F1, core::macos_mounts). The #[link] attribute in the Rust
         # staticlib doesn't survive into the C++ link.
-        "-framework NetFS")
+        "-framework NetFS"
+        "-framework UniformTypeIdentifiers")   # MacShellMenu: the Open With… panel's app filter
     # ShellThumbnail_mac.mm alloc/inits a QLThumbnailGenerationRequest,
     # so it needs ARC for correct memory management. Compile just that
     # file with -fobjc-arc regardless of the project's default Obj-C
     # mode. SystemIcons_mac.mm only uses autoreleased objects, so it
     # is fine either way and left on the default.
-    set_source_files_properties(thumbnails/ShellThumbnail_mac.mm
+    set_source_files_properties(thumbnails/ShellThumbnail_mac.mm MacShellMenu.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
@@ -636,8 +637,9 @@ if(APPLE)
         MacAccent.mm
         # Slice 07 — Accessibility probe for the AppleScript-mediated
         # "Show Shell Menu" path.
-        MacAccessibility.h
-        MacAccessibility.mm
+        # The native Finder menu (Open With / Share / Tags / Get Info), ARC below.
+        MacShellMenu.h
+        MacShellMenu.mm
     )
     target_link_libraries(ufb PRIVATE
         "-framework Foundation"

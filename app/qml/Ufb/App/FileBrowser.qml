@@ -1078,7 +1078,18 @@ Rectangle {
         text: Qt.platform.os === "windows" ? qsTr("Show Shell Menu") : qsTr("Show Finder Menu")
         onTriggered: {
             var e = root._menuEntry
-            if (e) FileOps.show_shell_menu(e.path)
+            if (!e) return
+            if (Qt.platform.os === "osx") {
+                // Native AppKit menu (MacShellMenu) for the whole selection —
+                // _popupRowMenu promoted the clicked row into it; the tree
+                // view keeps its own current path.
+                var paths = root.selectedPaths()
+                if (paths.length === 0) paths = [e.path]
+                ShellMenu.show(paths)
+            } else {
+                // Windows: the Explorer IContextMenu host in Rust.
+                FileOps.show_shell_menu(e.path)
+            }
         }
     }
     Action {

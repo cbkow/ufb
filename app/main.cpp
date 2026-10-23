@@ -52,7 +52,7 @@
 #include "WindowChrome.h"
 #ifdef Q_OS_MACOS
 #  include "MacAccent.h"
-#  include "MacAccessibility.h"
+#  include "MacShellMenu.h"
 #  include "MacOSBootstrap.h"
 #endif
 
@@ -500,12 +500,11 @@ int main(int argc, char *argv[])
     ufb::MacAccentWatcher macAccent;
     engine.rootContext()->setContextProperty("MacAccent", &macAccent);
 
-    // Accessibility probe + prompt. QML calls
-    // `Accessibility.isTrusted()` before `FileOps.show_shell_menu()`;
-    // if false, calls `Accessibility.requestTrust()` to surface the
-    // system prompt. Per macOSplans/07.
-    MacAccessibility accessibility;
-    engine.rootContext()->setContextProperty("Accessibility", &accessibility);
+    // The native "Show Finder Menu" (Open With / Share / Tags / Get Info),
+    // built from AppKit — replaces the AppleScript + System Events route
+    // and the Accessibility permission it needed. See MacShellMenu.h.
+    MacShellMenu shellMenu;
+    engine.rootContext()->setContextProperty("ShellMenu", &shellMenu);
 #endif
 
     QLocalServer singletonServer;
