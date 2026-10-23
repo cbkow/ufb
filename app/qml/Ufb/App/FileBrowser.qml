@@ -2907,13 +2907,14 @@ Rectangle {
                     // so the user can see where the drop will land.
                     property bool dropTarget: model.isDir
                         && root._dropTargetPath === model.path
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: dropTarget
                         ? Theme.colors.accentSelected
                         : selected
                         ? (root.active ? Theme.colors.accentSelected : Theme.colors.accentMuted)
                         : rowMouseArea.containsMouse
                         ? "#2a2a2a"
-                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : "transparent")
+                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : Theme.colors.hoverIdle)
 
                     Row {
                         anchors.fill: parent
@@ -3127,11 +3128,12 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: 4
                         radius: Theme.dim.radius
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                         color: cell.dropTarget
                             ? Theme.colors.accentSelected
                             : cell.selected
                             ? (root.active ? Theme.colors.accentSelected : Theme.colors.accentMuted)
-                            : (cellMouseArea.containsMouse ? "#262626" : "transparent")
+                            : (cellMouseArea.containsMouse ? "#262626" : Theme.colors.hoverIdle)
                     }
 
                     Item {
@@ -3381,13 +3383,14 @@ Rectangle {
                     property bool selected: root._isTreeSelected(model.path)
                     property bool dropTarget: model.isDir
                         && root._dropTargetPath === model.path
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: dropTarget
                         ? Theme.colors.accentSelected
                         : selected
                         ? (root.active ? Theme.colors.accentSelected : Theme.colors.accentMuted)
                         : treeRowHover.containsMouse
                         ? "#262626"
-                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : "transparent")
+                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : Theme.colors.hoverIdle)
 
                     // Row-wide MouseArea sits BEHIND the Row layout so
                     // the triangle MouseArea inside Row gets first crack

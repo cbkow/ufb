@@ -300,11 +300,12 @@ Rectangle {
                 id: bmRow
                 width: bookmarksList.width
                 height: Theme.dim.rowHeightDense
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                 color: bmDropTarget.containsDrag
                     ? Theme.colors.accentMuted
                     : (bmHover.containsMouse
                         ? Theme.colors.surfaceHover
-                        : "transparent")
+                        : Theme.colors.hoverIdle)
                 property string bmPath: model.path
                 property string bmName: model.displayName
                 property bool bmSystem: !!model.system
@@ -421,11 +422,12 @@ Rectangle {
                 id: subRow
                 width: subscriptionsList.width
                 height: Theme.dim.rowHeight
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                 color: subDropTarget.containsDrag
                     ? Theme.colors.accentMuted
                     : (subHover.containsMouse
                         ? Theme.colors.surfaceHover
-                        : "transparent")
+                        : Theme.colors.hoverIdle)
                 property string sJobPath: model.jobPath
                 property string sJobName: model.jobName
 
@@ -517,9 +519,10 @@ Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.dim.rowHeight
             Layout.topMargin: Theme.dim.sidebarListPad
+            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
             color: trackerHover.containsMouse
                 ? Theme.colors.surfaceHover
-                : "transparent"
+                : Theme.colors.hoverIdle
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.dim.padding
@@ -547,9 +550,10 @@ Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Theme.dim.rowHeight
             Layout.topMargin: Theme.dim.sidebarRowGap
+            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
             color: transcodeHover.containsMouse
                 ? Theme.colors.surfaceHover
-                : "transparent"
+                : Theme.colors.hoverIdle
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: Theme.dim.padding
@@ -615,11 +619,12 @@ Rectangle {
                 id: mountRow
                 width: mountsList.width
                 height: Theme.dim.rowHeightStacked
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                 color: mtDropTarget.containsDrag
                     ? Theme.colors.accentMuted
                     : (mtHover.containsMouse
                         ? Theme.colors.surfaceHover
-                        : "transparent")
+                        : Theme.colors.hoverIdle)
                 opacity: model.mountPath.length > 0 ? 1.0 : 0.5
 
                 readonly property string mountId: model.mountId || ""

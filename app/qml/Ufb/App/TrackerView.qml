@@ -729,9 +729,10 @@ Rectangle {
                         // Active chip: accent fill. Hover: surfaceHover.
                         // Resting: transparent (chip strip's toolbarAlt
                         // shows through).
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                         color: active
                             ? Theme.colors.accent
-                            : (chipMa.containsMouse ? Theme.colors.surfaceHover : "transparent")
+                            : (chipMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle)
                         Label {
                             id: chipLabel
                             anchors.centerIn: parent
@@ -1210,11 +1211,12 @@ Rectangle {
                                 ? ListView.view.contentWidth
                                 : trackedList.width
                             height: 24
+                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                             color: isSelected
                                 ? Theme.colors.accentMuted
                                 : rowMa.containsMouse
                                 ? Theme.colors.surfaceHover
-                                : (index % 2 === 1 ? Theme.colors.surfaceAlt : "transparent")
+                                : (index % 2 === 1 ? Theme.colors.surfaceAlt : Theme.colors.hoverIdle)
 
                             readonly property var rowMetadata: {
                                 try { return JSON.parse(metadataJsonStr || "{}") }
@@ -1645,7 +1647,8 @@ Rectangle {
                 delegate: Rectangle {
                     implicitHeight: 24
                     implicitWidth: 32
-                    color: cellMa.containsMouse ? Theme.colors.accentMuted : "transparent"
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                    color: cellMa.containsMouse ? Theme.colors.accentMuted : Theme.colors.hoverIdle
                     radius: Theme.dim.radiusSmall
                     Label {
                         anchors.centerIn: parent

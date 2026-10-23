@@ -1266,9 +1266,10 @@ ApplicationWindow {
                             height: tabRow.height
                             width: filesTabContent.implicitWidth
                                 + (filesTabs.count > 1 ? 36 : 24)
+                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                             color: tabBar.currentIndex === tabIdx
                                 ? Theme.colors.surfaceHover
-                                : (filesMa.containsMouse ? Theme.colors.surface : "transparent")
+                                : (filesMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                             Row {
                                 id: filesTabContent
@@ -1308,8 +1309,9 @@ ApplicationWindow {
                                 width: 16
                                 height: 16
                                 radius: Theme.dim.radiusSmall
+                                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                                 color: filesCloseMa.containsMouse
-                                    ? Theme.colors.surfaceHover : "transparent"
+                                    ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
                                 Label {
                                     anchors.centerIn: parent
                                     text: "×"
@@ -1367,9 +1369,10 @@ ApplicationWindow {
                             readonly property int tabIdx: filesTabs.count + index
                             height: tabRow.height
                             width: Math.min(180, jobLabel.implicitWidth + 44)
+                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                             color: tabBar.currentIndex === tabIdx
                                 ? Theme.colors.surfaceHover
-                                : (jobMa.containsMouse ? Theme.colors.surface : "transparent")
+                                : (jobMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                             Row {
                                 id: jobLabel
@@ -1414,7 +1417,8 @@ ApplicationWindow {
                                 width: 16
                                 height: 16
                                 radius: Theme.dim.radiusSmall
-                                color: closeMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
+                                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                                color: closeMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
                                 Label {
                                     anchors.centerIn: parent
                                     text: "×"
@@ -1488,8 +1492,9 @@ ApplicationWindow {
                     Rectangle {
                         height: tabRow.height
                         width: 28
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                         color: addFilesMa.containsMouse
-                            ? Theme.colors.surface : "transparent"
+                            ? Theme.colors.surface : Theme.colors.hoverIdle
                         Icon {
                             anchors.centerIn: parent
                             name: "plus"
@@ -1516,8 +1521,9 @@ ApplicationWindow {
                         height: tabRow.height
                         width: 28
                         opacity: window._hasClosableTabs() ? 1 : 0.35
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                         color: closeAllMa.containsMouse && window._hasClosableTabs()
-                            ? Theme.colors.surface : "transparent"
+                            ? Theme.colors.surface : Theme.colors.hoverIdle
                         Icon {
                             anchors.centerIn: parent
                             name: "x-circle"
@@ -1549,9 +1555,10 @@ ApplicationWindow {
                     readonly property int tabIdx: window._transcodeTabIndex
                     height: tabRow.height
                     width: transcodeTabLabel.implicitWidth + 44
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: tabBar.currentIndex === tabIdx
                         ? Theme.colors.surfaceHover
-                        : (transcodeTabMa.containsMouse ? Theme.colors.surface : "transparent")
+                        : (transcodeTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
                     Row {
                         id: transcodeTabLabel
                         anchors.left: parent.left
@@ -1603,7 +1610,8 @@ ApplicationWindow {
                         anchors.rightMargin: 6
                         anchors.verticalCenter: parent.verticalCenter
                         width: 16; height: 16; radius: Theme.dim.radiusSmall
-                        color: transcodeCloseMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                        color: transcodeCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
                         Label {
                             anchors.centerIn: parent
                             text: "×"; color: Theme.colors.text; font.pixelSize: 13
@@ -1653,9 +1661,10 @@ ApplicationWindow {
                     readonly property int tabIdx: window._trackerTabIndex
                     height: tabRow.height
                     width: trackerTabLabel.implicitWidth + 44
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: tabBar.currentIndex === tabIdx
                         ? Theme.colors.surfaceHover
-                        : (trackerTabMa.containsMouse ? Theme.colors.surface : "transparent")
+                        : (trackerTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                     Row {
                         id: trackerTabLabel
@@ -1692,7 +1701,8 @@ ApplicationWindow {
                         width: 16
                         height: 16
                         radius: Theme.dim.radiusSmall
-                        color: trackerCloseMa.containsMouse ? Theme.colors.surfaceHover : "transparent"
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                        color: trackerCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
                         Label {
                             anchors.centerIn: parent
                             text: "×"
@@ -1966,6 +1976,7 @@ ApplicationWindow {
                     Layout.preferredWidth: taskChipRow.implicitWidth + 12
                     Layout.alignment: Qt.AlignVCenter
                     radius: Theme.dim.radiusSmall
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: taskChipMa.containsMouse
                         ? Theme.colors.surfaceHover : Theme.colors.accentMuted
                     RowLayout {
@@ -2027,6 +2038,7 @@ ApplicationWindow {
                 Layout.preferredWidth: moreLabel.implicitWidth + 12
                 Layout.alignment: Qt.AlignVCenter
                 radius: Theme.dim.radiusSmall
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                 color: moreMa.containsMouse
                     ? Theme.colors.surfaceHover : Theme.colors.accentMuted
                 Label {
@@ -2057,6 +2069,7 @@ ApplicationWindow {
                     Layout.preferredWidth: failChipRow.implicitWidth + 12
                     Layout.alignment: Qt.AlignVCenter
                     radius: Theme.dim.radiusSmall
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: failChipMa.containsMouse
                         ? Theme.colors.error
                         : Qt.rgba(Theme.colors.error.r, Theme.colors.error.g,

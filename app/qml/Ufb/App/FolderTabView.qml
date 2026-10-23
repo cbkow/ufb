@@ -439,9 +439,10 @@ Item {
                                         readonly property bool isActive: root.bottomSubtab === modelData
                                         height: parent.height
                                         width: Math.max(subtabLabel.implicitWidth + 22, 80)
+                                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                                         color: isActive
                                             ? Theme.colors.surfaceHover
-                                            : (subtabMa.containsMouse ? Theme.colors.surface : "transparent")
+                                            : (subtabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                                         Label {
                                             id: subtabLabel

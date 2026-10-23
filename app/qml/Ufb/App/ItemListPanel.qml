@@ -985,11 +985,12 @@ Rectangle {
                     width: itemView.width
                     height: Theme.dim.itemRowHeight
                     property bool selected: itemRow.path === root.selectedItemPath
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: selected
                         ? Theme.colors.accentSelected
                         : rowMa.containsMouse
                         ? Theme.colors.surfaceHover
-                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : "transparent")
+                        : (index % 2 === 1 ? Theme.colors.surfaceAlt : Theme.colors.hoverIdle)
                     /// Per-row metadata, looked up from the bulk-fetch
                     /// table on root. Recomputed when _metadataByPath
                     /// changes (re-evaluation triggered by the parent

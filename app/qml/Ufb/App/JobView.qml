@@ -330,9 +330,10 @@ Item {
                         readonly property int tabIdx: index
                         height: parent.height
                         width: Math.max(folderLabel.implicitWidth + 22, 80)
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                         color: jobTabBar.currentIndex === tabIdx
                             ? Theme.colors.surfaceHover
-                            : (folderMa.containsMouse ? Theme.colors.surface : "transparent")
+                            : (folderMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                         Label {
                             id: folderLabel
@@ -368,9 +369,10 @@ Item {
                     readonly property int tabIdx: tabsModel.count
                     height: parent.height
                     width: innerTrackerRow.implicitWidth + 22
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                     color: jobTabBar.currentIndex === tabIdx
                         ? Theme.colors.surfaceHover
-                        : (trackerMa.containsMouse ? Theme.colors.surface : "transparent")
+                        : (trackerMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
 
                     Row {
                         id: innerTrackerRow

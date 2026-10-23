@@ -371,6 +371,7 @@ Rectangle {
                                 width: cardList.width - cardList.leftMargin - cardList.rightMargin
                                 height: Theme.dim.itemRowHeight * 2
                                 radius: Theme.dim.radius
+                                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
                                 color: selected
                                     ? Theme.colors.accentSelected
                                     : (cardMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.surface)
