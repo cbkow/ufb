@@ -57,6 +57,7 @@ pub mod macos_mounts;
 pub mod windows_mounts;
 pub mod mount_client;
 pub mod shell_context_menu;
+pub mod lucidlink;
 pub mod sync_aware;
 pub mod transcode;
 pub mod archive;

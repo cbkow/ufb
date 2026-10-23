@@ -27,6 +27,7 @@ fn main() {
                 "src/services/directory.rs",
                 "src/services/directory_tree.rs",
                 "src/services/file_ops.rs",
+                "src/services/lucid.rs",
                 "src/services/mesh.rs",
                 "src/services/metadata.rs",
                 "src/services/mount.rs",

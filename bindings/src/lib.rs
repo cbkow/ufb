@@ -28,6 +28,7 @@ pub mod services {
     pub mod directory;
     pub mod directory_tree;
     pub mod file_ops;
+    pub mod lucid;
     pub mod mesh;
     pub mod metadata;
     pub mod mount;

@@ -1129,7 +1129,17 @@ Rectangle {
         // commonly: a freshly-opened project tab). Re-evaluate on
         // every popup via aboutToShow.
         property bool _pasteAvailable: false
-        onAboutToShow: _pasteAvailable = root._clipboardHasPaths()
+        // LucidLink rows (2026-10-23): visible only when the whole
+        // selection sits on one filespace; the pin state comes from the
+        // CLI's pin list, cached in core. Re-read on every popup.
+        property var _lucid: ({ onFilespace: false, pinnedAll: false, pinnedAny: false, filespace: "" })
+        onAboutToShow: {
+            _pasteAvailable = root._clipboardHasPaths()
+            var sel = root.selectedPaths()
+            if (sel.length === 0 && root._menuEntry) sel = [root._menuEntry.path]
+            try { _lucid = JSON.parse(Lucid.selection_state(JSON.stringify(sel))) }
+            catch (e) { _lucid = { onFilespace: false, pinnedAll: false, pinnedAny: false, filespace: "" } }
+        }
         UfbMenuItem { iconName: "arrow-square-out"; action: openAction }
         UfbMenuItem {
             iconName: "columns"
@@ -1223,6 +1233,32 @@ Rectangle {
                 Archive.add_compress_job(JSON.stringify(paths))
             }
         }
+        // LucidLink: keep / drop a local copy (the Finder / Explorer
+        // extension's "pin" rows, through the lucid3 CLI — see
+        // core/src/lucidlink.rs). Pin shows while any selected item is
+        // unpinned, Unpin while any is pinned; both for a mixed selection.
+        UfbMenuItem {
+            iconName: "push-pin"
+            text: qsTr("Pin Locally (LucidLink)")
+            visible: fileMenu._lucid.onFilespace && !fileMenu._lucid.pinnedAll
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var paths = root.selectedPaths()
+                if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
+                if (paths.length > 0) Lucid.set_pinned(JSON.stringify(paths), true)
+            }
+        }
+        UfbMenuItem {
+            iconName: "push-pin-slash"
+            text: qsTr("Unpin (LucidLink)")
+            visible: fileMenu._lucid.onFilespace && fileMenu._lucid.pinnedAny
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var paths = root.selectedPaths()
+                if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
+                if (paths.length > 0) Lucid.set_pinned(JSON.stringify(paths), false)
+            }
+        }
         MenuSeparator {}
         UfbMenuItem { iconName: "folder-simple"; action: revealAction }
         UfbMenuItem { iconName: "dots-three-outline"; action: showShellMenuAction }
@@ -1267,6 +1303,31 @@ Rectangle {
         // moment to settle - go through refreshAfterDropTimer for
         // consistency with the other ops.
         onCreated: refreshAfterDropTimer.restart()
+    }
+
+    // LucidLink pin / unpin result: silent on success (the row flips on
+    // the next popup), a dialog on failure.
+    Connections {
+        target: Lucid
+        function onPin_done(ok, message) {
+            if (ok) { console.log("LucidLink:", message); return }
+            lucidErrorDialog.message = message
+            lucidErrorDialog.open()
+        }
+    }
+    Dialog {
+        id: lucidErrorDialog
+        property string message: ""
+        title: qsTr("LucidLink")
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok
+        Label {
+            text: lucidErrorDialog.message
+            color: Theme.colors.text
+            wrapMode: Text.Wrap
+            Layout.preferredWidth: 420
+        }
     }
 
     Dialog {
