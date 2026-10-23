@@ -245,7 +245,7 @@ Dialog {
                     text: dialog.configsObj.syncCacheRoot
                         || dialog._defaultCacheRoot()
                     color: Theme.colors.text
-                    font.family: "Consolas, monospace"
+                    font.family: Theme.font.mono
                     font.pixelSize: 11
                     elide: Text.ElideMiddle
                 }
@@ -426,7 +426,7 @@ Dialog {
                                 text: modelData.nasSharePath || ""
                                 color: Theme.colors.textSubtle
                                 font.pixelSize: 10
-                                font.family: "Consolas"
+                                font.family: Theme.font.mono
                                 elide: Text.ElideMiddle
                                 Layout.fillWidth: true
                             }
@@ -731,7 +731,7 @@ Dialog {
                     placeholderText: unmanagedBox.checked
                         ? (Qt.platform.os === "osx" ? "/Volumes/SomeVolume or /Users/you/Projects" : "D:\\Projects")
                         : "\\\\nas\\share"
-                    font.family: "Consolas"
+                    font.family: Theme.font.mono
                     font.pixelSize: 11
                 }
 

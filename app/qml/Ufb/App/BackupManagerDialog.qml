@@ -159,7 +159,7 @@ Dialog {
                                     : ""
                                 color: Theme.colors.text
                                 font.pixelSize: 12
-                                font.family: "Consolas"
+                                font.family: Theme.font.mono
                             }
                             Label {
                                 text: modelData

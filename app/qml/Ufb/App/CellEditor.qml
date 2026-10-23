@@ -179,7 +179,7 @@ Item {
                 text: cell.displayText
                 color: cell.selected ? "#cfd9e6" : "#cccccc"
                 font.pixelSize: 11
-                font.family: "Consolas"
+                font.family: Theme.font.mono
             }
             MouseArea {
                 anchors.fill: parent
@@ -363,7 +363,7 @@ Item {
                 text: cell.displayText
                 color: cell.selected ? "#cfd9e6" : "#cccccc"
                 font.pixelSize: 11
-                font.family: "Consolas"
+                font.family: Theme.font.mono
                 elide: Text.ElideRight
             }
             MouseArea {

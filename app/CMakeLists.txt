@@ -154,6 +154,20 @@ qt_add_qml_module(ufb
         qml/Ufb/App/fonts/Phosphor-Fill.ttf
         qml/Ufb/App/fonts/Phosphor-Duotone.ttf
         qml/Ufb/App/fonts/Phosphor-Thin.ttf
+        # Geist Sans + Geist Mono (OFL 1.1), the app's text fonts on every OS.
+        qml/Ufb/App/fonts/Geist-Regular.ttf
+        qml/Ufb/App/fonts/Geist-Bold.ttf
+        qml/Ufb/App/fonts/Geist-Italic.ttf
+        qml/Ufb/App/fonts/Geist-BoldItalic.ttf
+        qml/Ufb/App/fonts/Geist-Light.ttf
+        qml/Ufb/App/fonts/Geist-LightItalic.ttf
+        qml/Ufb/App/fonts/Geist-Medium.ttf
+        qml/Ufb/App/fonts/Geist-MediumItalic.ttf
+        qml/Ufb/App/fonts/Geist-SemiBold.ttf
+        qml/Ufb/App/fonts/GeistMono-Regular.ttf
+        qml/Ufb/App/fonts/GeistMono-Bold.ttf
+        qml/Ufb/App/fonts/GeistMono-Italic.ttf
+        qml/Ufb/App/fonts/GeistMono-BoldItalic.ttf
 )
 
 # qt_add_qml_module's auto-generated type registrar emits

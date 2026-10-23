@@ -219,18 +219,33 @@ QtObject {
     }
 
     // ── Text font ────────────────────────────────────────────────────
+    // Geist Sans + Geist Mono (Vercel, OFL 1.1; LICENSES/Geist-OFL-1.1.txt),
+    // bundled so every OS renders the same chrome (2026-10-23; before this
+    // the app fell back to Segoe UI / SF Pro and Consolas / Menlo). Static
+    // cuts: Qt files every sans cut under the one family "Geist" and every
+    // mono cut under "Geist Mono", so font.bold / font.italic / font.weight
+    // pick a real face. main.cpp registers the same files for the
+    // application-wide QFont before the engine loads.
+    readonly property FontLoader geistFont:           FontLoader { source: Qt.resolvedUrl("fonts/Geist-Regular.ttf") }
+    readonly property FontLoader geistBoldFont:       FontLoader { source: Qt.resolvedUrl("fonts/Geist-Bold.ttf") }
+    readonly property FontLoader geistItalicFont:     FontLoader { source: Qt.resolvedUrl("fonts/Geist-Italic.ttf") }
+    readonly property FontLoader geistBoldItalicFont: FontLoader { source: Qt.resolvedUrl("fonts/Geist-BoldItalic.ttf") }
+    readonly property FontLoader geistLightFont:        FontLoader { source: Qt.resolvedUrl("fonts/Geist-Light.ttf") }
+    readonly property FontLoader geistLightItalicFont:  FontLoader { source: Qt.resolvedUrl("fonts/Geist-LightItalic.ttf") }
+    readonly property FontLoader geistMediumFont:       FontLoader { source: Qt.resolvedUrl("fonts/Geist-Medium.ttf") }
+    readonly property FontLoader geistMediumItalicFont: FontLoader { source: Qt.resolvedUrl("fonts/Geist-MediumItalic.ttf") }
+    readonly property FontLoader geistSemiBoldFont:     FontLoader { source: Qt.resolvedUrl("fonts/Geist-SemiBold.ttf") }
+    readonly property FontLoader geistMonoFont:           FontLoader { source: Qt.resolvedUrl("fonts/GeistMono-Regular.ttf") }
+    readonly property FontLoader geistMonoBoldFont:       FontLoader { source: Qt.resolvedUrl("fonts/GeistMono-Bold.ttf") }
+    readonly property FontLoader geistMonoItalicFont:     FontLoader { source: Qt.resolvedUrl("fonts/GeistMono-Italic.ttf") }
+    readonly property FontLoader geistMonoBoldItalicFont: FontLoader { source: Qt.resolvedUrl("fonts/GeistMono-BoldItalic.ttf") }
     readonly property QtObject font: QtObject {
-        readonly property string family:     "Segoe UI"   // Windows; falls back per OS
-        // Monospace, resolved per-platform so tabular digits stay fixed-width
-        // (otherwise a Windows-only name like "Consolas" silently falls back to
-        // a proportional font on macOS and numbers jump as they change).
-        readonly property string mono: {
-            switch (Qt.platform.os) {
-            case "windows": return "Consolas"
-            case "osx":     return "Menlo"        // ships with macOS
-            default:        return "monospace"
-            }
-        }
+        // Resolved from the loaders, with the old per-OS names as the
+        // fallback while a loader is still in flight.
+        readonly property string family: theme.geistFont.status === FontLoader.Ready
+                                         ? theme.geistFont.name : "Geist"
+        readonly property string mono:   theme.geistMonoFont.status === FontLoader.Ready
+                                         ? theme.geistMonoFont.name : "Geist Mono"
         readonly property int sizeTiny:      10
         readonly property int sizeSmall:     11
         readonly property int sizeBody:      12

@@ -9,6 +9,7 @@
 #include <QGuiApplication>
 #include <QColor>
 #include <QFont>
+#include <QFontDatabase>
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -353,17 +354,29 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // Geist Sans + Geist Mono are the app's text fonts on every OS
+    // (2026-10-23). Register the bundled cuts here so the application-
+    // wide QFont — what the FluentWinUI3 controls and any QML Text
+    // without an explicit family inherit — is Geist from the first
+    // paint; Theme.qml's FontLoaders resolve the same files for the
+    // Theme.font.family / .mono tokens.
+    {
+        QDir fontDir(QStringLiteral(":/qt/qml/Ufb/App/qml/Ufb/App/fonts"));
+        int registered = 0;
+        for (const QString &f : fontDir.entryList({QStringLiteral("Geist*.ttf")}, QDir::Files)) {
+            if (QFontDatabase::addApplicationFont(fontDir.filePath(f)) >= 0) ++registered;
+        }
+        if (registered == 0)
+            qWarning("ufb: no Geist fonts registered — falling back to the system UI font");
+    }
 #ifdef Q_OS_WIN
-    QFont base("Segoe UI Variable Display", 9);
+    QFont base(QStringLiteral("Geist"), 9);
     QGuiApplication::setFont(base);
     QQuickStyle::setStyle("FluentWinUI3");
 #elif defined(Q_OS_MACOS)
-    // Take Qt's default (which routes to .AppleSystemUIFont → SF Pro
-    // on macOS 10.11+) but bump to 13pt to match Finder's default UI
-    // text size. Per macOSplans/04 §5.
+    // 13pt matches Finder's default UI text size (macOSplans/04 §5).
     {
-        QFont base = QGuiApplication::font();
-        base.setPointSize(13);
+        QFont base(QStringLiteral("Geist"), 13);
         QGuiApplication::setFont(base);
     }
     // Use FluentWinUI3 on macOS too, matching Windows. The native

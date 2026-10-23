@@ -338,7 +338,7 @@ Rectangle {
                                         ? Theme.colors.textMuted
                                         : Theme.colors.textSubtle)
                                 font.pixelSize: 10
-                                font.family: "Consolas"
+                                font.family: Theme.font.mono
                                 elide: Text.ElideMiddle
                                 Layout.fillWidth: true
                             }
@@ -364,7 +364,7 @@ Rectangle {
                             text: jobRow.detail
                             color: Theme.colors.textMuted
                             font.pixelSize: 10
-                            font.family: "Consolas"
+                            font.family: Theme.font.mono
                             elide: Text.ElideLeft
                             Layout.preferredWidth: 160
                             horizontalAlignment: Text.AlignRight

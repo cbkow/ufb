@@ -1652,7 +1652,7 @@ Rectangle {
                 text: root._pendingDropTarget
                 color: "#bbbbbb"
                 font.pixelSize: 11
-                font.family: "Consolas, monospace"
+                font.family: Theme.font.mono
                 Layout.fillWidth: true
                 elide: Text.ElideMiddle
             }
@@ -2268,7 +2268,7 @@ Rectangle {
                 anchors.fill: parent
                 visible: root._pathEditing
                 text: root.dir.current_path
-                font.family: "Consolas"
+                font.family: Theme.font.mono
                 font.pixelSize: 12
                 selectByMouse: true
                 onAccepted: {
@@ -2977,7 +2977,7 @@ Rectangle {
                             text: model.isDir ? "—" : root.formatSize(model.size)
                             color: rowItem.selected ? "#cfd9e6" : "#888"
                             font.pixelSize: 11
-                            font.family: "Consolas"
+                            font.family: Theme.font.mono
                             horizontalAlignment: Text.AlignRight
                             anchors.verticalCenter: parent.verticalCenter
                         }
@@ -2989,7 +2989,7 @@ Rectangle {
                             text: root.formatDate(model.modified)
                             color: rowItem.selected ? "#cfd9e6" : "#888"
                             font.pixelSize: 11
-                            font.family: "Consolas"
+                            font.family: Theme.font.mono
                             horizontalAlignment: Text.AlignRight
                             anchors.verticalCenter: parent.verticalCenter
                         }

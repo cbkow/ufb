@@ -103,7 +103,7 @@ Dialog {
                 id: farmPathField
                 Layout.fillWidth: true
                 placeholderText: "\\\\nas\\jobs\\.ufb-mesh"
-                font.family: "Consolas"
+                font.family: Theme.font.mono
                 font.pixelSize: 11
             }
 
@@ -112,7 +112,7 @@ Dialog {
                 id: nodeIdField
                 Layout.fillWidth: true
                 placeholderText: qsTr("Unique per machine, e.g. workstation-04")
-                font.family: "Consolas"
+                font.family: Theme.font.mono
                 font.pixelSize: 11
             }
 
@@ -125,7 +125,7 @@ Dialog {
                 // so other nodes can filter/target by role. Common
                 // values: "render", "gpu", "client", "nyc".
                 placeholderText: qsTr("Comma-separated, e.g. render, gpu")
-                font.family: "Consolas"
+                font.family: Theme.font.mono
                 font.pixelSize: 11
             }
         }
@@ -165,7 +165,7 @@ Dialog {
                 Label {
                     text: dialog.status.leaderId || qsTr("(none)")
                     color: dialog.status.isLeader ? "#7ed321" : "#dddddd"
-                    font.pixelSize: 11; font.family: "Consolas"
+                    font.pixelSize: 11; font.family: Theme.font.mono
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                 }
@@ -177,7 +177,7 @@ Dialog {
                 Label { text: qsTr("Last snapshot"); color: Theme.colors.textSubtle; font.pixelSize: 10 }
                 Label {
                     text: dialog._formatTime(dialog.status.lastSnapshotTime)
-                    color: Theme.colors.text; font.pixelSize: 11; font.family: "Consolas"
+                    color: Theme.colors.text; font.pixelSize: 11; font.family: Theme.font.mono
                 }
                 // Degraded-sync warning — only shown when one has fired.
                 // Surfaces dropped edits / outbox overflows / template
@@ -272,7 +272,7 @@ Dialog {
                             text: modelData.nodeId || "?"
                             color: Theme.colors.text
                             font.pixelSize: 12
-                            font.family: "Consolas"
+                            font.family: Theme.font.mono
                             font.bold: modelData.isLeader === true
                             elide: Text.ElideRight
                             Layout.fillWidth: true
