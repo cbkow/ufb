@@ -352,6 +352,49 @@ minimal — these are decode/audio-layer units).
 
 Append newest entries at the top. Each milestone updates this as part of its commit.
 
+### 2026-10-23 — QCView catch-up: read-ahead, audio drain / hold, humanist pass (macOS session; Windows unbuilt)
+
+UFB's player is a copy of QCView-Player's decode + audio stacks, last synced at
+QCView 13884ff5 (2026-09-09). This re-sync lands everything QCView changed since
+in the borrowed files, as three commits on `qcview-sync-2026-10`:
+
+- **Read-ahead** (`app/player/read_ahead.{h,cpp}`, QCView 2026-09-22): one
+  utility-QoS thread touches one byte per 1 MiB volume cache page over the
+  next 2 s / 512 MB of frames, from the container's index, driven by the
+  decoder's read position (attach in open, position from seekToFrame +
+  publishHandle, detach in close). For LucidLink; a no-op cost locally.
+  `UFB_READAHEAD_SECONDS` (0 = off) / `_MB` / `_PAGE_KB`. Plus the 2 s
+  `VideoDecoder: playing N fps … read waits` log that says whether it lands.
+- **swsPaddedStride** in `sws_rgba_image.h` (QCView 2.3.3): the yuv420p→RGBA8
+  writer overshoots every row by a SIMD block; with sliced threading that
+  left 8 wrong pixels per slice boundary at widths not a multiple of 16. The
+  +1 row slack already covered the crash. **Untagged video is BT.709** on the
+  CPU path too (it guessed 601 for SD while the GPU paths assumed 709).
+- **Audio** (QCView 4695540e): `AudioDrainStage` owns the resampler and fades
+  every discontinuity (seek-out/in, underrun, hold, skip, pause, restart);
+  the ring is marked stale at a seek instead of cleared; both decoders
+  decode-and-discard to the seek target (sample-accurate anchor);
+  `AudioPlayer.setHold / releaseHold / held` — `VideoPreview._startAudio`
+  arms the hold after every `dec.play()` and `onCurrentFrameChanged`
+  releases it at the landed frame (small forward delta = ring skip, else
+  re-seek); pause fades then stops the device 30 ms later; servo band 40 →
+  100 ms with tiered trim (0.2 % → 1.5 %), re-seek only after 4 sustained
+  out-of-band ticks; the resampler keeps its look-ahead in a 5-frame history
+  (retires the 2026-09-10 carry buffer). AudioPreview never holds (no picture).
+- **Humanist pass** (minNotes 2026-10-21 → QCView 2026-10-23): `Theme.dim`
+  radiusSmall 3 / radius 6 / radiusLarge 10, hoverMs 100, popupMs 80;
+  `Theme.colors.hoverIdle` + `surfacePressed`; FlatButton ramps and has a
+  pressed step; every literal radius re-tokenised. The transport inherits it.
+- **Verified (mac, argv harness, no ears):** H.264 720p, ProRes 422 HQ + PCM
+  and 1080×1920 H.264 — read-ahead attaches + warms; first open releases the
+  hold "in place (+0.0 ms)" (the start-up re-seek at −0.042 s noted on
+  2026-09-10 is gone); resume after pause / after a shuttle is a ring skip
+  (~+140 ms: the decoder's lead), **zero re-seek lines**, servo drift ≤ 22 ms.
+- **Not ported:** QCView's CpuYuv GPU conversion (OCIO/super-white specific),
+  the playlist seek gate, live sources, dual, shuttle, tempo.
+- **Open:** a listen test (both OSes), the Windows build, and the exiftool
+  13.58 tarball that `setup-external-mac.sh` can no longer fetch.
+
 ### 2026-09-17 — minNotes 1.0 (`.mnd`) catch-up + Word (`.docx`) preview (macOS session; Windows unbuilt)
 
 **minNotes 1.0 clean break** (minNotes c4de6c4, verified against 2eb969a /
