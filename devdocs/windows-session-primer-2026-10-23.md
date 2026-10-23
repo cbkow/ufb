@@ -158,3 +158,55 @@ macOS arm is a stub).
 - Pre-existing, both OSes: `QML Dialog: Binding loop detected for property
   "implicitWidth"` from three dialogs (Main.qml close-all confirm, two in
   Sidebar).
+
+## 7. Windows session results (2026-10-23, driven from the Mac over SSH)
+
+Built and run on the box the same day; three fixes landed as commits on
+`main` after 301797c:
+
+- `ea87b25` dev-env.ps1 keeps `VCPKG_ROOT` across the VS 18 vcvars import
+  (VS 18 exports its bundled vcpkg; the preset's toolchain path followed it
+  and died bootstrapping). Also: `build\release` still held the VS 2022
+  compiler path from before the box's toolchain swap — wiped and
+  reconfigured (`ufb-build.ps1` in `C:\qcb-lab` does this when it sees a
+  2022 cache).
+- `bfc8a62` `std::max` in the new read-wait stat and the pause delay hit
+  windows.h's `max` macro (MSVC C2589); both sites dodge it now.
+- `9286bef` `UFB_LOG_FILE=<path>` appends every Qt message to a file — a
+  GUI-subsystem exe attaches the parent console and reopens stderr on
+  CONOUT$, so a shell redirect captured nothing.
+
+Verified on the box (RTX 5090, 125 % scaling, VS 18, Qt 6.11.1):
+
+- **Window chrome:** the client area starts at the window's top edge
+  (GetWindowRect vs ClientToScreen inset top = 0, style has no
+  WS_CAPTION); the tab strip sits in the title row with Qt's caption
+  buttons at its right end; no painted top border. Lightbox close button
+  clear of the caption zone.
+- **Player, through the lightbox harness:** D3D11VA zero-copy on H.264
+  720p and 1080×1920, read-ahead attached and warm, first-open hold
+  released in place, resume after pause and after an eight-step storm
+  landed as ring skips (+35 / +42 ms), zero re-seek lines, servo drift
+  −3 ms. No QML errors.
+- **LucidLink (core probe on the box):** CLI found at
+  `C:\Program Files\LucidLink\bin\Lucid3.exe`, mount point
+  `C:\Volumes\union-ny-gfx\union-jobs` (a path, not a bare drive letter),
+  relative paths right, the root refused, a live direct link and guest-link
+  URL returned.
+- **Fonts:** Geist registered (no fallback warning).
+
+Not walked by hand on Windows: the tab drag-vs-click feel (§2), the
+caption buttons' hit test and snap layouts, the LucidLink rows as
+clicked in the menu, and a listen test. The box's tree is clean and
+`build\release` is a harness-free build of `main`; the next installer
+can go straight from it.
+
+Driving recipe that worked: `ssh uniongraphics@<box>` (no tunnel needed
+from the LAN), commits shipped as `git bundle create x.bundle
+origin/main..main` + scp + `git pull --ff-only C:\qcb-lab\x.bundle main`
+when they are not pushed yet, synchronous builds via `ufb-build.ps1`,
+desktop runs through `C:\qcb-lab\run.ps1` with `LOCALAPPDATA` pointed at
+`C:\qcb-lab\ufb-profile` (its own single-instance lock and settings, so
+the installed UFB that is usually running there is never touched — stop
+only the pid you started), `UFB_LOG_FILE` for the log, `screengrab.ps1`
+for the desktop and the harness's `grabroot:` / `grab:` for QML grabs.
