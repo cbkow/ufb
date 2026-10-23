@@ -113,6 +113,12 @@ extern "C" {
 // Phase 2 bring-up: force every Qt log message to stderr so QML import
 // errors are visible from PowerShell. Will go away (or get a better
 // handler that writes to a log file) once the GUI shell stabilises.
+// UFB_LOG_FILE=<path> (dev, 2026-10-23): every message is appended there as
+// well. On Windows a GUI-subsystem exe attaches the parent console and
+// reopens stderr on CONOUT$, so a shell redirect captures nothing — this
+// is how a scripted run on the Windows box gets its log.
+static FILE* s_logFile = nullptr;
+
 static void messageHandler(QtMsgType type, const QMessageLogContext& ctx, const QString& msg)
 {
     const char* prefix = "?";
@@ -129,6 +135,12 @@ static void messageHandler(QtMsgType type, const QMessageLogContext& ctx, const 
     }
     fputc('\n', stderr);
     fflush(stderr);
+    if (s_logFile) {
+        fprintf(s_logFile, "[Qt %s] %s", prefix, qPrintable(msg));
+        if (ctx.file) fprintf(s_logFile, "  (%s:%d)", ctx.file, ctx.line);
+        fputc('\n', s_logFile);
+        fflush(s_logFile);
+    }
 }
 
 int main(int argc, char *argv[])
@@ -172,6 +184,10 @@ int main(int argc, char *argv[])
     }
 #endif
 
+    {
+        const QByteArray logPath = qgetenv("UFB_LOG_FILE");
+        if (!logPath.isEmpty()) s_logFile = fopen(logPath.constData(), "a");
+    }
     qInstallMessageHandler(messageHandler);
 
     // Pin the scene-graph RHI backend so the in-app video player's
