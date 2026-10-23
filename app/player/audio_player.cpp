@@ -253,7 +253,18 @@ void AudioPlayer::stopDeviceDeferred()
 {
 #if QCV_HAS_AUDIO_DEVICE
     const int gen = ++m_pauseGeneration;
-    QTimer::singleShot(30, this, [this, gen] {
+    // The fade-out is produced on the first callback after pause (up to
+    // one device period later) and needs another period to play, so
+    // the stop waits three periods — 30 ms at the default 10 ms
+    // buffer, longer on the 1024–2048-frame buffers of pro / Bluetooth
+    // / aggregate devices, where a fixed 30 ms cut the fade short.
+    int delayMs = 30;
+    if (m_device && m_device->sampleRate() > 0) {
+        const double periodMs = 1000.0 * m_device->bufferFrameCount()
+                              / m_device->sampleRate();
+        delayMs = std::max(30, static_cast<int>(std::ceil(3.0 * periodMs)));
+    }
+    QTimer::singleShot(delayMs, this, [this, gen] {
         if (gen != m_pauseGeneration) return;         // play() came back
         if (m_isPlaying.load()) return;
         if (m_device) m_device->stop();
@@ -300,8 +311,9 @@ void AudioPlayer::releaseHold(double masterSeconds)
               delta * 1000.0);
         seek(masterSeconds);
     } else {
-        qInfo("AudioPlayer: hold released in place (%+.1f ms)",
-              delta * 1000.0);
+        // Every play arms a hold, so the uneventful case stays quiet.
+        qDebug("AudioPlayer: hold released in place (%+.1f ms)",
+               delta * 1000.0);
     }
 #else
     Q_UNUSED(masterSeconds);
@@ -332,6 +344,14 @@ void AudioPlayer::seek(double seconds)
     // absorbs that.
     const double offsetSec =
         m_syncOffsetMs.load(std::memory_order_relaxed) / 1000.0;
+#if QCV_HAS_AUDIO_DEVICE
+    // Paused with the device stopped: no consumer will discard the
+    // stale region the previous seek left, so repeated seeks (stepping,
+    // a shuttle) would fill the ring with dead audio. Nobody is draining,
+    // so the consumer-side discard is safe from here.
+    if (!m_isPlaying.load() && m_device && !m_device->isRunning())
+        m_decoder->discardStale();
+#endif
     m_decoder->seek(seconds - offsetSec);
     resetAnchor(seconds - offsetSec);
 }

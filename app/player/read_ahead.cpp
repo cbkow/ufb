@@ -82,8 +82,6 @@ double secondsSince(Clock::time_point t)
     return std::chrono::duration<double>(Clock::now() - t).count();
 }
 
-} // namespace
-
 struct Client {
     ReadAhead::Id id = 0;
     QString path;
@@ -123,6 +121,8 @@ struct Client {
     bool     rangeLogged    = true;
 };
 
+} // namespace
+
 struct ReadAhead::Impl {
     const double  seconds  = secondsFromEnv();
     const int64_t capBytes = capBytesFromEnv();
@@ -134,7 +134,9 @@ struct ReadAhead::Impl {
     std::unordered_map<Id, std::shared_ptr<Client>> clients;
     Id   nextId = 1;
     bool workPending = false;
-    bool stop = false;
+    // Atomic: touchFrame's abandon predicate reads it without the mutex so
+    // a quit mid-frame doesn't wait for the rest of the frame's pages.
+    std::atomic<bool> stop{false};
     std::thread thread;
 
     void run();
@@ -473,7 +475,8 @@ void ReadAhead::Impl::warmOne(Client &c)
     if (!openFile(c)) return;
     const uint32_t g = c.seenGen;
     if (!touchFrame(c, c.frontier, c.lastPage, [&] {
-            return c.gen.load(std::memory_order_acquire) != g;
+            return stop.load(std::memory_order_acquire)
+                || c.gen.load(std::memory_order_acquire) != g;
         })) {
         return;   // the frontier stays put; prepare() restarts it
     }
@@ -494,7 +497,8 @@ void ReadAhead::Impl::warmRangeOne(Client &c)
     const uint32_t rg = c.rangeSeenGen;
     const uint32_t wg = c.seenGen;
     if (!touchFrame(c, c.rangeFrontier, c.rangeLastPage, [&] {
-            return c.rangeGen.load(std::memory_order_acquire) != rg
+            return stop.load(std::memory_order_acquire)
+                || c.rangeGen.load(std::memory_order_acquire) != rg
                 || c.gen.load(std::memory_order_acquire) != wg;
         })) {
         return;

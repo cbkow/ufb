@@ -675,12 +675,17 @@ bool AudioDecoder::decodeNextPacket()
         // target (the player's anchor). Frames without a pts can't be
         // placed — accept the packet-granular landing for those.
         if (converted > 0 && m_trimPending) {
-            if (m_decodeFrame->pts == AV_NOPTS_VALUE) {
+            // best_effort_timestamp first: right after avcodec_flush_buffers
+            // some decoders (AAC / MP3 in TS, VBR MP3) emit frames with
+            // pts unset while the best-effort stamp is valid.
+            int64_t ts = m_decodeFrame->best_effort_timestamp;
+            if (ts == AV_NOPTS_VALUE) ts = m_decodeFrame->pts;
+            if (ts == AV_NOPTS_VALUE) {
                 m_trimPending = false;
             } else {
                 AVStream *stream = m_formatCtx->streams[m_audioStreamIdx];
                 const double frameStart = static_cast<double>(
-                    m_decodeFrame->pts - m_streamStartTime)
+                    ts - m_streamStartTime)
                     * av_q2d(stream->time_base);
                 const double frameDur =
                     static_cast<double>(m_decodeFrame->nb_samples)

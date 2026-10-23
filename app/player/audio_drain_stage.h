@@ -1,8 +1,8 @@
 // AudioDrainStage — render-callback-side drain of one IAudioSource
 // through the sync-servo resampler, with every discontinuity softened.
 //
-// Before this stage existed the two players (AudioPlayer, one per
-// side in DualAudioMixer) drained the ring directly and every
+// Before this stage existed AudioPlayer (and, in QCView, its dual
+// mixer — UFB has none) drained the ring directly and every
 // adjustment was a hard cut: instant silence the moment a seek was
 // requested, instant resume mid-waveform when it completed, silence
 // slammed in on underrun. Those cuts are the "pops" heard whenever

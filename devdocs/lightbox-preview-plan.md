@@ -390,6 +390,16 @@ in the borrowed files, as three commits on `qcview-sync-2026-10`:
   hold "in place (+0.0 ms)" (the start-up re-seek at −0.042 s noted on
   2026-09-10 is gone); resume after pause / after a shuttle is a ring skip
   (~+140 ms: the decoder's lead), **zero re-seek lines**, servo drift ≤ 22 ms.
+- **Review fixes (same day, adversarial /code-review):** the multi-stream
+  decoder back-pressures on a nearly full ring (while paused nobody discards
+  the stale regions repeated seeks leave, and its non-blocking write would
+  have dropped fresh audio and free-run to EOF); `AudioPlayer.seek` discards
+  the previous stale region itself when the device is stopped; the deferred
+  stop after pause waits three device periods, not a fixed 30 ms; the seek
+  trim reads `best_effort_timestamp` before `pts`; `AudioRingBuffer.clear`
+  resets the stale cursor; ReadAhead's worker abandons a page walk on stop
+  and its `Client` moved into the anonymous namespace. Regression run: a
+  16-step paused storm then resume = one +42 ms ring skip, zero re-seeks.
 - **Not ported:** QCView's CpuYuv GPU conversion (OCIO/super-white specific),
   the playlist seek gate, live sources, dual, shuttle, tempo.
 - **Open:** a listen test (both OSes), the Windows build, and the exiftool

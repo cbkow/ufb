@@ -7,12 +7,12 @@
 //                              (libavfilter graph: amerge + pan +
 //                              aformat). Sibling class added for v2.
 //
-// AudioPlayer / DualAudioMixer hold an IAudioSource * and dispatch on
-// the file's audio-stream count at open time. Single-stream files keep
-// the well-tested AudioDecoder path; multi-stream files take the
+// AudioPlayer holds an IAudioSource * and dispatches on the file's
+// audio-stream count at open time. Single-stream files keep the
+// well-tested AudioDecoder path; multi-stream files take the
 // MultiStreamAudioDecoder path. The interface is intentionally narrow
-// — every public method here is something AudioPlayer or
-// DualAudioMixer actually calls.
+// — every public method here is something AudioPlayer (or its
+// AudioDrainStage) actually calls.
 //
 // Not a QObject. Concrete implementations may be QObjects (AudioDecoder
 // is) but the interface stays Qt-free so the type isn't constrained

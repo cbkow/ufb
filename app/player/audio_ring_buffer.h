@@ -31,11 +31,15 @@ public:
         , m_readPos(0)
     {}
 
-    // Reset both indices. Call on seek / stop.
+    // Reset every cursor. NOT SPSC-safe against a live consumer — only
+    // for a ring nobody is draining (the decoders mark stale at a seek
+    // instead, see below). Resets the stale mark too, or a later
+    // discardStale() would jump the read cursor past the write cursor.
     void clear() noexcept
     {
         m_writePos.store(0, std::memory_order_release);
         m_readPos .store(0, std::memory_order_release);
+        m_stalePos.store(0, std::memory_order_release);
     }
 
     // ---- Stale-region flush (seek without a hard cut) ----

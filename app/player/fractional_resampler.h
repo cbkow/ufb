@@ -2,7 +2,7 @@
 // interleaved stereo float32.
 //
 // Two consumers:
-//   - AudioPlayer / DualAudioMixer render callbacks (sync servo):
+//   - AudioPlayer's render callback, via AudioDrainStage (sync servo):
 //     ratios within 1 ± 0.002 — trims audio consumption rate so the
 //     playout position converges on the master clock without seeks.
 //   - (QCView's ShuttleAudioEngine also drives it at 0.05 .. 1 for

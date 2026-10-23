@@ -862,11 +862,16 @@ void MultiStreamAudioDecoder::decodeThreadFn()
         }
 
         // Back-pressure: enforce the buffered-depth target so we don't
-        // run hundreds of ms ahead of the device. availableRead() is
-        // bytes currently queued for the device; if that exceeds the
-        // target, sleep until the device drains some.
+        // run hundreds of ms ahead of the device. freshBytes() is the
+        // post-seek audio queued for the device; if that exceeds the
+        // target, sleep until the device drains some. Also hold when
+        // the ring itself is nearly full: while the device is stopped
+        // nobody discards the stale regions that repeated seeks leave
+        // behind, and the non-blocking write() below would otherwise
+        // drop the fresh audio and let the loop free-run to EOF.
         if (m_ring
-            && m_ring->freshBytes() > kBackPressureBufferedBytes) {
+            && (m_ring->freshBytes() > kBackPressureBufferedBytes
+                || m_ring->availableWrite() < 4 * kBackPressureBufferedBytes)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
