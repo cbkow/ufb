@@ -34,7 +34,10 @@ ApplicationWindow {
             | Qt.ExpandedClientAreaHint | Qt.NoTitleBarBackgroundHint)
     // ApplicationWindow pads its content by the safe area unless told
     // otherwise — the title row goes UNDER the lights / caption buttons.
-    topPadding: 0; leftPadding: 0; rightPadding: 0; bottomPadding: 0
+    // Only the TOP: the bottom padding is also how ApplicationWindow
+    // reserves the footer's height, and zeroing it ran every panel 22 px
+    // under the status strip (2026-10-23).
+    topPadding: 0
     title: {
         if (tabBar.currentIndex < filesTabs.count) {
             var v = _currentFilesView
