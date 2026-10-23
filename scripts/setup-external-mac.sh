@@ -138,6 +138,44 @@ fi
 # ---- Qt 6.11.0 header patch (QTBUG-145239) -----------------
 # Skips silently if Qt 6.11.1+ is installed (unbroken upstream)
 # or if already patched. See script header for context.
+# ---- Sparkle (the in-app updater framework + appcast tools) -------
+# Missing from a fresh clone means the app builds WITHOUT its updater and
+# make-appcast.sh has no sign_update (2026-10-23, a fresh Mac).
+bash "$REPO_ROOT/scripts/fetch-sparkle-mac.sh"
+
+# ---- vcpkg (libheif + OpenEXR, static, deployment-target-pinned) ---
+# release-mac.sh looks for vcpkg on PATH, $VCPKG_ROOT, then ~/vcpkg. A
+# SHALLOW clone fails vcpkg.json's builtin-baseline check ("failed to git
+# show versions/baseline.json"), so clone in full.
+VCPKG_BIN="$(command -v vcpkg || true)"
+[ -z "$VCPKG_BIN" ] && [ -x "${VCPKG_ROOT:-}/vcpkg" ] && VCPKG_BIN="$VCPKG_ROOT/vcpkg"
+[ -z "$VCPKG_BIN" ] && [ -x "$HOME/vcpkg/vcpkg" ] && VCPKG_BIN="$HOME/vcpkg/vcpkg"
+if [ -z "$VCPKG_BIN" ]; then
+    echo "[setup] installing vcpkg to ~/vcpkg (full clone + bootstrap)..."
+    git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+    "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+    VCPKG_BIN="$HOME/vcpkg/vcpkg"
+fi
+echo "[setup] vcpkg install (libheif + OpenEXR; no-op when current)..."
+(cd "$REPO_ROOT" && "$VCPKG_BIN" install --triplet arm64-osx \
+    --overlay-triplets "$REPO_ROOT/cmake/vcpkg-triplets" 2>&1 | tail -2)
+
+# ---- Release-only tools: xcodegen (the FinderSync project), the notary
+#      profile. Checked, not required — a dev build needs neither. --------
+if ! command -v xcodegen >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
+        echo "[setup] installing xcodegen (release-mac.sh regenerates the FinderSync project with it)..."
+        brew install -q xcodegen
+    else
+        echo "[setup] WARN: xcodegen not found and no Homebrew — release-mac.sh step 3 will fail"
+    fi
+fi
+if ! xcrun notarytool history --keychain-profile "${UFB_NOTARY_PROFILE:-QCView}" >/dev/null 2>&1 \
+   && ! xcrun notarytool history --keychain-profile AC_PASSWORD >/dev/null 2>&1; then
+    echo "[setup] NOTE: no notarytool keychain profile (QCView / AC_PASSWORD) — needed only for"
+    echo "[setup]       a release: xcrun notarytool store-credentials QCView --apple-id <id> --team-id 5Z4S9VHV56"
+fi
+
 bash "$REPO_ROOT/scripts/patch-qt-mac-headers.sh" || \
     echo "[setup] WARN: Qt header patch failed; cxx-qt builds may fail until Qt 6.11.1 lands"
 

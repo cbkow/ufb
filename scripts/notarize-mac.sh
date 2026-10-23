@@ -14,10 +14,13 @@
 # Requirements:
 #   - Everything already Developer-ID signed with the hardened runtime
 #     (scripts/sign-mac-dev.sh / build-mac-pkg.sh).
-#   - notarytool keychain profile (default AC_PASSWORD, override with
-#     UFB_NOTARY_PROFILE):
-#       xcrun notarytool store-credentials AC_PASSWORD \
-#         --apple-id <you@email> --team-id 5Z4S9VHV56 --password <app-pw>
+#   - a notarytool keychain profile. One per Mac serves the whole family
+#     (QCView, minNotes, UFB share the team): UFB_NOTARY_PROFILE if set,
+#     else the first of "QCView" / "AC_PASSWORD" that notarytool accepts.
+#     Create it once with
+#       xcrun notarytool store-credentials QCView \
+#         --apple-id <you@email> --team-id 5Z4S9VHV56
+#     (prompts for an app-specific password).
 #
 # Apple's queue is the dominant cost: 2-15 minutes per submission.
 # On "Invalid" the full log is printed (unsigned nested binary, missing
@@ -25,13 +28,19 @@
 
 set -euo pipefail
 
-PROFILE="${UFB_NOTARY_PROFILE:-AC_PASSWORD}"
 [ $# -ge 1 ] || { echo "usage: notarize-mac.sh <file.pkg|file.dmg|app... >" >&2; exit 2; }
 
-if ! xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
-    echo "ERROR: notarytool can't reach Apple with profile \"$PROFILE\" (see header)." >&2
+PROFILE=""
+for candidate in ${UFB_NOTARY_PROFILE:-} QCView AC_PASSWORD; do
+    if xcrun notarytool history --keychain-profile "$candidate" >/dev/null 2>&1; then
+        PROFILE="$candidate"; break
+    fi
+done
+if [ -z "$PROFILE" ]; then
+    echo "ERROR: no notarytool keychain profile works (tried: ${UFB_NOTARY_PROFILE:-} QCView AC_PASSWORD) — see header." >&2
     exit 1
 fi
+echo "[notary] profile: $PROFILE"
 
 TMP="$(mktemp -d -t ufb-notary)"
 trap 'rm -rf "$TMP"' EXIT

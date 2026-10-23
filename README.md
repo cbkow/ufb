@@ -44,7 +44,12 @@ work is incremental polish under the **1.0.x** series.
   [`installer/README.md`](installer/README.md).
 - **LLVM / `libclang`** on Windows for `winfsp-sys`'s bindgen step.
   Set `LIBCLANG_PATH` or put `clang.exe` on `PATH`.
-- **vcpkg** for OpenEXR (manifest mode — `vcpkg.json` drives it).
+- **vcpkg** for OpenEXR and libheif (manifest mode — `vcpkg.json` drives it).
+- **macOS, one command:** `scripts/setup-external-mac.sh` fetches or builds
+  everything above the Qt install — PDFium, FFmpeg from source, exiftool,
+  7-Zip, Sparkle, vcpkg (cloned to `~/vcpkg` if absent) with the static
+  libheif / OpenEXR — and checks the release-only tools (xcodegen, a
+  notarytool keychain profile). Re-run it after a fresh clone or a Qt update.
 
 ## Quick start
 
