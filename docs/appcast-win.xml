@@ -10,6 +10,43 @@
          from GitHub Releases and verifies its ed25519 signature. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.3.0</title>
+      <sparkle:version>1.3.0</sparkle:version>
+      <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+      <description><![CDATA[<h2>UFB 1.3.0</h2>
+<ul>
+  <li><b>A new window:</b> the tabs now live in the window's title bar.
+      The native title bar is gone on both Mac and Windows — Mac keeps its
+      traffic lights, Windows keeps its own minimize / maximize / close —
+      and any empty stretch of the tab row, or a tab itself once you start
+      dragging it, moves the window. Double-click the row to zoom.</li>
+  <li><b>A softer look:</b> gently rounded corners, hover that fades in
+      instead of snapping, a pressed state on every button, and new
+      typefaces throughout (Geist Sans, Geist Mono for paths and dates).</li>
+  <li><b>LucidLink from the right-click menu:</b> on a filespace, <i>Pin
+      Locally</i> / <i>Unpin</i> keep or drop a local copy, <i>Copy
+      LucidLink Link</i> puts the share link on the clipboard, and
+      <i>Create LucidLink Guest Link…</i> opens the LucidLink app's
+      guest-link sheet — the same actions the LucidLink Finder and Explorer
+      extensions offer, without leaving UFB.</li>
+  <li><b>Mac: Show Finder Menu is native now.</b> <i>Open With</i> (every app
+      for the file, the default first), the system <i>Share</i> sheet,
+      Finder <i>Tags</i>, <i>Get Info</i> and <i>Show in Finder</i> appear in
+      a menu at the cursor. No more Accessibility permission, no switch to
+      Finder.</li>
+  <li><b>Video preview:</b> audio no longer pops after play, pause, step or
+      scrub — every transition fades, audio waits for the first frame to
+      land, and seeks land on the exact sample. Playback over LucidLink and
+      network shares warms the next frames ahead of the decoder. A
+      software-decoded portrait clip no longer shows stray pixels.</li>
+  <li><b>Fixes:</b> the sidebar's Path swaps and Mesh sync rows stay visible
+      at short window heights; the grid-size slider matches the rest of
+      the app.</li>
+</ul>]]></description>
+      <pubDate>Fri, 23 Oct 2026 18:55:19 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.3.0/UFB-1.3.0-x64.exe" type="application/octet-stream" sparkle:edSignature="l8KHLnQ4RNsVAuzjxAntH0uCr0SrDs7Wg/4fxIGcErVZrG1GYBMtZWQsJ2X+CJmmWFCUKebg6Tp9Tdf0k1PhAA==" length="194181570" />
+    </item>
+    <item>
       <title>Version 1.2.3</title>
       <sparkle:version>1.2.3</sparkle:version>
       <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>

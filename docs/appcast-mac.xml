@@ -11,6 +11,15 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.3.0</title>
+      <sparkle:version>1.3.0</sparkle:version>
+      <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[UFB 1.3.0. See the changelog for details.]]></description>
+      <pubDate>Fri, 23 Oct 2026 18:54:52 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.3.0/UFB-1.3.0-arm64.pkg" type="application/octet-stream" sparkle:edSignature="yMT/rV12EHpyushzEemhprrfzynK2aa35CLwyTG6yucqRWKxypsIsRjMykhybsaihUz9mzv06tadNXV/MwKPDA==" length="372079857" />
+    </item>
+    <item>
       <title>Version 1.2.3</title>
       <sparkle:version>1.2.3</sparkle:version>
       <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString>
