@@ -240,7 +240,14 @@ pub fn locate(path: &str) -> Option<(Instance, String)> {
         if !mcomps.iter().zip(comps.iter()).all(|(a, b)| same_component(a, b)) {
             continue;
         }
-        let rel: Vec<&str> = comps[mcomps.len()..].iter().map(String::as_str).collect();
+        // Drop a RootDir component ("\\" after a bare "L:" mount point on
+        // Windows): the CLI addresses entries from the filespace root with
+        // no leading separator.
+        let rel: Vec<&str> = comps[mcomps.len()..]
+            .iter()
+            .map(String::as_str)
+            .filter(|c| *c != "/" && *c != "\\")
+            .collect();
         let rel = rel.join(std::path::MAIN_SEPARATOR_STR);
         if best.as_ref().map_or(true, |(b, _)| mcomps.len() > b.mount_point.components().count()) {
             best = Some((inst, rel));
