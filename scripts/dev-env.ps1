@@ -41,12 +41,17 @@ if (-not (Test-Path $vcvars)) { throw "[dev-env] vcvars64.bat not found at $vcva
 
 Write-Host "[dev-env] loading MSVC env from $vsRoot ..."
 # Run vcvars in a child cmd, then dump the resulting environment back to us.
+$vcpkgRoot = $env:VCPKG_ROOT
 $lines = cmd /c "`"$vcvars`" >nul 2>&1 && set"
 foreach ($line in $lines) {
     if ($line -match '^([^=]+)=(.*)$') {
         Set-Item -Path ("env:{0}" -f $matches[1]) -Value $matches[2]
     }
 }
+# VS 18 (2026) vcvars exports ITS bundled vcpkg as VCPKG_ROOT, which the
+# presets' toolchain path then follows into a vcpkg that cannot bootstrap
+# ("Bootstrapping vcpkg before install - failed", 2026-10-23). Keep ours.
+$env:VCPKG_ROOT = $vcpkgRoot
 
 # --- Qt kit + Qt-bundled CMake/Ninja onto PATH ---------------------------
 $cmakeBin = Join-Path $qtTools 'CMake_64\bin'
