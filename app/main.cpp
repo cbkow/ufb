@@ -49,11 +49,11 @@
 #include <QtWebEngineQuick/qtwebenginequickglobal.h>
 #endif
 #include "updater/Updater.h"
+#include "WindowChrome.h"
 #ifdef Q_OS_MACOS
 #  include "MacAccent.h"
 #  include "MacAccessibility.h"
 #  include "MacOSBootstrap.h"
-#  include "MacWindowChrome.h"
 #endif
 
 namespace {
@@ -467,6 +467,12 @@ int main(int argc, char *argv[])
     AppController appController;
     engine.rootContext()->setContextProperty("AppCtl", &appController);
 
+    // The chromeless window (2026-10-23): Main.qml reads the flags and the
+    // caption metrics from this; attach() below finishes the native side
+    // once the window exists. `--native-frame` (dev) keeps the OS frame.
+    WindowChrome windowChrome(!app.arguments().contains(QStringLiteral("--native-frame")));
+    engine.rootContext()->setContextProperty("WindowChrome", &windowChrome);
+
     // The "Credentials" context property (CredentialPrompt) is gone —
     // plans/17 slice B: credentials are OS-owned; connecting IS the
     // sign-in and the OS dialog appears via the mount allow_ui path.
@@ -563,18 +569,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    // 2. Apply native window chrome to every top-level QQuickWindow
-    //    the engine produced (transparent titlebar, Finder-like
-    //    blended toolbar look). Per macOSplans/04 §3.
-    {
-        const auto roots = engine.rootObjects();
-        for (QObject* obj : roots) {
-            if (auto* w = qobject_cast<QQuickWindow*>(obj)) {
-                ufb::applyMacWindowChrome(w);
-            }
-        }
-    }
 #endif
+
+    // The chromeless window's native side (both OSes; see WindowChrome.h).
+    for (QObject* obj : engine.rootObjects()) {
+        if (auto* w = qobject_cast<QWindow*>(obj)) { windowChrome.attach(w); break; }
+    }
 
 #ifdef Q_OS_WIN
     // Belt-and-suspenders for the Windows taskbar / Alt-Tab icon.

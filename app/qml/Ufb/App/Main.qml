@@ -18,6 +18,23 @@ import Ufb.Backend 1.0
 
 ApplicationWindow {
     id: window
+    // The chromeless window (2026-10-23, WindowChrome.h — the minNotes
+    // model): the content extends under a transparent title bar on both
+    // platforms (Qt 6.9+'s ExpandedClientAreaHint + NoTitleBarBackgroundHint)
+    // and the tab strip below is the title bar. macOS keeps the native
+    // traffic lights (the strip insets past them). Windows: Qt's own
+    // expanded-client-area handling — no painted top border, the DWM frame's
+    // shadow and corners, Qt draws and hit-tests the Windows 11 caption
+    // buttons itself (CustomizeWindowHint + the min / max / close hints, no
+    // WindowTitleHint) and any press on the row no item accepts is a native
+    // caption drag. BEFORE `visible` — the hints must be in place at creation.
+    flags: !WindowChrome.chromeless ? Qt.Window
+         : WindowChrome.nativeLights ? (Qt.Window | Qt.ExpandedClientAreaHint | Qt.NoTitleBarBackgroundHint)
+         : (Qt.Window | Qt.CustomizeWindowHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+            | Qt.ExpandedClientAreaHint | Qt.NoTitleBarBackgroundHint)
+    // ApplicationWindow pads its content by the safe area unless told
+    // otherwise — the title row goes UNDER the lights / caption buttons.
+    topPadding: 0; leftPadding: 0; rightPadding: 0; bottomPadding: 0
     title: {
         if (tabBar.currentIndex < filesTabs.count) {
             var v = _currentFilesView
@@ -1116,9 +1133,658 @@ ApplicationWindow {
         if (view) view.navigateActivePane(t.folder, t.select)
     }
 
+    // A tab's MouseArea that is ALSO a window-drag handle (user ask,
+    // 2026-10-23): the press is recorded; a plain click (press + release
+    // without movement) reaches onClicked as before; once the pointer has
+    // moved a few px the press is handed to the OS move loop instead, which
+    // cancels this area's grab so no click fires. Transcode / tracker tabs
+    // and the close boxes keep their own areas on top.
+    component DragTabMouseArea: MouseArea {
+        property real _px: 0
+        property real _py: 0
+        property bool _armed: false
+        onPressed: (mouse) => {
+            _px = mouse.x; _py = mouse.y
+            _armed = WindowChrome.chromeless && mouse.button === Qt.LeftButton
+        }
+        onPositionChanged: (mouse) => {
+            if (!_armed || !pressed) return
+            if (Math.abs(mouse.x - _px) + Math.abs(mouse.y - _py) < 6) return
+            _armed = false
+            WindowChrome.startMove(window)
+        }
+        onReleased: _armed = false
+        onCanceled: _armed = false
+    }
+
+    // ── Title row: the tab strip IS the window's title bar ──────────
+    // (2026-10-23, the chromeless window — see the flags above and
+    // WindowChrome.h.) Left to right: on macOS the inset where the NATIVE
+    // traffic lights sit · the tab strip (Files tabs, job tabs, trackers,
+    // the task queue, "+") · on Windows the width Qt's caption buttons
+    // occupy. Every stretch of the row no tab claims DRAGS the window and a
+    // double-click zooms — on macOS through the handle below (the drag
+    // starts after a small movement, so clicks stay clicks), on Windows
+    // natively. The tab strip is the custom one it always was (the
+    // FluentWinUI3 / macOS TabBar styles vanish against our background).
+    Rectangle {
+        id: titleBar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        // Windows: Qt's title-bar height at the window's dpi, so its caption
+        // buttons sit inside the row; elsewhere the house tool-strip row.
+        height: WindowChrome.captionButtons && WindowChrome.captionHeight > 0
+                ? Math.ceil(WindowChrome.captionHeight) : Theme.dim.toolStripHeight
+        color: Theme.colors.bg
+        // Drag room (user ruling 2026-10-23): a gap between the OS buttons
+        // and the tabs on both ends, and a reserve at the right that the
+        // tab strip can never grow into.
+        readonly property int buttonGap: 16
+        readonly property int dragReserve: 120
+
+        // No bottom divider — the active tab's accent underline separates
+        // the strip from the content; a full-width line would stack chrome
+        // above every browser / job toolbar that follows.
+
+        // The move handle (macOS): under everything else in the row, so a
+        // press on a tab never reaches it. Windows needs none — a press no
+        // item accepts is the native caption (Qt's expanded-client-area hit
+        // test).
+        MouseArea {
+            id: titleDrag
+            anchors.fill: parent
+            enabled: WindowChrome.nativeLights
+            property real px: 0
+            property real py: 0
+            property bool armed: false
+            onPressed: (mouse) => { px = mouse.x; py = mouse.y; armed = WindowChrome.chromeless }
+            onPositionChanged: (mouse) => {
+                if (!armed || !pressed) return
+                if (Math.abs(mouse.x - px) + Math.abs(mouse.y - py) < 4) return
+                armed = false
+                WindowChrome.startMove(window)
+            }
+            onReleased: armed = false
+            onDoubleClicked: (mouse) => { if (WindowChrome.chromeless) WindowChrome.toggleZoom(window) }
+        }
+
+        // The traffic lights' room (close · minimize · zoom end at x ≈ 59
+        // on a standard title bar); they hide in fullscreen. Elsewhere the
+        // strip's edge.
+        Item {
+            id: lightsInset
+            anchors.left: parent.left
+            anchors.top: parent.top
+            height: parent.height
+            width: (WindowChrome.nativeLights && window.visibility !== Window.FullScreen ? 70 : 0)
+                   + titleBar.buttonGap
+        }
+
+        // Windows: Qt draws and hit-tests the caption buttons here (three of
+        // titleBarHeight × 1.5 each, Qt's rule, at the window's dpi); the
+        // row just keeps clear of them.
+        Item {
+            id: captionSpacer
+            anchors.right: parent.right
+            anchors.top: parent.top
+            height: parent.height
+            width: (WindowChrome.captionButtons ? Math.ceil(WindowChrome.captionWidth) : 0)
+                   + titleBar.buttonGap
+        }
+
+            // Horizontal-scroll wrapper so the tab strip degrades
+            // gracefully when the user opens enough tabs to overflow
+            // the available width. Flickable + WheelHandler keeps
+            // ALL existing tab delegates intact (no per-tab width
+            // changes); plain mouse-wheel scrolls left/right and
+            // touch / trackpad two-finger flick works for free.
+            Flickable {
+                id: tabFlick
+                // Between the traffic lights' inset and Windows' caption
+                // buttons, and no wider than the tabs themselves: the
+                // rest of the row stays free for the drag (a Flickable
+                // accepts presses on its empty area, which would have
+                // eaten the caption drag on Windows and the move handle
+                // on macOS). Overflowing tabs scroll inside it as before.
+                anchors.left: lightsInset.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                // Never the whole row: titleBar.dragReserve px at the right
+                // end stay bare however many tabs are open, so there is
+                // always somewhere to grab the window.
+                width: Math.min(tabRow.width,
+                                Math.max(0, parent.width - lightsInset.width
+                                            - captionSpacer.width - titleBar.dragReserve))
+                contentWidth: tabRow.width
+                contentHeight: height
+                clip: true
+                flickableDirection: Flickable.HorizontalFlick
+                boundsBehavior: Flickable.StopAtBounds
+
+                // Translate vertical wheel ticks to horizontal scroll
+                // (the tab strip is one-dimensional). Horizontal
+                // ticks from a trackpad pass through directly.
+                WheelHandler {
+                    onWheel: (wheel) => {
+                        var delta = wheel.angleDelta.x !== 0
+                            ? wheel.angleDelta.x
+                            : wheel.angleDelta.y
+                        var maxScroll = Math.max(0,
+                            tabFlick.contentWidth - tabFlick.width)
+                        tabFlick.contentX = Math.max(0,
+                            Math.min(maxScroll,
+                                     tabFlick.contentX - delta))
+                        wheel.accepted = true
+                    }
+                }
+
+            Row {
+                id: tabRow
+                height: tabFlick.height
+                spacing: 0
+
+                // Files tabs — one pill per filesTabs entry. The
+                // last surviving Files tab is non-closeable so the
+                // app always has somewhere to land sidebar nav.
+                Repeater {
+                    id: filesTabsRepeater
+                    model: filesTabs
+                    delegate: Rectangle {
+                        id: filesTab
+                        readonly property int filesIdx: index
+                        readonly property int tabIdx: index
+                        height: tabRow.height
+                        width: filesTabContent.implicitWidth
+                            + (filesTabs.count > 1 ? 36 : 24)
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                        color: tabBar.currentIndex === tabIdx
+                            ? Theme.colors.surfaceHover
+                            : (filesMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
+
+                        Row {
+                            id: filesTabContent
+                            anchors.left: parent.left
+                            anchors.leftMargin: 12
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+                            Icon {
+                                name: "folder-simple"
+                                size: Theme.icon.sizeToolbar
+                                color: tabBar.currentIndex === filesTab.tabIdx
+                                    ? Theme.colors.textBright
+                                    : Theme.colors.textMuted
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Label {
+                                text: qsTr("Files")
+                                color: tabBar.currentIndex === filesTab.tabIdx
+                                    ? Theme.colors.textBright
+                                    : Theme.colors.textMuted
+                                font.pixelSize: Theme.font.sizeBody
+                                font.bold: tabBar.currentIndex === filesTab.tabIdx
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                        // × close button. Only when more than one
+                        // Files tab is open. Z-stacked above the
+                        // tab-select MouseArea so the X wins
+                        // hit-testing without propagation games.
+                        Rectangle {
+                            id: filesCloseBg
+                            visible: filesTabs.count > 1
+                            z: 10
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 16
+                            height: 16
+                            radius: Theme.dim.radiusSmall
+                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                            color: filesCloseMa.containsMouse
+                                ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
+                            Label {
+                                anchors.centerIn: parent
+                                text: "×"
+                                color: Theme.colors.text
+                                font.pixelSize: 13
+                            }
+                            MouseArea {
+                                id: filesCloseMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: (mouse) => {
+                                    mouse.accepted = true
+                                    window.closeFilesTab(filesTab.filesIdx)
+                                }
+                            }
+                        }
+                        // Active-tab underline.
+                        Rectangle {
+                            visible: tabBar.currentIndex === filesTab.tabIdx
+                            anchors.bottom: parent.bottom
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 2
+                            color: Theme.colors.accentSelected
+                        }
+                        DragTabMouseArea {
+                            id: filesMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            propagateComposedEvents: true
+                            onClicked: (mouse) => {
+                                if (mouse.button === Qt.RightButton) {
+                                    tabContextMenu.targetTabIdx = filesTab.tabIdx
+                                    tabContextMenu.popup()
+                                    return
+                                }
+                                if (filesCloseBg.visible && filesCloseMa.containsMouse) {
+                                    mouse.accepted = false
+                                    return
+                                }
+                                tabBar.currentIndex = filesTab.tabIdx
+                            }
+                        }
+                    }
+                }
+
+                // Job tabs — closeable.
+                Repeater {
+                    id: jobTabsRepeater
+                    model: openJobs
+                    delegate: Rectangle {
+                        id: jobTab
+                        readonly property int jobIdx: index
+                        readonly property int tabIdx: filesTabs.count + index
+                        height: tabRow.height
+                        width: Math.min(180, jobLabel.implicitWidth + 44)
+                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                        color: tabBar.currentIndex === tabIdx
+                            ? Theme.colors.surfaceHover
+                            : (jobMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
+
+                        Row {
+                            id: jobLabel
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.right: closeBg.left
+                            anchors.rightMargin: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+                            Icon {
+                                name: "clipboard-text"
+                                size: Theme.icon.sizeToolbar
+                                color: tabBar.currentIndex === jobTab.tabIdx
+                                    ? Theme.colors.textBright
+                                    : Theme.colors.textMuted
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                            Label {
+                                text: model.jobName
+                                width: jobLabel.width - 22
+                                color: tabBar.currentIndex === jobTab.tabIdx
+                                    ? Theme.colors.textBright
+                                    : Theme.colors.textMuted
+                                font.pixelSize: Theme.font.sizeBody
+                                font.bold: tabBar.currentIndex === jobTab.tabIdx
+                                elide: Text.ElideMiddle
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+                        }
+                        // × close button. z above the tab-select
+                        // MouseArea so closeMa actually wins
+                        // hit-testing on the X (without this,
+                        // jobMa's anchors.fill captures the click
+                        // first and the propagation back through
+                        // closeMa.containsMouse never resolves).
+                        Rectangle {
+                            id: closeBg
+                            z: 10
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 16
+                            height: 16
+                            radius: Theme.dim.radiusSmall
+                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                            color: closeMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
+                            Label {
+                                anchors.centerIn: parent
+                                text: "×"
+                                color: Theme.colors.text
+                                font.pixelSize: 13
+                            }
+                            MouseArea {
+                                id: closeMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: (mouse) => {
+                                    mouse.accepted = true
+                                    window.closeJobTab(jobTab.jobIdx)
+                                }
+                            }
+                        }
+                        // Active-tab underline.
+                        Rectangle {
+                            visible: tabBar.currentIndex === jobTab.tabIdx
+                            anchors.bottom: parent.bottom
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            height: 2
+                            color: Theme.colors.accentSelected
+                        }
+                        DragTabMouseArea {
+                            id: jobMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            propagateComposedEvents: true
+                            onClicked: (mouse) => {
+                                if (mouse.button === Qt.RightButton) {
+                                    tabContextMenu.targetTabIdx = jobTab.tabIdx
+                                    tabContextMenu.popup()
+                                    return
+                                }
+                                // Don't steal clicks the close MouseArea
+                                // already handled.
+                                if (closeMa.containsMouse) {
+                                    mouse.accepted = false
+                                    return
+                                }
+                                tabBar.currentIndex = jobTab.tabIdx
+                            }
+                        }
+                    }
+                }
+
+                // Aggregated Tracker tab (singleton — opens via
+                // Sidebar's "All Tracked" entry; closes via the ×).
+                Loader {
+                    active: window.trackerTabOpen
+                    sourceComponent: trackerTabComponent
+                }
+
+                // Task Queue tab (singleton — opens via Sidebar's
+                // "Task Queue" entry or a footer task chip; queuing
+                // a job never switches tabs). It wears an
+                // active-count chip. Internally still the
+                // "transcode" tab: the persisted tab-state key and
+                // the index arithmetic below predate archive jobs.
+                Loader {
+                    active: window.transcodeTabOpen
+                    sourceComponent: transcodeTabComponent
+                }
+
+                // "+" — spawn a new Files tab. Sits at the far
+                // right of every other tab pill so it never moves
+                // around as job/tracker/transcode tabs come and go.
+                Rectangle {
+                    height: tabRow.height
+                    width: 28
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                    color: addFilesMa.containsMouse
+                        ? Theme.colors.surface : Theme.colors.hoverIdle
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "plus"
+                        size: Theme.icon.sizeToolbar
+                        color: Theme.colors.textMuted
+                    }
+                    MouseArea {
+                        id: addFilesMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: window.addFilesTab()
+                        ToolTip.text: qsTr("New Files tab")
+                        ToolTip.visible: containsMouse
+                        ToolTip.delay: 500
+                    }
+                }
+
+                // Close All — broom icon. Sits to the right of
+                // "+" so it's the very last cell. Disabled
+                // (greyed) when there's nothing to close so an
+                // idle click is a visible no-op.
+                Rectangle {
+                    height: tabRow.height
+                    width: 28
+                    opacity: window._hasClosableTabs() ? 1 : 0.35
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                    color: closeAllMa.containsMouse && window._hasClosableTabs()
+                        ? Theme.colors.surface : Theme.colors.hoverIdle
+                    Icon {
+                        anchors.centerIn: parent
+                        name: "x-circle"
+                        size: Theme.icon.sizeToolbar
+                        color: Theme.colors.textMuted
+                    }
+                    MouseArea {
+                        id: closeAllMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: window._hasClosableTabs()
+                            ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            if (!window._hasClosableTabs()) return
+                            closeAllConfirmDialog.open()
+                        }
+                        ToolTip.text: qsTr("Close all tabs")
+                        ToolTip.visible: containsMouse
+                        ToolTip.delay: 500
+                    }
+                }
+            }
+            }  // Flickable
+        }
+
+        Component {
+            id: transcodeTabComponent
+            Rectangle {
+                readonly property int tabIdx: window._transcodeTabIndex
+                height: tabRow.height
+                width: transcodeTabLabel.implicitWidth + 44
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                color: tabBar.currentIndex === tabIdx
+                    ? Theme.colors.surfaceHover
+                    : (transcodeTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
+                Row {
+                    id: transcodeTabLabel
+                    anchors.left: parent.left
+                    anchors.leftMargin: 10
+                    anchors.right: transcodeCloseBg.left
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    Icon {
+                        name: "stack"
+                        size: Theme.icon.sizeToolbar
+                        color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
+                            ? Theme.colors.textBright
+                            : Theme.colors.textMuted
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Label {
+                        text: qsTr("Tasks")
+                        color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
+                            ? Theme.colors.textBright
+                            : Theme.colors.textMuted
+                        font.pixelSize: Theme.font.sizeBody
+                        font.bold: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    // Active-job count chip — keeps the queue
+                    // discoverable once the footer chips have gone.
+                    Rectangle {
+                        visible: taskJobs.activeCount > 0
+                        width: Math.max(16, chipLabel.implicitWidth + 8)
+                        height: 16
+                        radius: Theme.dim.radiusSmall
+                        color: Theme.colors.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        Label {
+                            id: chipLabel
+                            anchors.centerIn: parent
+                            text: taskJobs.activeCount
+                            color: Theme.colors.textBright
+                            font.pixelSize: 10
+                            font.bold: true
+                        }
+                    }
+                }
+                Rectangle {
+                    id: transcodeCloseBg
+                    z: 10
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 16; height: 16; radius: Theme.dim.radiusSmall
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                    color: transcodeCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
+                    Label {
+                        anchors.centerIn: parent
+                        text: "×"; color: Theme.colors.text; font.pixelSize: 13
+                    }
+                    MouseArea {
+                        id: transcodeCloseMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: (mouse) => {
+                            mouse.accepted = true
+                            window.closeTranscodeTab()
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: tabBar.currentIndex === parent.tabIdx
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: 2
+                    color: Theme.colors.accentSelected
+                }
+                DragTabMouseArea {
+                    id: transcodeTabMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (mouse) => {
+                        if (mouse.button === Qt.RightButton) {
+                            tabContextMenu.targetTabIdx = parent.tabIdx
+                            tabContextMenu.popup()
+                            return
+                        }
+                        if (transcodeCloseMa.containsMouse) {
+                            mouse.accepted = false
+                            return
+                        }
+                        tabBar.currentIndex = parent.tabIdx
+                    }
+                }
+            }
+        }
+
+        Component {
+            id: trackerTabComponent
+            Rectangle {
+                readonly property int tabIdx: window._trackerTabIndex
+                height: tabRow.height
+                width: trackerTabLabel.implicitWidth + 44
+                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                color: tabBar.currentIndex === tabIdx
+                    ? Theme.colors.surfaceHover
+                    : (trackerTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
+
+                Row {
+                    id: trackerTabLabel
+                    anchors.left: parent.left
+                    anchors.leftMargin: 10
+                    anchors.right: trackerCloseBg.left
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 6
+                    Icon {
+                        name: "clipboard-text"
+                        size: Theme.icon.sizeToolbar
+                        color: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
+                            ? Theme.colors.textBright
+                            : Theme.colors.textMuted
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Label {
+                        text: qsTr("All Tracked")
+                        color: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
+                            ? Theme.colors.textBright
+                            : Theme.colors.textMuted
+                        font.pixelSize: Theme.font.sizeBody
+                        font.bold: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                }
+                Rectangle {
+                    id: trackerCloseBg
+                    z: 10
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 16
+                    height: 16
+                    radius: Theme.dim.radiusSmall
+                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
+                    color: trackerCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
+                    Label {
+                        anchors.centerIn: parent
+                        text: "×"
+                        color: Theme.colors.text
+                        font.pixelSize: 13
+                    }
+                    MouseArea {
+                        id: trackerCloseMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: (mouse) => {
+                            mouse.accepted = true
+                            window.closeTrackerTab()
+                        }
+                    }
+                }
+                Rectangle {
+                    visible: tabBar.currentIndex === parent.tabIdx
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: 2
+                    color: Theme.colors.accentSelected
+                }
+                DragTabMouseArea {
+                    id: trackerTabMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: (mouse) => {
+                        if (mouse.button === Qt.RightButton) {
+                            tabContextMenu.targetTabIdx = parent.tabIdx
+                            tabContextMenu.popup()
+                            return
+                        }
+                        if (trackerCloseMa.containsMouse) {
+                            mouse.accepted = false
+                            return
+                        }
+                        tabBar.currentIndex = parent.tabIdx
+                    }
+                }
+            }
+    }
+
     SplitView {
         id: outerSplit
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: titleBar.bottom
+        anchors.bottom: parent.bottom
         // No outer gutter — content runs flush to the window edge.
         // The macOS / Windows window frame is the only chrome around
         // the shell. Mirrors MinRender's app-shell layout.
@@ -1195,558 +1861,6 @@ ApplicationWindow {
         ColumnLayout {
             SplitView.fillWidth: true
             spacing: 0
-
-            // ── Top tab bar ──────────────────────────────────────────
-            // Custom-styled to fit the dark theme — FluentWinUI3 / macOS
-            // default TabBar styling renders nearly invisible against
-            // our background. We compose the tab strip ourselves: a
-            // ListView of clickable cells with an underline indicator
-            // for the active tab.
-            //
-            // tabsModel layout: index 0 = "Files" (non-closeable), then
-            // one entry per openJobs row. We mirror openJobs into here
-            // so the Repeater pattern stays simple.
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 32
-                color: Theme.colors.bg
-
-                // No bottom divider — the active tab's 2px accent
-                // underline separates tabs from the content below.
-                // A full-width line here would stack chrome above
-                // every browser/job toolbar that follows.
-
-                // Horizontal-scroll wrapper so the tab strip degrades
-                // gracefully when the user opens enough tabs to overflow
-                // the available width. Flickable + WheelHandler keeps
-                // ALL existing tab delegates intact (no per-tab width
-                // changes); plain mouse-wheel scrolls left/right and
-                // touch / trackpad two-finger flick works for free.
-                Flickable {
-                    id: tabFlick
-                    anchors.fill: parent
-                    contentWidth: tabRow.width
-                    contentHeight: height
-                    clip: true
-                    flickableDirection: Flickable.HorizontalFlick
-                    boundsBehavior: Flickable.StopAtBounds
-
-                    // Translate vertical wheel ticks to horizontal scroll
-                    // (the tab strip is one-dimensional). Horizontal
-                    // ticks from a trackpad pass through directly.
-                    WheelHandler {
-                        onWheel: (wheel) => {
-                            var delta = wheel.angleDelta.x !== 0
-                                ? wheel.angleDelta.x
-                                : wheel.angleDelta.y
-                            var maxScroll = Math.max(0,
-                                tabFlick.contentWidth - tabFlick.width)
-                            tabFlick.contentX = Math.max(0,
-                                Math.min(maxScroll,
-                                         tabFlick.contentX - delta))
-                            wheel.accepted = true
-                        }
-                    }
-
-                Row {
-                    id: tabRow
-                    height: tabFlick.height
-                    spacing: 0
-
-                    // Files tabs — one pill per filesTabs entry. The
-                    // last surviving Files tab is non-closeable so the
-                    // app always has somewhere to land sidebar nav.
-                    Repeater {
-                        id: filesTabsRepeater
-                        model: filesTabs
-                        delegate: Rectangle {
-                            id: filesTab
-                            readonly property int filesIdx: index
-                            readonly property int tabIdx: index
-                            height: tabRow.height
-                            width: filesTabContent.implicitWidth
-                                + (filesTabs.count > 1 ? 36 : 24)
-                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                            color: tabBar.currentIndex === tabIdx
-                                ? Theme.colors.surfaceHover
-                                : (filesMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
-
-                            Row {
-                                id: filesTabContent
-                                anchors.left: parent.left
-                                anchors.leftMargin: 12
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 6
-                                Icon {
-                                    name: "folder-simple"
-                                    size: Theme.icon.sizeToolbar
-                                    color: tabBar.currentIndex === filesTab.tabIdx
-                                        ? Theme.colors.textBright
-                                        : Theme.colors.textMuted
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                                Label {
-                                    text: qsTr("Files")
-                                    color: tabBar.currentIndex === filesTab.tabIdx
-                                        ? Theme.colors.textBright
-                                        : Theme.colors.textMuted
-                                    font.pixelSize: Theme.font.sizeBody
-                                    font.bold: tabBar.currentIndex === filesTab.tabIdx
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-                            // × close button. Only when more than one
-                            // Files tab is open. Z-stacked above the
-                            // tab-select MouseArea so the X wins
-                            // hit-testing without propagation games.
-                            Rectangle {
-                                id: filesCloseBg
-                                visible: filesTabs.count > 1
-                                z: 10
-                                anchors.right: parent.right
-                                anchors.rightMargin: 6
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: 16
-                                height: 16
-                                radius: Theme.dim.radiusSmall
-                                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                                color: filesCloseMa.containsMouse
-                                    ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "×"
-                                    color: Theme.colors.text
-                                    font.pixelSize: 13
-                                }
-                                MouseArea {
-                                    id: filesCloseMa
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    onClicked: (mouse) => {
-                                        mouse.accepted = true
-                                        window.closeFilesTab(filesTab.filesIdx)
-                                    }
-                                }
-                            }
-                            // Active-tab underline.
-                            Rectangle {
-                                visible: tabBar.currentIndex === filesTab.tabIdx
-                                anchors.bottom: parent.bottom
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: 2
-                                color: Theme.colors.accentSelected
-                            }
-                            MouseArea {
-                                id: filesMa
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                propagateComposedEvents: true
-                                onClicked: (mouse) => {
-                                    if (mouse.button === Qt.RightButton) {
-                                        tabContextMenu.targetTabIdx = filesTab.tabIdx
-                                        tabContextMenu.popup()
-                                        return
-                                    }
-                                    if (filesCloseBg.visible && filesCloseMa.containsMouse) {
-                                        mouse.accepted = false
-                                        return
-                                    }
-                                    tabBar.currentIndex = filesTab.tabIdx
-                                }
-                            }
-                        }
-                    }
-
-                    // Job tabs — closeable.
-                    Repeater {
-                        id: jobTabsRepeater
-                        model: openJobs
-                        delegate: Rectangle {
-                            id: jobTab
-                            readonly property int jobIdx: index
-                            readonly property int tabIdx: filesTabs.count + index
-                            height: tabRow.height
-                            width: Math.min(180, jobLabel.implicitWidth + 44)
-                            Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                            color: tabBar.currentIndex === tabIdx
-                                ? Theme.colors.surfaceHover
-                                : (jobMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
-
-                            Row {
-                                id: jobLabel
-                                anchors.left: parent.left
-                                anchors.leftMargin: 10
-                                anchors.right: closeBg.left
-                                anchors.rightMargin: 4
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 6
-                                Icon {
-                                    name: "clipboard-text"
-                                    size: Theme.icon.sizeToolbar
-                                    color: tabBar.currentIndex === jobTab.tabIdx
-                                        ? Theme.colors.textBright
-                                        : Theme.colors.textMuted
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                                Label {
-                                    text: model.jobName
-                                    width: jobLabel.width - 22
-                                    color: tabBar.currentIndex === jobTab.tabIdx
-                                        ? Theme.colors.textBright
-                                        : Theme.colors.textMuted
-                                    font.pixelSize: Theme.font.sizeBody
-                                    font.bold: tabBar.currentIndex === jobTab.tabIdx
-                                    elide: Text.ElideMiddle
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-                            // × close button. z above the tab-select
-                            // MouseArea so closeMa actually wins
-                            // hit-testing on the X (without this,
-                            // jobMa's anchors.fill captures the click
-                            // first and the propagation back through
-                            // closeMa.containsMouse never resolves).
-                            Rectangle {
-                                id: closeBg
-                                z: 10
-                                anchors.right: parent.right
-                                anchors.rightMargin: 6
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: 16
-                                height: 16
-                                radius: Theme.dim.radiusSmall
-                                Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                                color: closeMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "×"
-                                    color: Theme.colors.text
-                                    font.pixelSize: 13
-                                }
-                                MouseArea {
-                                    id: closeMa
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    onClicked: (mouse) => {
-                                        mouse.accepted = true
-                                        window.closeJobTab(jobTab.jobIdx)
-                                    }
-                                }
-                            }
-                            // Active-tab underline.
-                            Rectangle {
-                                visible: tabBar.currentIndex === jobTab.tabIdx
-                                anchors.bottom: parent.bottom
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                height: 2
-                                color: Theme.colors.accentSelected
-                            }
-                            MouseArea {
-                                id: jobMa
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                propagateComposedEvents: true
-                                onClicked: (mouse) => {
-                                    if (mouse.button === Qt.RightButton) {
-                                        tabContextMenu.targetTabIdx = jobTab.tabIdx
-                                        tabContextMenu.popup()
-                                        return
-                                    }
-                                    // Don't steal clicks the close MouseArea
-                                    // already handled.
-                                    if (closeMa.containsMouse) {
-                                        mouse.accepted = false
-                                        return
-                                    }
-                                    tabBar.currentIndex = jobTab.tabIdx
-                                }
-                            }
-                        }
-                    }
-
-                    // Aggregated Tracker tab (singleton — opens via
-                    // Sidebar's "All Tracked" entry; closes via the ×).
-                    Loader {
-                        active: window.trackerTabOpen
-                        sourceComponent: trackerTabComponent
-                    }
-
-                    // Task Queue tab (singleton — opens via Sidebar's
-                    // "Task Queue" entry or a footer task chip; queuing
-                    // a job never switches tabs). It wears an
-                    // active-count chip. Internally still the
-                    // "transcode" tab: the persisted tab-state key and
-                    // the index arithmetic below predate archive jobs.
-                    Loader {
-                        active: window.transcodeTabOpen
-                        sourceComponent: transcodeTabComponent
-                    }
-
-                    // "+" — spawn a new Files tab. Sits at the far
-                    // right of every other tab pill so it never moves
-                    // around as job/tracker/transcode tabs come and go.
-                    Rectangle {
-                        height: tabRow.height
-                        width: 28
-                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                        color: addFilesMa.containsMouse
-                            ? Theme.colors.surface : Theme.colors.hoverIdle
-                        Icon {
-                            anchors.centerIn: parent
-                            name: "plus"
-                            size: Theme.icon.sizeToolbar
-                            color: Theme.colors.textMuted
-                        }
-                        MouseArea {
-                            id: addFilesMa
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: window.addFilesTab()
-                            ToolTip.text: qsTr("New Files tab")
-                            ToolTip.visible: containsMouse
-                            ToolTip.delay: 500
-                        }
-                    }
-
-                    // Close All — broom icon. Sits to the right of
-                    // "+" so it's the very last cell. Disabled
-                    // (greyed) when there's nothing to close so an
-                    // idle click is a visible no-op.
-                    Rectangle {
-                        height: tabRow.height
-                        width: 28
-                        opacity: window._hasClosableTabs() ? 1 : 0.35
-                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                        color: closeAllMa.containsMouse && window._hasClosableTabs()
-                            ? Theme.colors.surface : Theme.colors.hoverIdle
-                        Icon {
-                            anchors.centerIn: parent
-                            name: "x-circle"
-                            size: Theme.icon.sizeToolbar
-                            color: Theme.colors.textMuted
-                        }
-                        MouseArea {
-                            id: closeAllMa
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: window._hasClosableTabs()
-                                ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: {
-                                if (!window._hasClosableTabs()) return
-                                closeAllConfirmDialog.open()
-                            }
-                            ToolTip.text: qsTr("Close all tabs")
-                            ToolTip.visible: containsMouse
-                            ToolTip.delay: 500
-                        }
-                    }
-                }
-                }  // Flickable
-            }
-
-            Component {
-                id: transcodeTabComponent
-                Rectangle {
-                    readonly property int tabIdx: window._transcodeTabIndex
-                    height: tabRow.height
-                    width: transcodeTabLabel.implicitWidth + 44
-                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                    color: tabBar.currentIndex === tabIdx
-                        ? Theme.colors.surfaceHover
-                        : (transcodeTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
-                    Row {
-                        id: transcodeTabLabel
-                        anchors.left: parent.left
-                        anchors.leftMargin: 10
-                        anchors.right: transcodeCloseBg.left
-                        anchors.rightMargin: 4
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 6
-                        Icon {
-                            name: "stack"
-                            size: Theme.icon.sizeToolbar
-                            color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
-                                ? Theme.colors.textBright
-                                : Theme.colors.textMuted
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Label {
-                            text: qsTr("Tasks")
-                            color: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
-                                ? Theme.colors.textBright
-                                : Theme.colors.textMuted
-                            font.pixelSize: Theme.font.sizeBody
-                            font.bold: tabBar.currentIndex === transcodeTabLabel.parent.tabIdx
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        // Active-job count chip — keeps the queue
-                        // discoverable once the footer chips have gone.
-                        Rectangle {
-                            visible: taskJobs.activeCount > 0
-                            width: Math.max(16, chipLabel.implicitWidth + 8)
-                            height: 16
-                            radius: Theme.dim.radiusSmall
-                            color: Theme.colors.accent
-                            anchors.verticalCenter: parent.verticalCenter
-                            Label {
-                                id: chipLabel
-                                anchors.centerIn: parent
-                                text: taskJobs.activeCount
-                                color: Theme.colors.textBright
-                                font.pixelSize: 10
-                                font.bold: true
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: transcodeCloseBg
-                        z: 10
-                        anchors.right: parent.right
-                        anchors.rightMargin: 6
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 16; height: 16; radius: Theme.dim.radiusSmall
-                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                        color: transcodeCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
-                        Label {
-                            anchors.centerIn: parent
-                            text: "×"; color: Theme.colors.text; font.pixelSize: 13
-                        }
-                        MouseArea {
-                            id: transcodeCloseMa
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: (mouse) => {
-                                mouse.accepted = true
-                                window.closeTranscodeTab()
-                            }
-                        }
-                    }
-                    Rectangle {
-                        visible: tabBar.currentIndex === parent.tabIdx
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 2
-                        color: Theme.colors.accentSelected
-                    }
-                    MouseArea {
-                        id: transcodeTabMa
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onClicked: (mouse) => {
-                            if (mouse.button === Qt.RightButton) {
-                                tabContextMenu.targetTabIdx = parent.tabIdx
-                                tabContextMenu.popup()
-                                return
-                            }
-                            if (transcodeCloseMa.containsMouse) {
-                                mouse.accepted = false
-                                return
-                            }
-                            tabBar.currentIndex = parent.tabIdx
-                        }
-                    }
-                }
-            }
-
-            Component {
-                id: trackerTabComponent
-                Rectangle {
-                    readonly property int tabIdx: window._trackerTabIndex
-                    height: tabRow.height
-                    width: trackerTabLabel.implicitWidth + 44
-                    Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                    color: tabBar.currentIndex === tabIdx
-                        ? Theme.colors.surfaceHover
-                        : (trackerTabMa.containsMouse ? Theme.colors.surface : Theme.colors.hoverIdle)
-
-                    Row {
-                        id: trackerTabLabel
-                        anchors.left: parent.left
-                        anchors.leftMargin: 10
-                        anchors.right: trackerCloseBg.left
-                        anchors.rightMargin: 4
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 6
-                        Icon {
-                            name: "clipboard-text"
-                            size: Theme.icon.sizeToolbar
-                            color: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
-                                ? Theme.colors.textBright
-                                : Theme.colors.textMuted
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Label {
-                            text: qsTr("All Tracked")
-                            color: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
-                                ? Theme.colors.textBright
-                                : Theme.colors.textMuted
-                            font.pixelSize: Theme.font.sizeBody
-                            font.bold: tabBar.currentIndex === trackerTabLabel.parent.tabIdx
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                    }
-                    Rectangle {
-                        id: trackerCloseBg
-                        z: 10
-                        anchors.right: parent.right
-                        anchors.rightMargin: 6
-                        anchors.verticalCenter: parent.verticalCenter
-                        width: 16
-                        height: 16
-                        radius: Theme.dim.radiusSmall
-                        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
-                        color: trackerCloseMa.containsMouse ? Theme.colors.surfaceHover : Theme.colors.hoverIdle
-                        Label {
-                            anchors.centerIn: parent
-                            text: "×"
-                            color: Theme.colors.text
-                            font.pixelSize: 13
-                        }
-                        MouseArea {
-                            id: trackerCloseMa
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: (mouse) => {
-                                mouse.accepted = true
-                                window.closeTrackerTab()
-                            }
-                        }
-                    }
-                    Rectangle {
-                        visible: tabBar.currentIndex === parent.tabIdx
-                        anchors.bottom: parent.bottom
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        height: 2
-                        color: Theme.colors.accentSelected
-                    }
-                    MouseArea {
-                        id: trackerTabMa
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                        onClicked: (mouse) => {
-                            if (mouse.button === Qt.RightButton) {
-                                tabContextMenu.targetTabIdx = parent.tabIdx
-                                tabContextMenu.popup()
-                                return
-                            }
-                            if (trackerCloseMa.containsMouse) {
-                                mouse.accepted = false
-                                return
-                            }
-                            tabBar.currentIndex = parent.tabIdx
-                        }
-                    }
-                }
-            }
 
             // Internal "tab bar" state. We don't actually use a Qt
             // TabBar (the styled version above is custom), but keeping

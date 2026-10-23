@@ -22,6 +22,9 @@ qt_add_executable(ufb
     thumbnails/ThumbCache.cpp
     thumbnails/ThumbCache.h
     updater/Updater.h
+    # The chromeless window: flags live in Main.qml, the per-OS halves below.
+    WindowChrome.h
+    WindowChrome.cpp
     # In-app video preview decode core (ported from QCView-Player, namespace
     # ufbplayer, independent copy). Platform frame_handle split below.
     player/frame_handle.h
@@ -198,6 +201,7 @@ if(WIN32)
     target_sources(ufb PRIVATE
         thumbnails/SystemIcons_win.cpp
         thumbnails/ShellThumbnail_win.cpp
+        WindowChrome_win.cpp   # the caption metrics at the window's dpi
         player/frame_handle_nonapple.cpp
         # Decode-only Vulkan device (shared VkDevice handed to FFmpeg for
         # the ProRes zero-copy path) + the AVVulkanDeviceContext handoff.
@@ -627,8 +631,7 @@ if(APPLE)
         # Slice 04 — Qt-app shell macOS items.
         MacOSBootstrap.h
         MacOSBootstrap.mm
-        MacWindowChrome.h
-        MacWindowChrome.mm
+        WindowChrome_mac.mm    # hide the title text under the transparent title bar
         MacAccent.h
         MacAccent.mm
         # Slice 07 — Accessibility probe for the AppleScript-mediated

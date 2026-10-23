@@ -286,8 +286,17 @@ Rectangle {
             id: bookmarksList
             Layout.fillWidth: true
             // Cap matches the wider expected count (~12 bookmarks
-            // visible without scrolling at the dense 22px row).
+            // visible without scrolling at the dense 22px row). The
+            // list takes its content height while there is room and
+            // SHRINKS (scrolling inside) when there isn't — the title
+            // row (2026-10-23) took 32 px from the column, and a fixed
+            // preferred height pushed the Path swaps / Mesh sync rows
+            // off the bottom. Never below three rows.
+            Layout.fillHeight: true
             Layout.preferredHeight: Math.min(contentHeight, 280)
+            Layout.maximumHeight: Math.max(1, Math.min(contentHeight, 280))
+            Layout.minimumHeight: Math.min(contentHeight,
+                                           3 * (Theme.dim.rowHeightDense + Theme.dim.sidebarRowGap))
             Layout.topMargin: Theme.dim.sidebarListPad
             spacing: Theme.dim.sidebarRowGap
             model: bookmarksModel
@@ -408,8 +417,14 @@ Rectangle {
             Layout.fillWidth: true
             // Stacked rows are 38px each; cap roughly fits 8–9 rows
             // before the inner scrollbar kicks in. Was 220 (only 5
-            // rows fit at the new height — felt truncated).
+            // rows fit at the new height — felt truncated). Shrinks
+            // under pressure like the bookmarks list; never below
+            // three rows.
+            Layout.fillHeight: true
             Layout.preferredHeight: Math.min(contentHeight, 360)
+            Layout.maximumHeight: Math.max(1, Math.min(contentHeight, 360))
+            Layout.minimumHeight: Math.min(contentHeight,
+                                           3 * (Theme.dim.rowHeight + Theme.dim.sidebarRowGap))
             Layout.topMargin: Theme.dim.sidebarListPad
             spacing: Theme.dim.sidebarRowGap
             model: subscriptionsModel

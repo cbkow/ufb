@@ -281,10 +281,19 @@ Item {
         // transport bar rather than over it.
     }
 
+    // The overlay covers the title row too (2026-10-23, the chromeless
+    // window): keep the corner buttons clear of the OS's own — Windows'
+    // caption buttons at the top right, the traffic lights at the top
+    // left on macOS (hidden in fullscreen).
+    readonly property int _osRightInset: WindowChrome.captionButtons ? Math.ceil(WindowChrome.captionWidth) : 0
+    readonly property int _osLeftInset: (WindowChrome.nativeLights
+                                         && Window.window && Window.window.visibility !== Window.FullScreen) ? 70 : 0
+
     FlatButton {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.margins: Theme.dim.padding
+        anchors.rightMargin: Theme.dim.padding + root._osRightInset
         iconName: "x"
         iconSize: Theme.icon.sizeMedium
         tooltip: qsTr("Close (Esc)")
@@ -298,6 +307,7 @@ Item {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.margins: Theme.dim.padding
+        anchors.leftMargin: Theme.dim.padding + root._osLeftInset
         visible: content.item && content.item.canGoBack === true
         iconName: "squares-four"
         text: qsTr("Layers")
