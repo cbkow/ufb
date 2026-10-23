@@ -2442,9 +2442,13 @@ Rectangle {
                 ]
             }
 
-            // Slim grid-size slider - accent-coloured, grid mode only.
-            Slider {
+            // Slim grid-size slider - accent-coloured, grid mode only. The
+            // family FlatSlider (rounded handle, press ramp) in its accent
+            // variant; it used to be a hand-styled Qt Slider with a square
+            // handle.
+            FlatSlider {
                 id: gridSlider
+                accent: true
                 visible: root.viewMode === "grid"
                 Layout.preferredWidth: 110
                 Layout.preferredHeight: Theme.dim.toolStripHeight
@@ -2452,27 +2456,6 @@ Rectangle {
                 from: 48; to: 256; stepSize: 8
                 value: root.gridSize
                 onMoved: root.gridSize = value
-                background: Rectangle {
-                    x: gridSlider.leftPadding
-                    y: gridSlider.topPadding + gridSlider.availableHeight / 2 - height / 2
-                    width: gridSlider.availableWidth
-                    height: 2
-                    color: Theme.colors.borderStrong
-                    Rectangle {
-                        width: gridSlider.visualPosition * parent.width
-                        height: parent.height
-                        color: Theme.colors.accent
-                    }
-                }
-                handle: Rectangle {
-                    x: gridSlider.leftPadding
-                        + gridSlider.visualPosition * (gridSlider.availableWidth - width)
-                    y: gridSlider.topPadding + gridSlider.availableHeight / 2 - height / 2
-                    width: 10; height: 10
-                    color: gridSlider.pressed
-                        ? Theme.colors.accentHover
-                        : Theme.colors.accent
-                }
                 ToolTip.text: qsTr("Grid size: %1 px").arg(root.gridSize)
                 ToolTip.visible: hovered
                 ToolTip.delay: 500

@@ -4,12 +4,18 @@
 //
 // Usage:
 //   FlatSlider { from: 0; to: 1; value: 0.5; onMoved: ... }
+//   FlatSlider { accent: true; ... }   // accent fill + handle (the browser's grid-size slider)
 
 import QtQuick
 import QtQuick.Controls.Basic
 
 Slider {
     id: root
+
+    /// Accent-coloured fill and handle instead of the neutral bright ones —
+    /// for a slider that sets a view parameter rather than a transport
+    /// position.
+    property bool accent: false
 
     background: Rectangle {
         x: root.leftPadding
@@ -20,9 +26,10 @@ Slider {
         Rectangle {
             width:  root.visualPosition * parent.width
             height: parent.height
-            // Bright fill while enabled; dims to muted when disabled
-            // (e.g. the volume slider with no audio track).
-            color:  root.enabled ? Theme.colors.textBright : Theme.colors.textSubtle
+            // Bright (or accent) fill while enabled; dims to muted when
+            // disabled (e.g. the volume slider with no audio track).
+            color:  !root.enabled ? Theme.colors.textSubtle
+                  : root.accent   ? Theme.colors.accent : Theme.colors.textBright
         }
     }
     handle: Rectangle {
@@ -30,9 +37,10 @@ Slider {
         y: root.topPadding + root.availableHeight / 2 - height / 2
         width: 10; height: 10
         radius: Theme.dim.radiusSmall
-        color: !root.enabled
-                 ? Theme.colors.textSubtle
-                 : (root.pressed ? Theme.colors.text : Theme.colors.textBright)
+        color: !root.enabled ? Theme.colors.textSubtle
+             : root.accent    ? (root.pressed ? Theme.colors.accentHover : Theme.colors.accent)
+                              : (root.pressed ? Theme.colors.text : Theme.colors.textBright)
+        Behavior on color { ColorAnimation { duration: Theme.dim.hoverMs } }
     }
     opacity: root.enabled ? 1.0 : 0.55
 }
