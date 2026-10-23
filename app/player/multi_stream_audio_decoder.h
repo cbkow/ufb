@@ -80,6 +80,14 @@ public:
     double secondsSinceLastSeek() const override;
     bool   seekPending() const override { return m_seekRequested.load(); }
 
+    // Stale-region flush (see IAudioSource). Pass-throughs to the ring.
+    uint32_t    flushGeneration() const override
+    { return m_ring ? m_ring->staleGeneration() : 0; }
+    std::size_t staleFrames() const override
+    { return m_ring ? m_ring->staleBytes() / m_outputFormat.bytesPerFrame() : 0; }
+    void        discardStale() override
+    { if (m_ring) m_ring->discardStale(); }
+
     void setRoutingMode(int mode) override;
     int  routingMode() const override { return m_routingMode.load(); }
 
@@ -170,6 +178,9 @@ private:
     std::mutex              m_seekMutex;
     std::condition_variable m_seekCv;
     std::atomic<bool>       m_seekRequested{false};
+    // Sample-accurate seek landing (see AudioDecoder). Decode thread only.
+    bool   m_trimPending   = false;
+    double m_trimTargetSec = 0.0;
     double                  m_seekTarget   = 0.0;
     std::atomic<double>     m_lastSeekTime{0.0};
     std::atomic<double>     m_decodePosition{0.0};

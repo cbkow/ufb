@@ -2,6 +2,9 @@
 // VideoSurfaceItem (zero-copy on macOS), an AudioPlayer kept in sync, and a
 // play/pause + seekbar + mute/volume transport. Video is the master clock;
 // audio follows via AudioPlayer.update(videoSeconds) (drift-corrected).
+// Every play / resume arms AudioPlayer's post-seek hold (_startAudio) and
+// the first landed frame releases it (onCurrentFrameChanged), so audio
+// never runs ahead of a picture that is still seeking.
 // See devdocs/lightbox-preview-plan.md.
 
 import QtQuick
@@ -78,9 +81,20 @@ Item {
             if (root.source.length === 0)
                 return
             dec.play()
-            if (audio.hasAudio)
-                audio.play()
+            root._startAudio()
         }
+    }
+
+    // Start audio held: the picture may take a frame (play from pause
+    // publishes the NEXT frame first) or hundreds of ms (long-GOP seek)
+    // to land. Consumption is frozen, faded, at the seek anchor until
+    // onCurrentFrameChanged releases it at the frame that actually
+    // landed (a small forward delta is a ring skip, anything else a
+    // sample-accurate re-seek). Always after the decoder's play().
+    function _startAudio() {
+        if (!audio.hasAudio) return
+        audio.setHold(true)
+        audio.play()
     }
 
     // Loop toggle (V). When on, EndOfStream restarts from frame 0.
@@ -125,7 +139,7 @@ Item {
         } else {
             _syncStreamingForResume()
             dec.play()
-            if (audio.hasAudio) audio.play()
+            _startAudio()
         }
     }
 
@@ -206,7 +220,7 @@ Item {
                 dec.seekToFrame(0)
                 audio.seek(0)
                 dec.play()
-                if (audio.hasAudio) audio.play()
+                root._startAudio()
             }
             if (dec.state === VideoDecoder.Errored)
                 root._loading = false
@@ -214,6 +228,14 @@ Item {
         function onFrameAvailable() {
             root._firstFrameSeen = true
             root._loading = false
+        }
+        // First picture after play / seek: release the audio hold at the
+        // frame that landed. Read the frame directly rather than through
+        // _videoSeconds — a binding may not have re-evaluated yet when a
+        // signal handler runs.
+        function onCurrentFrameChanged() {
+            if (dec.isPlaying && audio.hasAudio && audio.held())
+                audio.releaseHold(dec.fps > 0 ? dec.currentFrame / dec.fps : 0)
         }
     }
 
@@ -347,7 +369,7 @@ Item {
                         // streaming decoder to the scrubbed frame, then play.
                         root._syncStreamingForResume()
                         dec.play()
-                        if (audio.hasAudio) audio.play()
+                        root._startAudio()
                     }
                 }
                 // Live drag → instant GOP-cached scrub frames (shared with the

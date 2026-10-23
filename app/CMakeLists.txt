@@ -55,6 +55,7 @@ qt_add_executable(ufb
     player/audio_ring_buffer.h
     player/audio_sync_servo.h       # A/V sync PI controller (ported from QCView)
     player/fractional_resampler.h   # RT-safe Catmull-Rom drain for the servo
+    player/audio_drain_stage.h      # render-callback drain: resampler + every fade
     player/i_audio_source.h
     player/audio_decoder.cpp
     player/audio_decoder.h

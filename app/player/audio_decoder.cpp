@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstring>
 #include <optional>
@@ -533,7 +534,11 @@ void AudioDecoder::flushAndSeek(double position)
     if (!m_formatCtx || m_audioStreamIdx < 0) return;
     AVStream *stream = m_formatCtx->streams[m_audioStreamIdx];
 
-    m_ring->clear();
+    // Mark (not clear) the ring: pre-seek audio stays readable so the
+    // render callback can fade it out instead of cutting; post-seek
+    // audio queues behind the mark. clear() was also not SPSC-safe
+    // against the live consumer (see AudioRingBuffer).
+    m_ring->markStale();
     avcodec_flush_buffers(m_codecCtx);
 
     int64_t targetTs = static_cast<int64_t>(position / av_q2d(stream->time_base));
@@ -549,6 +554,8 @@ void AudioDecoder::flushAndSeek(double position)
     m_eofReached = false;
     m_decodePosition = position;
     m_readPosition   = position;
+    m_trimPending    = true;
+    m_trimTargetSec  = std::max(0.0, position);
     m_lastSeekTime.store(std::chrono::duration<double>(
         std::chrono::steady_clock::now().time_since_epoch()).count(),
         std::memory_order_relaxed);
@@ -581,7 +588,7 @@ void AudioDecoder::decodeThreadFn()
         }
         // Back-pressure: depth target rather than near-full — queue
         // depth is the producer-side latency the servo has to absorb.
-        if (m_ring->availableRead() > kBackPressureBytes) {
+        if (m_ring->freshBytes() > kBackPressureBytes) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
@@ -658,10 +665,49 @@ bool AudioDecoder::decodeNextPacket()
         computeFramePeaks(m_decodeFrame, m_sourceChannels,
                             m_peakPerChannel);
 
-        const int converted = swr_convert(
+        int converted = swr_convert(
             m_swrCtx, &dst, dstNbSamples,
             const_cast<const uint8_t **>(m_decodeFrame->data),
             m_decodeFrame->nb_samples);
+
+        // Sample-accurate landing: drop everything before the seek
+        // target so the first sample that reaches the ring IS the
+        // target (the player's anchor). Frames without a pts can't be
+        // placed — accept the packet-granular landing for those.
+        if (converted > 0 && m_trimPending) {
+            if (m_decodeFrame->pts == AV_NOPTS_VALUE) {
+                m_trimPending = false;
+            } else {
+                AVStream *stream = m_formatCtx->streams[m_audioStreamIdx];
+                const double frameStart = static_cast<double>(
+                    m_decodeFrame->pts - m_streamStartTime)
+                    * av_q2d(stream->time_base);
+                const double frameDur =
+                    static_cast<double>(m_decodeFrame->nb_samples)
+                    / static_cast<double>(m_codecCtx->sample_rate);
+                if (frameStart + frameDur <= m_trimTargetSec) {
+                    converted = 0;                 // wholly pre-target
+                } else {
+                    if (frameStart < m_trimTargetSec) {
+                        int skip = static_cast<int>(std::lround(
+                            (m_trimTargetSec - frameStart)
+                            * m_outputFormat.sampleRate));
+                        if (skip > converted) skip = converted;
+                        if (skip > 0) {
+                            const size_t skipBytes =
+                                static_cast<size_t>(skip)
+                                * m_outputFormat.bytesPerFrame();
+                            std::memmove(dst, dst + skipBytes,
+                                         (static_cast<size_t>(converted)
+                                          - skip)
+                                         * m_outputFormat.bytesPerFrame());
+                            converted -= skip;
+                        }
+                    }
+                    m_trimPending = false;
+                }
+            }
+        }
 
         if (converted > 0) {
             const size_t bytesToWrite = static_cast<size_t>(converted)

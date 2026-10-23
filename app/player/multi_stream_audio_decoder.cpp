@@ -17,6 +17,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -804,7 +805,11 @@ void MultiStreamAudioDecoder::flushAndSeek(double position)
     for (auto *cctx : m_decoders) {
         if (cctx) avcodec_flush_buffers(cctx);
     }
-    if (m_ring) m_ring->clear();
+    // Mark (not clear): pre-seek audio stays readable for the render
+    // callback's fade-out; post-seek audio queues behind the mark.
+    if (m_ring) m_ring->markStale();
+    m_trimPending   = true;
+    m_trimTargetSec = std::max(0.0, position);
 
     // Rebuild the libavfilter graph atomically. Decoder flushes only
     // clear FFmpeg's per-codec internal buffers; amerge's per-input
@@ -861,7 +866,7 @@ void MultiStreamAudioDecoder::decodeThreadFn()
         // bytes currently queued for the device; if that exceeds the
         // target, sleep until the device drains some.
         if (m_ring
-            && m_ring->availableRead() > kBackPressureBufferedBytes) {
+            && m_ring->freshBytes() > kBackPressureBufferedBytes) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
@@ -928,12 +933,48 @@ void MultiStreamAudioDecoder::decodeThreadFn()
             // before it produces output, so for the first few packets
             // on each stream this returns AVERROR(EAGAIN); fine.
             while (av_buffersink_get_frame(p->buffersink, outFrame) >= 0) {
+                // Sample-accurate landing (see AudioDecoder): drop
+                // graph output before the seek target. Sink pts are
+                // in the sink time base, absolute like the
+                // avformat_seek_file target above.
+                int trimSkip = 0;
+                if (m_trimPending) {
+                    if (outFrame->pts == AV_NOPTS_VALUE) {
+                        m_trimPending = false;
+                    } else {
+                        const AVRational tb =
+                            av_buffersink_get_time_base(p->buffersink);
+                        const double frameStart =
+                            static_cast<double>(outFrame->pts) * av_q2d(tb);
+                        const double frameDur =
+                            static_cast<double>(outFrame->nb_samples)
+                            / static_cast<double>(m_outputFormat.sampleRate);
+                        if (frameStart + frameDur <= m_trimTargetSec) {
+                            av_frame_unref(outFrame);
+                            continue;                  // wholly pre-target
+                        }
+                        if (frameStart < m_trimTargetSec) {
+                            trimSkip = static_cast<int>(std::lround(
+                                (m_trimTargetSec - frameStart)
+                                * m_outputFormat.sampleRate));
+                            if (trimSkip > outFrame->nb_samples) {
+                                trimSkip = outFrame->nb_samples;
+                            }
+                        }
+                        m_trimPending = false;
+                    }
+                }
                 if (m_ring) {
-                    const int bytes = outFrame->nb_samples * 2 * sizeof(float);
                     const auto *data = outFrame->extended_data
                         ? outFrame->extended_data[0]
                         : outFrame->data[0];
-                    if (data) {
+                    const int nbSamples = outFrame->nb_samples - trimSkip;
+                    if (data && trimSkip > 0) {
+                        data += static_cast<size_t>(trimSkip)
+                              * 2 * sizeof(float);
+                    }
+                    if (data && nbSamples > 0) {
+                        const int bytes = nbSamples * 2 * sizeof(float);
                         m_ring->write(reinterpret_cast<const uint8_t *>(data),
                                       static_cast<std::size_t>(bytes));
                     }

@@ -14,6 +14,7 @@
 #pragma once
 
 #include "audio_sync_servo.h"
+#include "audio_drain_stage.h"
 #include "fractional_resampler.h"
 #include "i_audio_source.h"
 
@@ -123,11 +124,28 @@ public:
 
     // Sync tick. Caller passes the master clock's current position in
     // seconds (the video clock, or AudioPreview's own timer). Inside a
-    // ~40 ms band the PI servo trims the render callback's consumption
-    // ratio by up to ±0.2 % (inaudible) so drift converges to ~0 with
-    // no seeks; beyond it the old re-seek tiers remain (soft with a
-    // 1 s cooldown, immediate past 1 s). Call at ~30 Hz or per frame.
+    // 100 ms band the PI servo trims the render callback's consumption
+    // ratio (±0.2 % inside 20 ms, opening to ±1.5 % at the band edge)
+    // so drift converges with no seeks; beyond it a soft re-seek after
+    // sustained out-of-band ticks + a 1 s cooldown, immediate past 1 s.
+    // Call at ~30 Hz or per frame.
     Q_INVOKABLE void update(double videoPositionSeconds);
+
+    // ---- Post-seek hold ----
+    // Audio seeks in milliseconds; a long-GOP video seek can take
+    // hundreds. Without a hold the audio runs ahead from the target
+    // while the picture is still landing, and the servo's re-seek
+    // tier then cuts it back ~1 s later — the "one pop after every
+    // play / seek". setHold(true) freezes consumption (faded) at the
+    // seek anchor; releaseHold(masterSeconds) resumes, re-aligning to
+    // wherever the master clock actually landed: a small forward
+    // delta is absorbed by dropping ring frames (no decoder seek),
+    // anything else re-seeks. pause() clears the hold. VideoPreview
+    // arms it after seek+play and releases on the first
+    // currentFrameChanged; AudioPreview (no picture) never holds.
+    Q_INVOKABLE void setHold(bool on);
+    Q_INVOKABLE void releaseHold(double masterSeconds);
+    Q_INVOKABLE bool held() const { return m_drainReq.hold.load(); }
 
 signals:
     void hasAudioChanged();
@@ -181,23 +199,27 @@ private:
     AudioSyncServo                    m_servo;                // UI thread
     std::atomic<float>                m_servoRatio{1.0f};
 
-    // Render-callback-only: fractional resampler + its source scratch
-    // (sized once in initialize() from the device's real buffer frame
-    // count — WASAPI can request the full buffer in one callback).
-    FractionalResampler               m_servoResampler;
+    // Render-callback-only drain (resampler + every fade) and its
+    // source scratch (sized once in initialize() from the device's
+    // real buffer frame count — WASAPI can request the full buffer in
+    // one callback). m_drainReq carries the cross-thread knobs. The
+    // resampler keeps its interpolation look-ahead in its own history
+    // now (QCView 2026-10-09), which retired UFB's 2026-09-10 carry
+    // buffer for the same one-sample-per-block drop.
+    AudioDrainStage                   m_drain;
+    AudioDrainStage::Request          m_drainReq;
     std::vector<float>                m_servoScratch;
-    // Look-ahead carry: sourceFramesNeeded() asks for 1–2 frames more
-    // than process() advances past (Catmull-Rom needs p2/p3 beyond the
-    // last output sample). The ring read is destructive, so without a
-    // carry those frames were dropped every callback — one skipped
-    // sample per 512-frame CoreAudio callback = the stream (and the
-    // consumption counter) running 0.2 % fast, which ate the servo's
-    // entire ±0.2 % authority and forced a re-seek every ~10 s. Render
-    // thread only; resetAnchor() invalidates it via the atomic flag.
-    static constexpr std::size_t      kServoCarryMax = 8;
-    std::vector<float>                m_servoCarry;
-    std::size_t                       m_servoCarryFrames = 0;
-    std::atomic<bool>                 m_servoCarryInvalidate{false};
+
+    // Re-seek tier hysteresis: consecutive update() ticks out of the
+    // servo band. One out-of-band sample (a late video publish) must
+    // not cost a cut.
+    int                               m_outOfBandTicks = 0;
+
+    // pause() fades out and stops the device a couple of blocks
+    // later; this generation guards the deferred stop against a
+    // play() that arrives in between.
+    int                               m_pauseGeneration = 0;
+    void stopDeviceDeferred();
 
     // dt source for the servo's PI terms (update cadence is
     // irregular). UI thread only.

@@ -86,6 +86,14 @@ public:
     double secondsSinceLastSeek() const override;
     bool   seekPending() const override { return m_seekRequested.load(); }
 
+    // Stale-region flush (see IAudioSource). Pass-throughs to the ring.
+    uint32_t    flushGeneration() const override
+    { return m_ring ? m_ring->staleGeneration() : 0; }
+    std::size_t staleFrames() const override
+    { return m_ring ? m_ring->staleBytes() / m_outputFormat.bytesPerFrame() : 0; }
+    void        discardStale() override
+    { if (m_ring) m_ring->discardStale(); }
+
     // Per-clip channel routing mode. `mode` matches the
     // ufbplayer::AudioRoutingMode enum in media_item.h (0 = Auto, 1 =
     // Downmix5_1, 2 = Stereo7_8). Setter is thread-safe — it just
@@ -170,6 +178,17 @@ private:
     std::atomic<bool>       m_seekRequested{false};
     double                  m_seekTarget = 0.0;
     std::atomic<double>     m_lastSeekTime{0.0};   // steady_clock seconds-since-epoch
+
+    // Sample-accurate seek landing. av_seek_frame(BACKWARD) lands on
+    // the packet at-or-before the target (up to ~21 ms early on MOV /
+    // AAC, a whole video frame early on frame-wrapped MXF). The
+    // player anchors its position estimate at the REQUESTED time, so
+    // without a trim every seek bakes in that landing error. Decode
+    // thread only: set by flushAndSeek, consumed by decodeNextPacket,
+    // which drops whole pre-target frames and the leading samples of
+    // the straddling one.
+    bool   m_trimPending   = false;
+    double m_trimTargetSec = 0.0;
 
     // Reusable per-frame resample destination — avoids per-frame
     // heap allocation in the hot path.
