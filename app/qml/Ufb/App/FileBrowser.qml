@@ -1259,6 +1259,47 @@ Rectangle {
                 if (paths.length > 0) Lucid.set_pinned(JSON.stringify(paths), false)
             }
         }
+        // LucidLink links: the extension's "Copy link" (the filespace's
+        // share link, one per selected item, newline-joined) and "Create
+        // guest link" (the desktop app's sheet for a public, expiring
+        // link — one item at a time).
+        UfbMenuItem {
+            iconName: "link"
+            text: root._currentSelectionCount > 1
+                ? qsTr("Copy %1 LucidLink Links").arg(root._currentSelectionCount)
+                : qsTr("Copy LucidLink Link")
+            visible: fileMenu._lucid.onFilespace
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var paths = root.selectedPaths()
+                if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
+                if (paths.length === 0) return
+                var r = { links: [], error: "" }
+                try { r = JSON.parse(Lucid.direct_links(JSON.stringify(paths))) } catch (e) { r.error = String(e) }
+                if (r.error && r.error.length > 0) {
+                    lucidErrorDialog.message = r.error
+                    lucidErrorDialog.open()
+                    return
+                }
+                FileOps.clipboard_copy_text(r.links.join("\n"))
+            }
+        }
+        UfbMenuItem {
+            iconName: "share-network"
+            text: qsTr("Create LucidLink Guest Link…")
+            visible: fileMenu._lucid.onFilespace && root._currentSelectionCount <= 1
+            height: visible ? implicitHeight : 0
+            onTriggered: {
+                var paths = root.selectedPaths()
+                if (paths.length === 0 && root._menuEntry) paths = [root._menuEntry.path]
+                if (paths.length === 0) return
+                var err = Lucid.create_guest_link(paths[0])
+                if (err && err.length > 0) {
+                    lucidErrorDialog.message = err
+                    lucidErrorDialog.open()
+                }
+            }
+        }
         MenuSeparator {}
         UfbMenuItem { iconName: "folder-simple"; action: revealAction }
         UfbMenuItem { iconName: "dots-three-outline"; action: showShellMenuAction }

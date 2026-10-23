@@ -37,6 +37,17 @@ pub mod qobject {
 
         #[qsignal]
         fn pin_done(self: Pin<&mut Lucid>, ok: bool, message: QString);
+
+        /// Share links for a JSON array of paths (the extension's "Copy
+        /// link"): JSON {links: [...], error: ""}. Stops at the first
+        /// failure with its message in `error`. A local round trip.
+        #[qinvokable]
+        fn direct_links(self: &Lucid, paths_json: QString) -> QString;
+
+        /// Open the desktop app's guest-link sheet for one path (the
+        /// extension's "Create guest link"). Returns "" or the error.
+        #[qinvokable]
+        fn create_guest_link(self: &Lucid, path: QString) -> QString;
     }
 
     impl cxx_qt::Threading for Lucid {}
@@ -67,6 +78,33 @@ impl qobject::Lucid {
             "pinnedAny": st.pinned_any,
         });
         cxx_qt_lib::QString::from(&json.to_string())
+    }
+
+    fn direct_links(&self, paths_json: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        let mut links = Vec::new();
+        let mut error = String::new();
+        for p in parse_paths(&paths_json) {
+            match ufb_core::lucidlink::direct_link(&p) {
+                Ok(l) => links.push(l),
+                Err(e) => {
+                    log::warn!("lucidlink: direct link for {}: {}", p, e);
+                    error = e;
+                    break;
+                }
+            }
+        }
+        let json = serde_json::json!({ "links": links, "error": error });
+        cxx_qt_lib::QString::from(&json.to_string())
+    }
+
+    fn create_guest_link(&self, path: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        match ufb_core::lucidlink::create_guest_link(&path.to_string()) {
+            Ok(()) => cxx_qt_lib::QString::from(""),
+            Err(e) => {
+                log::warn!("lucidlink: guest link: {}", e);
+                cxx_qt_lib::QString::from(&e)
+            }
+        }
     }
 
     fn set_pinned(self: Pin<&mut qobject::Lucid>, paths_json: cxx_qt_lib::QString, on: bool) {

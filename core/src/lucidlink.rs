@@ -10,6 +10,15 @@
 //! by the path relative to the filespace root. `pin --list / --set /
 //! --unset` keep or drop a local copy of a file or folder.
 //!
+//! Links (the extension's "Copy link" / "Create guest link"): each daemon
+//! instance serves a local HTTP API on the port `list` reports.
+//! `GET /fsEntry/direct-link?path=<rel>` answers `{"result": "https://
+//! app.lucidlink.com/l/…"}` — the link other members of the filespace
+//! open; `GET /fsEntry?path=<rel>` gives the entry id, and
+//! `lucidlink://create-guest-link?wsId=&fsId=&fsEntryId=` (workspace and
+//! filespace ids from `status`) opens the desktop app's guest-link
+//! sheet, exactly as the extension does.
+//!
 //! Everything shells out, so results are cached: the instance table for
 //! 30 s (mounts rarely change), the pin list for 3 s (and dropped after a
 //! pin / unpin). A machine without the CLI answers "not available" from a
@@ -25,6 +34,10 @@ pub struct Instance {
     pub id: String,
     pub name: String,
     pub mount_point: PathBuf,
+    /// The instance's local REST port (the PORT column of `lucid3 list`).
+    pub port: u16,
+    pub workspace_id: String,
+    pub filespace_id: String,
 }
 
 /// What the context menu needs to know about a selection, in one call.
@@ -132,13 +145,21 @@ fn cache() -> &'static Mutex<Cache> {
 const INSTANCES_TTL: Duration = Duration::from_secs(30);
 const PINS_TTL: Duration = Duration::from_secs(3);
 
-fn parse_instances(list: &str) -> Vec<String> {
-    // "INSTANCE ID  FILESPACE  PORT  MODE" header, then one row per instance.
+/// (instance id, REST port) rows of `lucid3 list`: "INSTANCE ID
+/// FILESPACE  PORT  MODE" header, then one row per instance.
+fn parse_instances(list: &str) -> Vec<(String, u16)> {
     list.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("INSTANCE"))
-        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
-        .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            let id = cols.first()?.to_string();
+            if !id.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let port = cols.get(2).and_then(|p| p.parse::<u16>().ok()).unwrap_or(0);
+            Some((id, port))
+        })
         .collect()
 }
 
@@ -169,13 +190,22 @@ pub fn instances() -> Vec<Instance> {
     let mut out = Vec::new();
     match run(&["list"]) {
         Ok(list) => {
-            for id in parse_instances(&list) {
+            for (id, port) in parse_instances(&list) {
                 match run(&["--id", &id, "status"]) {
                     Ok(st) => {
                         let mount = status_field(&st, "Mount point:");
                         let name = status_field(&st, "Filespace name:").unwrap_or("").to_string();
+                        let workspace_id = status_field(&st, "Workspace id:").unwrap_or("").to_string();
+                        let filespace_id = status_field(&st, "Filespace id:").unwrap_or("").to_string();
                         if let Some(m) = mount {
-                            out.push(Instance { id: id.clone(), name, mount_point: normalize_mount(m) });
+                            out.push(Instance {
+                                id: id.clone(),
+                                name,
+                                mount_point: normalize_mount(m),
+                                port,
+                                workspace_id,
+                                filespace_id,
+                            });
                         }
                     }
                     Err(e) => log::warn!("lucidlink: status for instance {}: {}", id, e),
@@ -251,6 +281,18 @@ mod tests {
     }
 
     #[test]
+    fn list_rows_carry_ports() {
+        let out = "\nINSTANCE ID        FILESPACE                      PORT        MODE        \n2000               union-jobs.union-ny-gfx        9778        live        \n";
+        assert_eq!(parse_instances(out), vec![("2000".to_string(), 9778)]);
+    }
+
+    #[test]
+    fn query_encoding() {
+        assert_eq!(pct("a b/c.mov"), "a%20b%2Fc.mov");
+        assert_eq!(rest_rel("job\\ae"), "job/ae");
+    }
+
+    #[test]
     fn pinned_by_prefix() {
         let pins = vec!["job/ae".to_string()];
         assert!(is_pinned("job/ae", &pins));
@@ -309,6 +351,94 @@ pub fn selection_state(paths: &[String]) -> SelectionState {
     st.pinned_all = flags.iter().all(|&b| b);
     st.pinned_any = flags.iter().any(|&b| b);
     st
+}
+
+// ── Links ────────────────────────────────────────────────────────────
+
+/// Percent-encode for a query value (everything but the unreserved set).
+fn pct(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// One HTTP/1.0 GET against the instance's local daemon (it answers with
+/// Connection: Close). std only — the request is a loopback round trip.
+fn local_get(port: u16, path_and_query: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    if port == 0 {
+        return Err("LucidLink instance has no REST port".into());
+    }
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .map_err(|e| format!("LucidLink daemon on port {}: {}", port, e))?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+    s.write_all(format!("GET {} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path_and_query).as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status: u16 = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    if (200..300).contains(&status) {
+        Ok(body.to_string())
+    } else {
+        Err(format!("LucidLink API {} for {}: {}", status, path_and_query, body.trim()))
+    }
+}
+
+/// The filespace-relative path as the REST API spells it (forward slashes).
+fn rest_rel(rel: &str) -> String {
+    rel.replace('\\', "/")
+}
+
+/// The share link other members of the filespace open ("Copy link").
+pub fn direct_link(path: &str) -> Result<String, String> {
+    let (inst, rel) = locate(path).ok_or_else(|| format!("{} is not on a LucidLink filespace", path))?;
+    let body = local_get(inst.port, &format!("/fsEntry/direct-link?path={}", pct(&rest_rel(&rel))))?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("direct-link reply: {}", e))?;
+    v.get("result")
+        .and_then(|r| r.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("direct-link reply had no result: {}", body.trim()))
+}
+
+/// The `lucidlink://create-guest-link…` URL that opens the desktop app's
+/// guest-link sheet for `path` (a public, expiring link).
+pub fn guest_link_url(path: &str) -> Result<String, String> {
+    let (inst, rel) = locate(path).ok_or_else(|| format!("{} is not on a LucidLink filespace", path))?;
+    if inst.workspace_id.is_empty() || inst.filespace_id.is_empty() {
+        return Err("LucidLink status reported no workspace / filespace id".into());
+    }
+    let body = local_get(inst.port, &format!("/fsEntry?path={}", pct(&rest_rel(&rel))))?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("fsEntry reply: {}", e))?;
+    let id = v
+        .get("id")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| format!("fsEntry reply had no id: {}", body.trim()))?;
+    // Ids go in raw, as the extension passes them (UUIDs and "59:319531";
+    // a colon is legal in a query and the app may not decode %3A).
+    Ok(format!(
+        "lucidlink://create-guest-link?wsId={}&fsId={}&fsEntryId={}",
+        inst.workspace_id, inst.filespace_id, id
+    ))
+}
+
+/// Open the desktop app's guest-link sheet for `path`.
+pub fn create_guest_link(path: &str) -> Result<(), String> {
+    let url = guest_link_url(path)?;
+    opener::open(&url).map_err(|e| format!("Could not open LucidLink: {}", e))
 }
 
 /// Pin (`on`) or unpin every path. Stops at the first failure.
