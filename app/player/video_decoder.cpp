@@ -6,6 +6,7 @@
 #include "scrub_decoder.h"
 #include "seek_compat.h"
 #include "stream_extent.h"
+#include "read_ahead.h"
 #include "sws_rgba_image.h"
 #include "sws_threaded.h"
 #include "thread_policy.h"
@@ -313,6 +314,17 @@ bool VideoDecoder::open(const QString &path)
 
     emit metadataChanged();
 
+    // Warm the next frames' bytes ahead of the decoder (read_ahead.h).
+    if (m_frameIndex.isValid()) {
+        m_readAheadId.store(ReadAhead::instance().attach(
+            path, ReadAhead::spansFromIndex(
+                      m_fmt, m_videoStreamIdx,
+                      [this](int64_t ts) { return m_frameIndex.frameForPts(ts); },
+                      m_frameIndex.totalFrames()),
+                  m_frameIndex.fps()),
+            std::memory_order_release);
+    }
+
     m_stopRequested.store(false, std::memory_order_release);
     m_publishedSeq.store(0, std::memory_order_release);
     m_lastFetchedSeq = 0;
@@ -358,6 +370,9 @@ void VideoDecoder::seekToFrame(int frameNo)
     if (total > 0 && frameNo >= total) frameNo = total - 1;
 
     m_pendingSeekTarget.store(frameNo, std::memory_order_release);
+    // The decoder reads frameNo itself; warm from the frame after it.
+    ReadAhead::instance().setPosition(
+        m_readAheadId.load(std::memory_order_acquire), frameNo + 1);
     {
         std::lock_guard<std::mutex> lk(m_seekCondMutex);
     }
@@ -396,6 +411,8 @@ void VideoDecoder::clearErrorState()
 
 void VideoDecoder::close()
 {
+    ReadAhead::instance().detach(
+        m_readAheadId.exchange(0, std::memory_order_acq_rel));
     // Tear down the scrub decoder (its own context + worker thread) first.
     if (m_scrubDecoder)
         m_scrubDecoder->close();
@@ -1314,6 +1331,8 @@ void VideoDecoder::publishHandle(FrameHandle handle, int64_t pts, bool pace)
         if (frameNo != m_currentFrame.exchange(frameNo, std::memory_order_acq_rel)) {
             emit currentFrameChanged();
         }
+        ReadAhead::instance().setPosition(
+            m_readAheadId.load(std::memory_order_acquire), frameNo + 1);
     }
 
     emit frameAvailable();
@@ -1335,6 +1354,15 @@ void VideoDecoder::decodeLoop()
 
     bool eofPacketsSent = false;
     bool atEof = false;
+
+    // Playback throughput, logged every 2 s while playing: how fast frames
+    // come out and how much of that time went to waiting on reads (the
+    // number that tells a slow volume from a slow decode, and whether
+    // read-ahead is landing).
+    using StatClock = std::chrono::steady_clock;
+    auto   statStart   = StatClock::now();
+    int    statFrames  = 0;
+    double statReadMs  = 0.0, statMaxReadMs = 0.0;
 
     while (!m_stopRequested.load(std::memory_order_acquire)) {
 #if defined(Q_OS_WIN)
@@ -1397,9 +1425,30 @@ void VideoDecoder::decodeLoop()
             continue;
         }
 
+        {
+            const double secs = std::chrono::duration<double>(
+                StatClock::now() - statStart).count();
+            if (secs >= 2.0) {
+                if (statFrames > 0 && m_isPlaying.load(std::memory_order_acquire)) {
+                    qInfo("VideoDecoder: playing %.1f fps over %.1f s; read waits "
+                          "%.0f ms total (%.0f%%), slowest %.0f ms",
+                          statFrames / secs, secs, statReadMs,
+                          100.0 * statReadMs / (secs * 1000.0), statMaxReadMs);
+                }
+                statStart = StatClock::now();
+                statFrames = 0;
+                statReadMs = statMaxReadMs = 0.0;
+            }
+        }
+
         // ---- Normal decode: read packets, send to codec.
         if (!eofPacketsSent) {
+            const auto readStart = StatClock::now();
             const int rc = av_read_frame(m_fmt, pkt);
+            const double readMs = std::chrono::duration<double, std::milli>(
+                StatClock::now() - readStart).count();
+            statReadMs += readMs;
+            statMaxReadMs = std::max(statMaxReadMs, readMs);
             if (rc == AVERROR_EOF) {
                 avcodec_send_packet(m_cctx, nullptr);   // drain
                 eofPacketsSent = true;
@@ -1430,6 +1479,7 @@ void VideoDecoder::decodeLoop()
                 setError(tr("avcodec_receive_frame: %1").arg(avErrToString(recvErr)));
                 goto finished;
             }
+            ++statFrames;
 
             if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
                 // VideoToolbox emits CVPixelBuffers in a few formats

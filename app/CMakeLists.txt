@@ -38,6 +38,9 @@ qt_add_executable(ufb
     player/scrub_decoder.h
     player/sws_rgba_image.h
     player/rgb_range.h
+    # Warms the next frames' bytes on a utility thread (LucidLink page cache)
+    player/read_ahead.cpp
+    player/read_ahead.h
     # FFmpeg 9 cut-over helpers (ported from QCView): codec routing,
     # software threading policy, demuxer seek shim, packet-walk extent
     # for duration-less containers, threaded swscale (dynamic mode).

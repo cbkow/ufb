@@ -38,6 +38,20 @@ extern "C" {
 
 namespace ufbplayer {
 
+// Destination pitch for every swscale → packed RGBA site: the row plus a
+// full 16-px SIMD block of padding, 64-byte aligned. The yuv420p → RGBA8
+// writer overshoots EVERY row by up to a block (32 bytes at 1080 wide), not
+// just the last one. With a tight pitch that lands in the next row's first
+// pixels — harmless single-threaded (the next row is written afterwards),
+// but under sliced threading the next slice's first row is already done, so
+// 8 garbage pixels survive at the left edge of each slice boundary (QCView
+// guard-page harness 2026-09-18: 14 of 1920 rows differ 16 threads vs 1 at
+// 1080x1920; 0 with this pitch). Consumers must honour bytesPerLine().
+inline int swsPaddedStride(int w, int bytesPerPixel)
+{
+    return (w * bytesPerPixel + 16 * bytesPerPixel + 63) & ~63;
+}
+
 // `sws` is a dynamic-mode context from swsCreateThreaded() (the callers'
 // initSwsContext); matrix + range are set per frame inside
 // swsConvertToBuffer. `expandLegalRgb`: apply the RGB legal→full expansion
@@ -51,7 +65,7 @@ inline QImage swsFrameToRgbaImage(SwsContext *sws, const AVFrame *yf,
     if (!sws || !yf || yf->width <= 0 || yf->height <= 0) return {};
     const int w = yf->width;
     const int h = yf->height;
-    const int stride = (w * 4 + 31) & ~31;   // 32-byte-aligned RGBA pitch
+    const int stride = swsPaddedStride(w, 4);   // row + SIMD block, see above
     // +1 row of trailing slack absorbs swscale's last-row block overshoot.
     const std::size_t bufSize = static_cast<std::size_t>(stride) * (h + 1);
     auto *buf = static_cast<uint8_t *>(av_malloc(bufSize));

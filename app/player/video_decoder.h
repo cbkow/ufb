@@ -340,6 +340,10 @@ private:
     FrameIndex             m_frameIndex;
     std::atomic<int>       m_currentFrame{-1};
 
+    // ReadAhead client for this file (0 = none). Set on open, cleared on
+    // close; the decode thread reports its read position through it.
+    std::atomic<std::uint64_t> m_readAheadId{0};
+
     // Owned scrub decoder (created on open, closed on close). unique_ptr to
     // an incomplete type here is fine — ~VideoDecoder is defined out-of-line
     // in the .cpp where ScrubDecoder is complete.
