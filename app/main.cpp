@@ -404,6 +404,14 @@ int main(int argc, char *argv[])
         ufb_gui_about_to_quit();
     });
 
+    // The chromeless window (2026-10-23): Main.qml reads the flags and the
+    // caption metrics from this; attach() after the load finishes the
+    // native side once the window exists. `--native-frame` (dev) keeps
+    // the OS frame. Declared BEFORE the engine so it outlives it: the
+    // window's bindings read it during teardown, and a context property
+    // destroyed first reads as null (seven TypeErrors at every quit).
+    WindowChrome windowChrome(!app.arguments().contains(QStringLiteral("--native-frame")));
+
     QQmlApplicationEngine engine;
     QObject::connect(
         &engine,
@@ -467,10 +475,7 @@ int main(int argc, char *argv[])
     AppController appController;
     engine.rootContext()->setContextProperty("AppCtl", &appController);
 
-    // The chromeless window (2026-10-23): Main.qml reads the flags and the
-    // caption metrics from this; attach() below finishes the native side
-    // once the window exists. `--native-frame` (dev) keeps the OS frame.
-    WindowChrome windowChrome(!app.arguments().contains(QStringLiteral("--native-frame")));
+    // The chromeless window: declared above the engine (see there).
     engine.rootContext()->setContextProperty("WindowChrome", &windowChrome);
 
     // The "Credentials" context property (CredentialPrompt) is gone —
