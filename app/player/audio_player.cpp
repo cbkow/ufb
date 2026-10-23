@@ -262,7 +262,7 @@ void AudioPlayer::stopDeviceDeferred()
     if (m_device && m_device->sampleRate() > 0) {
         const double periodMs = 1000.0 * m_device->bufferFrameCount()
                               / m_device->sampleRate();
-        delayMs = std::max(30, static_cast<int>(std::ceil(3.0 * periodMs)));
+        delayMs = (std::max)(30, static_cast<int>(std::ceil(3.0 * periodMs)));   // parenthesised: windows.h max macro
     }
     QTimer::singleShot(delayMs, this, [this, gen] {
         if (gen != m_pauseGeneration) return;         // play() came back

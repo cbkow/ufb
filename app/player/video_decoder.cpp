@@ -1448,7 +1448,7 @@ void VideoDecoder::decodeLoop()
             const double readMs = std::chrono::duration<double, std::milli>(
                 StatClock::now() - readStart).count();
             statReadMs += readMs;
-            statMaxReadMs = std::max(statMaxReadMs, readMs);
+            if (readMs > statMaxReadMs) statMaxReadMs = readMs;   // not std::max: windows.h's max macro
             if (rc == AVERROR_EOF) {
                 avcodec_send_packet(m_cctx, nullptr);   // drain
                 eofPacketsSent = true;
