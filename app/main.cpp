@@ -426,7 +426,16 @@ int main(int argc, char *argv[])
     // the OS frame. Declared BEFORE the engine so it outlives it: the
     // window's bindings read it during teardown, and a context property
     // destroyed first reads as null (seven TypeErrors at every quit).
-    WindowChrome windowChrome(!app.arguments().contains(QStringLiteral("--native-frame")));
+    // macOS only: on Windows Qt's expanded client area delivers every
+    // title-row press twice (WM_NCHITTEST + WM_LBUTTONDOWN), which broke
+    // tab clicks and the caption drag in 1.3.0 / 1.3.1 — Windows keeps the
+    // standard frame with the tab strip below it.
+#ifdef Q_OS_MACOS
+    const bool chromeless = !app.arguments().contains(QStringLiteral("--native-frame"));
+#else
+    const bool chromeless = false;
+#endif
+    WindowChrome windowChrome(chromeless);
 
     QQmlApplicationEngine engine;
     QObject::connect(

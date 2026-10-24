@@ -8,7 +8,11 @@
 //             the NATIVE traffic lights stay (zoom / fullscreen / tiling
 //             keep working) and the row insets its content past them.
 //             attachMac() hides the title text AppKit still draws.
-//   Windows — Qt's expanded client area (Main.qml flags): no painted top
+//   Windows — NOT USED since 1.3.2: main.cpp builds this with chromeless
+//             false on Windows (Qt's hit test delivered every title-row
+//             press twice; tab clicks and the caption drag broke). The
+//             Windows paths below stay for a later attempt. As it was:
+//             Qt's expanded client area (Main.qml flags): no painted top
 //             border, the DWM frame's shadow and corners, and Qt draws +
 //             hit-tests the Windows 11 caption buttons at the row's right
 //             end (snap layouts included); the row only reserves their
