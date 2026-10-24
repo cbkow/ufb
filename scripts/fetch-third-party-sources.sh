@@ -29,6 +29,10 @@ SEVENZIP_VERSION="26.03"
 FFMPEG_VERSION="9.0.1"
 LIBHEIF_VERSION="1.21.2"
 LIBDE265_VERSION="1.0.18"
+# The Windows box's vcpkg resolves newer ports than the mac overlay
+# (vcpkg_installed\vcpkg\info there) — both source sets ride along.
+WIN_LIBHEIF_VERSION="1.22.2"
+WIN_LIBDE265_VERSION="1.1.0"
 
 fetch() {  # fetch <url> <dest-name>
     local url="$1" name="$2"
@@ -49,6 +53,10 @@ fetch "https://github.com/strukturag/libheif/archive/refs/tags/v${LIBHEIF_VERSIO
       "libheif-${LIBHEIF_VERSION}.tar.gz"
 fetch "https://github.com/strukturag/libde265/archive/refs/tags/v${LIBDE265_VERSION}.tar.gz" \
       "libde265-${LIBDE265_VERSION}.tar.gz"
+fetch "https://github.com/strukturag/libheif/archive/refs/tags/v${WIN_LIBHEIF_VERSION}.tar.gz" \
+      "libheif-${WIN_LIBHEIF_VERSION}.tar.gz"
+fetch "https://github.com/strukturag/libde265/archive/refs/tags/v${WIN_LIBDE265_VERSION}.tar.gz" \
+      "libde265-${WIN_LIBDE265_VERSION}.tar.gz"
 
 # x264 is built from the moving "stable" branch. Prefer the tarball the
 # mac FFmpeg build actually consumed (kept in its build dir) so the
@@ -74,8 +82,10 @@ See LICENSES/THIRD_PARTY_NOTICES.txt inside the app for how each is used.
   7-Zip $SEVENZIP_VERSION        LGPL-2.1 + unRAR restriction   (7zz / 7z.exe + 7z.dll)
   FFmpeg $FFMPEG_VERSION         GPL-2.0-or-later (libx264 on)  (macOS build)
   x264 stable             GPL-2.0-or-later               (macOS, static in libavcodec)
-  libheif $LIBHEIF_VERSION        LGPL-3.0                       (static on macOS, DLL on Windows)
-  libde265 $LIBDE265_VERSION      LGPL-3.0                       (static on macOS, DLL on Windows)
+  libheif $LIBHEIF_VERSION        LGPL-3.0                       (static, macOS)
+  libde265 $LIBDE265_VERSION      LGPL-3.0                       (static, macOS)
+  libheif $WIN_LIBHEIF_VERSION        LGPL-3.0                       (DLL, Windows — vcpkg port)
+  libde265 $WIN_LIBDE265_VERSION       LGPL-3.0                       (DLL, Windows — vcpkg port)
 
 Windows FFmpeg: BtbN ffmpeg-n9.0-latest-win64-gpl-shared —
 https://github.com/BtbN/FFmpeg-Builds (source revision + scripts per release).
@@ -83,7 +93,8 @@ Qt 6.11.1 (LGPL-3): https://download.qt.io/official_releases/qt/6.11/6.11.1/sing
 UFB itself (GPL-3.0-or-later): https://github.com/cbkow/ufb, tag v$VERSION
 TXT
 
-shasum -a 256 "$OUT"/* > "$OUT/SHA256SUMS" 2>/dev/null || true
+rm -f "$OUT/SHA256SUMS"
+(cd "$OUT" && shasum -a 256 -- * > SHA256SUMS)
 echo
 echo "[src] done → $OUT"
 echo "Attach: gh release upload v$VERSION \"$OUT\"/*"
