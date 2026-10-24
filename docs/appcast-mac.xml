@@ -11,6 +11,20 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.3.3</title>
+      <sparkle:version>1.3.3</sparkle:version>
+      <sparkle:shortVersionString>1.3.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>UFB 1.3.3</h2>
+<ul>
+  <li><b>Windows fix:</b> the title bar and window border stay dark when
+      Windows is set to Light mode. Since 1.3.2 they turned white on
+      light-mode PCs, over UFB's dark window. The Mac is unchanged.</li>
+</ul>]]></description>
+      <pubDate>Sat, 24 Oct 2026 14:13:26 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.3.3/UFB-1.3.3-arm64.pkg" type="application/octet-stream" sparkle:edSignature="vnnB+18ZFxOcZ093PHhU2uYWvl6fprAexttKF6rCgzFPTgr2DaNqUBIBwJJV3Mvk6Zla+PjGMiOTIn6cCC9yCQ==" length="372075804" />
+    </item>
+    <item>
       <title>Version 1.3.2</title>
       <sparkle:version>1.3.2</sparkle:version>
       <sparkle:shortVersionString>1.3.2</sparkle:shortVersionString>
