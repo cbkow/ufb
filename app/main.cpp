@@ -16,6 +16,7 @@
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QStyleHints>
 #include <QDebug>
 #include <QDir>
 #include <QLockFile>
@@ -389,6 +390,14 @@ int main(int argc, char *argv[])
     QFont base(QStringLiteral("Geist"), 9);
     QGuiApplication::setFont(base);
     QQuickStyle::setStyle("FluentWinUI3");
+    // UFB is dark whatever Windows is set to. Without this Qt follows the
+    // OS light / dark app mode for the native title bar and frame (the
+    // standard frame since 1.3.2) and for FluentWinUI3's own control
+    // colours, so a light-mode PC got a white title bar over the dark
+    // window. Qt re-applies it to every window it creates (the HWND is
+    // re-created after close-to-tray) and on theme changes. Set before
+    // any window exists. macOS keeps following the system.
+    QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Dark);
 #elif defined(Q_OS_MACOS)
     // 13pt matches Finder's default UI text size (macOSplans/04 §5).
     {
