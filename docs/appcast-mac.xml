@@ -11,6 +11,30 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.4.0</title>
+      <sparkle:version>1.4.0</sparkle:version>
+      <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>UFB 1.4.0</h2>
+<ul>
+  <li><b>Windows moves to the Microsoft Store</b> as <b>ufBrowser</b>. The
+      Store installs and updates UFB from now on; the old installer and its
+      in-app updater are retired, so Windows installs of 1.3.x won't be
+      offered this version — uninstall them and install from the Store.</li>
+  <li><b>Windows sync mounts need WinFsp installed separately</b> (free,
+      winfsp.dev). The sidebar shows an "Install WinFsp…" button when it's
+      missing; browsing and network-share mounts work without it.</li>
+  <li><b>Windows: Start at Login</b> is a checkbox in the tray menu.</li>
+  <li><b>union:// links</b> on Windows are handled by UFB itself (no
+      PowerShell script) and can no longer get stuck relaunching.</li>
+  <li><b>Windows: revealing a link's target</b> no longer freezes the window
+      while a network share is unreachable.</li>
+  <li>Nothing changes on the Mac in this release.</li>
+</ul>]]></description>
+      <pubDate>Sat, 24 Oct 2026 22:00:20 -0400</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.4.0/UFB-1.4.0-arm64.pkg" type="application/octet-stream" sparkle:edSignature="I5qHjXZq6I1Vv1aYzPdZnD5lcc/tDNCr/5JJVAJlFGE/xqRZwuKngdbLLDPJ5Vakl0g8pq4knOcGw6eIJ5ZYDQ==" length="372103205" />
+    </item>
+    <item>
       <title>Version 1.3.3</title>
       <sparkle:version>1.3.3</sparkle:version>
       <sparkle:shortVersionString>1.3.3</sparkle:shortVersionString>
