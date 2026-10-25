@@ -25,7 +25,7 @@
 ; already cleaned that debris, and upgrades come from 1.0.6.
 
 #define MyAppName "Union File Browser"
-#define MyAppVersion "1.3.3"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "cbkow"
 #define MyAppURL "https://github.com/cbkow/ufb"
 #define MyAppExeName "ufb.exe"
@@ -34,7 +34,7 @@
 #define ReleaseDir "..\build\release"
 #define IconsDir   "..\app\icons"
 ; The release build compiles the agent with --target x86_64-pc-windows-msvc;
-; the bare target\release dir held a stale 1.2.3 agent that 1.3.0-1.3.3 shipped.
+; the bare target\release dir held a stale 1.2.3 agent that 1.3.0-1.4.0 shipped.
 #define AgentDir   "..\agent\target\x86_64-pc-windows-msvc\release"
 #define WinFspDir  "..\external\winfsp"
 
