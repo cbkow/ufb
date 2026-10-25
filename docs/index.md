@@ -34,10 +34,16 @@ visual-effects and post-production workflows — on macOS and Windows.
 
 ## Download
 
-Grab the latest release from
-[GitHub Releases](https://github.com/cbkow/ufb/releases): the macOS
-installer package (Apple Silicon, notarized) or the Windows x64
-installer. Both platforms update themselves in-app after that.
+- **macOS** (Apple Silicon, notarized): the installer package from
+  [GitHub Releases](https://github.com/cbkow/ufb/releases). It updates
+  itself in-app after that.
+- **Windows** (x64): **ufBrowser** on the
+  [Microsoft Store](https://apps.microsoft.com/detail/9N71KC2RQ65R), which
+  installs and updates it. Or from a terminal:
+  `winget install --id 9N71KC2RQ65R --source msstore`.
+  Sync mounts also need the free [WinFsp](https://winfsp.dev/rel/) driver.
+  Coming from the old Windows installer (1.3.x)? Uninstall it first
+  (Settings → Apps); your settings carry over.
 
 UFB is GPL-3.0-or-later. Third-party components and their licenses
 are listed in the app's `LICENSES/` folder and in

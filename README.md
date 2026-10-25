@@ -8,8 +8,10 @@ HDR / PDF / AI / video) directly from native C++ libraries, and tracks
 job + shot metadata in a local SQLite store synced across nodes via a
 mesh data plane.
 
-Ships on **macOS** (Apple Silicon, notarized DMG) and **Windows x64**
-(Inno Setup installer), with in-app auto-update on both. Website +
+Ships on **macOS** (Apple Silicon, notarized installer package, in-app
+auto-update) and **Windows x64** (the Microsoft Store as
+[ufBrowser](https://apps.microsoft.com/detail/9N71KC2RQ65R), which owns
+updates). Website +
 downloads: [ufbrowser.com](https://ufbrowser.com) · releases:
 [GitHub Releases](https://github.com/cbkow/ufb/releases).
 
