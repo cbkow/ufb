@@ -60,7 +60,8 @@ install interactively at the box. Uninstall the Inno build first: both register 
 
 ## What the package does and doesn't need
 
-- **Capabilities: `runFullTrust` + `internetClientServer` + `privateNetworkClientServer`.** No
+- **Capabilities: `runFullTrust` + `privateNetworkClientServer`** (declarative for a full-trust app; it labels
+  the LAN mesh / SMB traffic on the install page — `internetClientServer` was dropped, nothing serves the internet). No
   `unvirtualizedResources` — minRender 0.5.6.0 was denied for it. Everything under `%LOCALAPPDATA%\ufb` (settings,
   `ufb_v5.db`, `mounts.json`, thumbnails, the sync cache) is read only by `ufb.exe` and the `ufb-agent.exe` it
   spawns — both inside the package — so default virtualization is fine. Sync files reach Explorer and other apps
