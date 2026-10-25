@@ -548,12 +548,8 @@ ApplicationWindow {
         target: typeof AppCtl !== "undefined" ? AppCtl : null
         function onUriRequested(path) {
             // union:// on Windows shows the target in Explorer and
-            // leaves the window where it is (see _isRevealUri).
-            if (window._isRevealUri(path)) {
-                if (!FileOps.reveal_ufb_uri(path))
-                    console.warn("Main: AppCtl union uri unresolvable:", path)
-                return
-            }
+            // leaves the window where it is.
+            if (window._revealIfUnionUri(path)) return
             // Always raise/focus, even on an empty payload - the user
             // re-launched and the most useful thing is the existing
             // window coming forward.
@@ -581,9 +577,17 @@ ApplicationWindow {
     /// it in UFB". On Windows ufb.exe owns that scheme (the Store package
     /// can't point a protocol anywhere else); main.cpp starts a cold
     /// launch tray-only for it. macOS keeps navigating in-app.
-    function _isRevealUri(path) {
-        return Qt.platform.os === "windows" && !!path
-            && path.trim().toLowerCase().indexOf("union:") === 0
+    /// The one place that decides it (main.cpp mirrors the test for the
+    /// cold-launch tray start). Returns true when `path` was a reveal URI
+    /// and has been handed to FileOps (which works off the GUI thread and
+    /// never feeds an unresolved string back to the shell).
+    function _revealIfUnionUri(path) {
+        if (Qt.platform.os !== "windows" || !path
+                || path.trim().toLowerCase().indexOf("union:") !== 0)
+            return false
+        if (!FileOps.reveal_ufb_uri(path))
+            console.warn("Main: union uri unresolvable:", path)
+        return true
     }
 
     /// Resolve a path the URI/launch-arg flow has produced into a
@@ -948,11 +952,7 @@ ApplicationWindow {
         interval: 200
         repeat: false
         onTriggered: {
-            if (window._isRevealUri(_launchPath)) {
-                if (!FileOps.reveal_ufb_uri(_launchPath))
-                    console.warn("Main: could not resolve launch arg:", _launchPath)
-                return
-            }
+            if (window._revealIfUnionUri(_launchPath)) return
             var resolved = FileOps.resolve_ufb_uri(_launchPath)
             if (resolved.length === 0) {
                 console.warn("Main: could not resolve launch arg:", _launchPath)

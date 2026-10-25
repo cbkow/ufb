@@ -11,7 +11,6 @@
 #  include <winrt/Windows.Foundation.h>
 #  include <winrt/Windows.ApplicationModel.h>
 #  include <winrt/Windows.ApplicationModel.Activation.h>
-#  include <thread>
 #endif
 
 #include "LoginItem.h"
@@ -40,9 +39,9 @@ using winrt::Windows::ApplicationModel::StartupTaskState;
 // STA (clipboard, drag and drop), and initialising it as MTA first would
 // make Qt's OleInitialize fail; blocking .get() on an STA is off-limits.
 template <typename F>
-void onMtaThread(F&& f, bool wait)
+std::thread mtaThread(F&& f)
 {
-    std::thread t([f = std::forward<F>(f)]() mutable {
+    return std::thread([f = std::forward<F>(f)]() mutable {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         try {
             f();
@@ -55,8 +54,6 @@ void onMtaThread(F&& f, bool wait)
         }
         winrt::uninit_apartment();
     });
-    if (wait) t.join();
-    else t.detach();
 }
 
 bool stateEnabled(StartupTaskState s)
@@ -89,6 +86,21 @@ LoginItem::LoginItem(QObject* parent)
     refresh();
 }
 
+LoginItem::~LoginItem()
+{
+    joinWorkers();
+}
+
+// The calls are short (a StartupTask lookup / enable), so reaping the
+// previous ones before starting another keeps the list at one entry
+// without a noticeable wait on the GUI thread.
+void LoginItem::joinWorkers()
+{
+    for (std::thread& t : m_workers)
+        if (t.joinable()) t.join();
+    m_workers.clear();
+}
+
 bool LoginItem::isPackaged()
 {
 #ifdef _WIN32
@@ -104,11 +116,11 @@ bool LoginItem::launchedByStartupTask()
 #ifdef _WIN32
     if (!isPackaged()) return false;
     bool viaTask = false;
-    onMtaThread([&viaTask]() {
+    mtaThread([&viaTask]() {
         using namespace winrt::Windows::ApplicationModel;
         const auto args = AppInstance::GetActivatedEventArgs();
         viaTask = args && args.Kind() == Activation::ActivationKind::StartupTask;
-    }, /*wait=*/true);
+    }).join();
     return viaTask;
 #else
     return false;
@@ -141,12 +153,13 @@ void LoginItem::refresh()
         return;
     }
     QPointer<LoginItem> self(this);
-    onMtaThread([self]() {
+    joinWorkers();
+    m_workers.push_back(mtaThread([self]() {
         const StartupTaskState s = StartupTask::GetAsync(kStartupTaskId).get().State();
         QMetaObject::invokeMethod(qApp, [self, s]() {
             if (self) self->apply(stateEnabled(s), stateBlocked(s));
         }, Qt::QueuedConnection);
-    }, /*wait=*/false);
+    }));
 #endif
 }
 
@@ -162,7 +175,8 @@ void LoginItem::setEnabled(bool on)
         return;
     }
     QPointer<LoginItem> self(this);
-    onMtaThread([self, on]() {
+    joinWorkers();
+    m_workers.push_back(mtaThread([self, on]() {
         const StartupTask task = StartupTask::GetAsync(kStartupTaskId).get();
         StartupTaskState s = task.State();
         if (on && !stateEnabled(s) && !stateBlocked(s))
@@ -174,7 +188,7 @@ void LoginItem::setEnabled(bool on)
         QMetaObject::invokeMethod(qApp, [self, s]() {
             if (self) self->apply(stateEnabled(s), stateBlocked(s));
         }, Qt::QueuedConnection);
-    }, /*wait=*/false);
+    }));
 #else
     Q_UNUSED(on);
 #endif

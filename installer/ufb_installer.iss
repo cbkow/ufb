@@ -132,7 +132,9 @@ Source: "{#AgentDir}\ufb-agent.exe"; DestDir: "{app}"; Flags: ignoreversion; Com
 ; plugins\ subdir - earlier versions of this script looked for a
 ; plugins\ that never existed and silently shipped a broken bundle
 ; (no qwindows.dll => app refuses to start).
-Source: "{#ReleaseDir}\*.dll";              DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
+; Excludes: an old tree may still hold WinSparkle.dll (retired in 1.4.0, its
+; licence notice removed) — it must not ride along.
+Source: "{#ReleaseDir}\*.dll";              DestDir: "{app}"; Excludes: "WinSparkle.dll"; Flags: ignoreversion skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\qml\*";              DestDir: "{app}\qml";              Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\platforms\*";        DestDir: "{app}\platforms";        Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
 Source: "{#ReleaseDir}\imageformats\*";     DestDir: "{app}\imageformats";     Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: core
@@ -221,7 +223,7 @@ Root: HKCR; Subkey: "ufb\shell\open\command"; ValueType: string; ValueName: ""; 
 
 ; union:// — sibling protocol that shows the resolved path in
 ; Explorer instead of in-app. ufb.exe handles it since 1.4.0 (Main.qml
-; _isRevealUri → FileOps.reveal_ufb_uri, path mappings applied); the
+; _revealIfUnionUri → FileOps.reveal_ufb_uri, path mappings applied); the
 ; open_union_link.ps1 PowerShell handler is gone.
 Root: HKCR; Subkey: "union"; ValueType: string; ValueName: ""; ValueData: "URL:Union Protocol"; Flags: uninsdeletekey; Components: uri_protocol
 Root: HKCR; Subkey: "union"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Components: uri_protocol

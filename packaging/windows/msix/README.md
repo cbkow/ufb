@@ -1,4 +1,4 @@
-# ufb on Windows — the Microsoft Store package ("ufbBrowser")
+# ufb on Windows — the Microsoft Store package ("ufBrowser")
 
 Since 1.4.0, Windows ships only through the **Microsoft Store**. The Store signs the MSIX on ingestion (no
 Authenticode certificate, no SmartScreen prompt) and delivers updates, so Windows has no self-updater: WinSparkle
@@ -21,11 +21,11 @@ packaging/windows/msix/
 ```
 
 Identity (Partner Center → Product management → Product identity), plain variables in `CMakeLists.txt`:
-`cbkow.ufbBrowser` / `CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9` / `cbkow` — the same publisher as minNotes and
-QCView (ingestion rejects a mismatch). The Store name is **ufbBrowser** ("ufb" was taken); the manifest's
-DisplayName must match it. Package family name `cbkow.ufbBrowser_k3nw8mfd599r4`, Store ID **9NM0B07CF0HV**
-(<https://apps.microsoft.com/detail/9NM0B07CF0HV> once published; headless install:
-`winget install --id 9NM0B07CF0HV --source msstore --accept-package-agreements`).
+`cbkow.ufBrowser` / `CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9` / `cbkow` — the same publisher as minNotes and
+QCView (ingestion rejects a mismatch). The Store name is **ufBrowser** ("ufb" was taken); the manifest's
+DisplayName must match it. Package family name `cbkow.ufBrowser_k3nw8mfd599r4`, Store ID **9N71KC2RQ65R**
+(<https://apps.microsoft.com/detail/9N71KC2RQ65R> once published; headless install:
+`winget install --id 9N71KC2RQ65R --source msstore --accept-package-agreements`).
 The MSIX version is `PROJECT_VERSION` + `.0`.
 
 ## Build
@@ -68,7 +68,7 @@ install interactively at the box. Uninstall the Inno build first: both register 
   through the WinFsp drive letter, never the cache path.
 - **Virtualization side effect, handled:** on a machine that never had the Inno build, those files physically live
   in `%LOCALAPPDATA%\Packages\<pfn>\LocalCache\Local\ufb`, and uninstall removes them (cache included). The Mount
-  Manager's cache **Reveal** button is hidden in the package (`_isPackaged`) — Explorer would show an empty folder;
+  Manager's cache **Reveal** button is hidden in the package (`LoginItem.packaged`) for a cache under AppData — Explorer would show an empty folder;
   per-mount **Clear Cache** covers the need. A machine that had the Inno build keeps using the real folder.
 - **WinFsp is a user-installed prerequisite.** The Store can't install drivers. Plain SMB mounts and browsing work
   without it; a sync mount that fails `winfsp_init` shows an **Install WinFsp…** pill in the sidebar
@@ -106,7 +106,7 @@ After any manifest or packaging change:
 
 1. Build the unsigned MSIX from the release commit; Defender-scan it on the box
    (`MpCmdRun.exe -Scan -ScanType 3 -File <msix> -DisableRemediation`).
-2. Partner Center → ufbBrowser → new submission: upload the `.msix`, choose **Publish this submission manually**.
+2. Partner Center → ufBrowser → new submission: upload the `.msix`, choose **Publish this submission manually**.
    Only one submission can be in flight per app.
 3. **License terms:** supply the GPL-3.0 as the app's own license terms (ufb is GPL-3.0-or-later and bundles GPL
    ffmpeg); minNotes is GPL-3.0 too and certified.

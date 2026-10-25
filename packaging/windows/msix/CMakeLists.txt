@@ -12,12 +12,12 @@ if(NOT WIN32)
 endif()
 
 # The identity Partner Center assigned (Product management → Product identity). Ingestion rejects a
-# mismatch. The Store name is "ufbBrowser" ("ufb" was taken). The publisher is the cbkow account's
+# mismatch. The Store name is "ufBrowser" ("ufb" was taken). The publisher is the cbkow account's
 # (same as minNotes / QCView). Confirmed against the Product identity page 2026-10-24:
-# PFN cbkow.ufbBrowser_k3nw8mfd599r4, Store ID 9NM0B07CF0HV.
+# PFN cbkow.ufBrowser_k3nw8mfd599r4, Store ID 9N71KC2RQ65R.
 # Plain variables, not CACHE: these are fixed by Partner Center, and a cache entry from an older
 # configure would silently win over a corrected value here (bit once: cbkow.ufb survived the rename).
-set(UFB_MSIX_IDENTITY "cbkow.ufbBrowser")                                   # Identity/Name
+set(UFB_MSIX_IDENTITY "cbkow.ufBrowser")                                   # Identity/Name
 set(UFB_MSIX_PUBLISHER "CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9")           # Identity/Publisher (sideload cert subject too)
 set(UFB_MSIX_PUBLISHER_DISPLAY_NAME "cbkow")                                # Properties/PublisherDisplayName
 set(UFB_MSIX_VERSION "${PROJECT_VERSION}.0")   # MSIX versions have four parts

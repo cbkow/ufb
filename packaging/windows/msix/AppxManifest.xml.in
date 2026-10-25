@@ -40,7 +40,7 @@
 
   <Properties>
     <!-- Must match the name reserved in Partner Center ("ufb" was taken). -->
-    <DisplayName>ufbBrowser</DisplayName>
+    <DisplayName>ufBrowser</DisplayName>
     <PublisherDisplayName>@UFB_MSIX_PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>images\StoreLogo.png</Logo>
   </Properties>
@@ -56,7 +56,7 @@
   <Applications>
     <Application Id="ufb" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="ufbBrowser"
+        DisplayName="ufBrowser"
         Description="File browser and project manager for post-production"
         BackgroundColor="transparent"
         Square150x150Logo="images\Square150x150Logo.png"
@@ -65,7 +65,7 @@
       </uap:VisualElements>
 
       <Extensions>
-        <!-- ufb:// opens the path in UFB; union:// shows it in Explorer (Main.qml _isRevealUri). Both resolve
+        <!-- ufb:// opens the path in UFB; union:// shows it in Explorer (Main.qml _revealIfUnionUri). Both resolve
              through the user's path mappings (FileOps.resolve_ufb_uri). -->
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="ufb">
@@ -80,7 +80,7 @@
         </uap:Extension>
 
         <desktop:Extension Category="windows.startupTask" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="ufbStartup" Enabled="true" DisplayName="ufbBrowser" />
+          <desktop:StartupTask TaskId="ufbStartup" Enabled="true" DisplayName="ufBrowser" />
         </desktop:Extension>
       </Extensions>
     </Application>

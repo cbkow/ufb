@@ -290,9 +290,10 @@ int main(int argc, char *argv[])
     // arguments; it means the same as the Run key's --background.
     if (!startInBackground && launchPath.isEmpty() && LoginItem::launchedByStartupTask())
         startInBackground = true;
-    // union:// shows its target in Explorer (Main.qml _isRevealUri); a
+    // union:// shows its target in Explorer (Main.qml _revealIfUnionUri); a
     // cold launch for one starts UFB resident in the tray, no window.
-    if (launchPath.startsWith(QLatin1String("union:"), Qt::CaseInsensitive))
+    // Same test as Main.qml _revealIfUnionUri (trimmed, case-insensitive).
+    if (launchPath.trimmed().startsWith(QLatin1String("union:"), Qt::CaseInsensitive))
         startInBackground = true;
 #endif
 
@@ -539,12 +540,10 @@ int main(int argc, char *argv[])
     ufb::Updater updater;
     engine.rootContext()->setContextProperty("Updater", &updater);
 
-    // "Start UFB at login" (tray menu, Windows) and the package probe
-    // QML uses to drop affordances that make no sense under MSIX file
-    // virtualization (revealing the AppData sync cache).
+    // "Start UFB at login" (tray menu, Windows); LoginItem.packaged also
+    // tells QML when MSIX file virtualization applies (the cache Reveal).
     LoginItem loginItem;
     engine.rootContext()->setContextProperty("LoginItem", &loginItem);
-    engine.rootContext()->setContextProperty("_isPackaged", loginItem.packaged());
 
 #ifdef Q_OS_MACOS
     // Live accent-colour observer. QML reads `MacAccent.accent` and

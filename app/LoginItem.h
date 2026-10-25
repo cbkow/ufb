@@ -21,6 +21,9 @@
 
 #include <QObject>
 
+#include <thread>
+#include <vector>
+
 class LoginItem : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool available READ available CONSTANT)
@@ -29,6 +32,7 @@ class LoginItem : public QObject {
     Q_PROPERTY(bool blockedBySystem READ blockedBySystem NOTIFY changed)
 public:
     explicit LoginItem(QObject* parent = nullptr);
+    ~LoginItem() override;
 
     /// True when this process runs with MSIX package identity.
     static bool isPackaged();
@@ -52,8 +56,13 @@ signals:
 
 private:
     void apply(bool enabled, bool blocked);
+    void joinWorkers();
 
     bool m_packaged = false;
     bool m_enabled = false;
     bool m_blocked = false;
+    // WinRT StartupTask calls in flight (off the GUI thread). Joined in the
+    // destructor: LoginItem dies before the QGuiApplication (main.cpp), so a
+    // worker can never post to a half-destroyed qApp at quit.
+    std::vector<std::thread> m_workers;
 };

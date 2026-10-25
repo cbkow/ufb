@@ -693,6 +693,16 @@ impl qobject::FileOps {
         if trimmed.is_empty() {
             return cxx_qt_lib::QString::from("");
         }
+        // Schemes are case-insensitive (RFC 3986; Windows hands protocol
+        // activations over as typed) — normalise before matching.
+        let lower = trimmed.to_ascii_lowercase();
+        let normalised;
+        let trimmed = if let Some(scheme) = ["ufb://", "union://"].iter().find(|s| lower.starts_with(**s)) {
+            normalised = format!("{}{}", scheme, &trimmed[scheme.len()..]);
+            normalised.as_str()
+        } else {
+            trimmed
+        };
         // Plain native path - just normalise separators for this OS.
         let is_uri = trimmed.starts_with("ufb://") || trimmed.starts_with("union://");
         if !is_uri {
@@ -722,9 +732,14 @@ impl qobject::FileOps {
         if resolved.is_empty() {
             return false;
         }
-        if let Err(e) = file_ops::reveal_or_open_parent(&resolved) {
-            log::warn!("FileOps.reveal_ufb_uri({}): {}", resolved, e);
-        }
+        // exists()/is_dir() on an unreachable share wait out the SMB
+        // timeout — never on the GUI thread (the retired PowerShell
+        // handler ran in its own process).
+        std::thread::spawn(move || {
+            if let Err(e) = file_ops::reveal_or_open_parent(&resolved) {
+                log::warn!("FileOps.reveal_ufb_uri({}): {}", resolved, e);
+            }
+        });
         true
     }
 

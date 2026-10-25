@@ -660,20 +660,22 @@ pub fn reveal_in_file_manager(path: &str) -> Result<(), String> {
     reveal_paths_in_file_manager(&[path.to_string()])
 }
 
-/// Reveal `path` when it exists; otherwise open its parent folder, or
-/// failing that hand the path itself to the file manager so the user
-/// sees the OS's own "can't find" error. Backs `union://` links, which
-/// may name a file that hasn't synced to this machine yet.
+/// Reveal `path` when it exists; otherwise open its parent folder (a
+/// `union://` link may name a file that hasn't synced here yet). Neither
+/// existing is an error, never a shell hand-off: ShellExecute on an
+/// unresolved string like `Union:\\win\x` reads it as a protocol and
+/// relaunches ufb.exe with the same link — an endless loop.
+/// Blocking file-system calls (SMB timeouts): call off the GUI thread.
 pub fn reveal_or_open_parent(path: &str) -> Result<(), String> {
     let p = std::path::Path::new(path);
     if p.exists() {
         return reveal_in_file_manager(path);
     }
-    let target = match p.parent() {
-        Some(parent) if parent.is_dir() => parent,
-        _ => p,
-    };
-    opener::open(target).map_err(|e| format!("Failed to open {}: {}", target.display(), e))
+    match p.parent() {
+        Some(parent) if parent.is_dir() => opener::open(parent)
+            .map_err(|e| format!("Failed to open {}: {}", parent.display(), e)),
+        _ => Err(format!("{} not found (nor its parent folder)", path)),
+    }
 }
 
 /// Reveal one or more paths in the native file manager. On macOS uses

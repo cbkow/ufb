@@ -547,8 +547,9 @@ fn locate_agent_binary() -> Result<PathBuf, String> {
                                 .join(agent_name),
                         );
                     }
-                    candidates.push(agent_root.join("release").join(agent_name));
-                    candidates.push(agent_root.join("debug").join(agent_name));
+                    // The target-triple dirs first: `just agent` / the release
+                    // script build with --target, and a bare target/release
+                    // on the Windows box held a stale 1.2.3 agent.
                     candidates.push(
                         agent_root
                             .join("x86_64-pc-windows-msvc")
@@ -561,6 +562,8 @@ fn locate_agent_binary() -> Result<PathBuf, String> {
                             .join("debug")
                             .join(agent_name),
                     );
+                    candidates.push(agent_root.join("release").join(agent_name));
+                    candidates.push(agent_root.join("debug").join(agent_name));
                     candidates.push(
                         agent_root
                             .join("aarch64-apple-darwin")
@@ -1303,7 +1306,11 @@ impl qobject::Mount {
         // Hand off to the OS so the file opens in whatever the user
         // has associated with `.log` (Notepad, VS Code, etc.). Don't
         // wait for the editor to exit - this is fire-and-forget.
-        let path_str = log_path.to_string_lossy().into_owned();
+        // Store build: the log lives in the package's private LocalCache
+        // — hand the editor the path it can actually open.
+        let path_str = ufb_core::utils::external_path(&log_path)
+            .to_string_lossy()
+            .into_owned();
         let result = {
             #[cfg(target_os = "windows")]
             {

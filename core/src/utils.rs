@@ -10,6 +10,60 @@ pub fn get_app_data_dir() -> PathBuf {
     dir
 }
 
+/// The path another program must use to reach `path`. In the Microsoft
+/// Store (MSIX) package, files UFB writes under %LOCALAPPDATA% physically
+/// live in the package's private `Packages\<pfn>\LocalCache`; UFB sees
+/// them at the AppData path, an editor or Explorer outside the package
+/// does not. Opening the file and asking Windows for its final path
+/// resolves that (minNotes' FileLinks pattern). Returns the input
+/// unchanged off Windows, unpackaged, or when the path can't be opened.
+pub fn external_path(path: &std::path::Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; the
+        // handle is closed below. BACKUP_SEMANTICS lets it open folders.
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                HANDLE::default(),
+            )
+        };
+        let Ok(handle) = handle else { return path.to_path_buf() };
+        let mut buf = vec![0u16; 1024];
+        let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
+        let _ = unsafe { CloseHandle(handle) };
+        if len == 0 || len >= buf.len() {
+            return path.to_path_buf();
+        }
+        let s = std::ffi::OsString::from_wide(&buf[..len]).to_string_lossy().into_owned();
+        // `\\?\C:\...` → `C:\...`; `\\?\UNC\srv\share` → `\\srv\share`.
+        let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{}", rest)
+        } else {
+            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        };
+        PathBuf::from(s)
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
+}
+
 /// Get or create a persistent device ID.
 pub fn get_device_id() -> String {
     let id_path = get_app_data_dir().join("device_id.txt");
