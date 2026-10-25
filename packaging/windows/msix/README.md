@@ -1,4 +1,4 @@
-# ufb on Windows — the Microsoft Store package
+# ufb on Windows — the Microsoft Store package ("ufbBrowser")
 
 Since 1.4.0, Windows ships only through the **Microsoft Store**. The Store signs the MSIX on ingestion (no
 Authenticode certificate, no SmartScreen prompt) and delivers updates, so Windows has no self-updater: WinSparkle
@@ -20,9 +20,12 @@ packaging/windows/msix/
 └── dist/                 the packed .msix (gitignored)
 ```
 
-Identity (Partner Center → Product management → Product identity), cache variables in `CMakeLists.txt`:
-`cbkow.ufb` / `CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9` / `cbkow` — the same publisher as minNotes and QCView.
-**Confirm the Name against Partner Center once the "ufb" product is reserved** (ingestion rejects a mismatch).
+Identity (Partner Center → Product management → Product identity), plain variables in `CMakeLists.txt`:
+`cbkow.ufbBrowser` / `CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9` / `cbkow` — the same publisher as minNotes and
+QCView (ingestion rejects a mismatch). The Store name is **ufbBrowser** ("ufb" was taken); the manifest's
+DisplayName must match it. Package family name `cbkow.ufbBrowser_k3nw8mfd599r4`, Store ID **9NM0B07CF0HV**
+(<https://apps.microsoft.com/detail/9NM0B07CF0HV> once published; headless install:
+`winget install --id 9NM0B07CF0HV --source msstore --accept-package-agreements`).
 The MSIX version is `PROJECT_VERSION` + `.0`.
 
 ## Build
@@ -100,7 +103,7 @@ After any manifest or packaging change:
 
 1. Build the unsigned MSIX from the release commit; Defender-scan it on the box
    (`MpCmdRun.exe -Scan -ScanType 3 -File <msix> -DisableRemediation`).
-2. Partner Center → ufb → new submission: upload the `.msix`, choose **Publish this submission manually**.
+2. Partner Center → ufbBrowser → new submission: upload the `.msix`, choose **Publish this submission manually**.
    Only one submission can be in flight per app.
 3. **License terms:** supply the GPL-3.0 as the app's own license terms (ufb is GPL-3.0-or-later and bundles GPL
    ffmpeg); minNotes is GPL-3.0 too and certified.

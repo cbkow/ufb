@@ -36,7 +36,8 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>ufb</DisplayName>
+    <!-- Must match the name reserved in Partner Center ("ufb" was taken). -->
+    <DisplayName>ufbBrowser</DisplayName>
     <PublisherDisplayName>@UFB_MSIX_PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
     <Logo>images\StoreLogo.png</Logo>
   </Properties>
@@ -52,7 +53,7 @@
   <Applications>
     <Application Id="ufb" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="ufb"
+        DisplayName="ufbBrowser"
         Description="File browser and project manager for post-production"
         BackgroundColor="transparent"
         Square150x150Logo="images\Square150x150Logo.png"
@@ -76,7 +77,7 @@
         </uap:Extension>
 
         <desktop:Extension Category="windows.startupTask" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="ufbStartup" Enabled="true" DisplayName="ufb" />
+          <desktop:StartupTask TaskId="ufbStartup" Enabled="true" DisplayName="ufbBrowser" />
         </desktop:Extension>
       </Extensions>
     </Application>

@@ -12,14 +12,14 @@ if(NOT WIN32)
 endif()
 
 # The identity Partner Center assigned (Product management → Product identity). Ingestion rejects a
-# mismatch. The publisher is the cbkow account's (same as minNotes / QCView); confirm the Name once the
-# "ufb" product is reserved.
-set(UFB_MSIX_IDENTITY "cbkow.ufb"
-    CACHE STRING "MSIX Identity/Name — must match Partner Center.")
-set(UFB_MSIX_PUBLISHER "CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9"
-    CACHE STRING "MSIX Identity/Publisher — must match Partner Center (and a sideload cert's subject).")
-set(UFB_MSIX_PUBLISHER_DISPLAY_NAME "cbkow"
-    CACHE STRING "MSIX Properties/PublisherDisplayName.")
+# mismatch. The Store name is "ufbBrowser" ("ufb" was taken). The publisher is the cbkow account's
+# (same as minNotes / QCView). Confirmed against the Product identity page 2026-10-24:
+# PFN cbkow.ufbBrowser_k3nw8mfd599r4, Store ID 9NM0B07CF0HV.
+# Plain variables, not CACHE: these are fixed by Partner Center, and a cache entry from an older
+# configure would silently win over a corrected value here (bit once: cbkow.ufb survived the rename).
+set(UFB_MSIX_IDENTITY "cbkow.ufbBrowser")                                   # Identity/Name
+set(UFB_MSIX_PUBLISHER "CN=C64A1D41-EFAA-4EED-AE81-0C074867D4E9")           # Identity/Publisher (sideload cert subject too)
+set(UFB_MSIX_PUBLISHER_DISPLAY_NAME "cbkow")                                # Properties/PublisherDisplayName
 set(UFB_MSIX_VERSION "${PROJECT_VERSION}.0")   # MSIX versions have four parts
 
 set(_ufb_manifest_out "${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml")
