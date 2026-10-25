@@ -18,7 +18,8 @@
 #     $env:UFB_SIGNING_PFX      = "C:\absolute\path\to\dev.pfx"    # ABSOLUTE: this script runs from another cwd
 #     $env:UFB_SIGNING_PASSWORD = "..."
 #     $env:UFB_TIMESTAMP_URL    = "http://timestamp.digicert.com"   # optional
-# signtool's PFX import fails in an SSH session (0x80090010) -- sign from the logged-on desktop.
+# signtool's PFX import fails in a plain SSH session (0x80090010) -- sign from the logged-on desktop session
+# (from the Mac: through the box's C:\qcb-lab\run.ps1 desktop runner).
 #
 # ASCII-only on purpose: Windows PowerShell 5.1 parses a BOM-less script in the system codepage.
 

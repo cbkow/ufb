@@ -53,8 +53,10 @@ signtool sign /fd SHA256 /f <ABSOLUTE path to the dev .pfx> /p <password> /tr ht
 ```
 
 (`build_msix.ps1` also signs in place when `UFB_SIGNING_PFX` / `UFB_SIGNING_PASSWORD` / `UFB_TIMESTAMP_URL` are
-set.) signtool's PFX import and `Add-AppxPackage` / `Remove-AppxPackage` fail in an SSH session — run them in the
-logged-on desktop session. Uninstall the Inno build first: both register `ufb://` / `union://` and a login entry.
+set.) signtool's PFX import (`0x80090010`) and `Add-AppxPackage` / `Remove-AppxPackage` fail in a plain SSH
+session — run them in the logged-on desktop session; from the Mac that means launching a script through the box's
+`C:\qcb-lab\run.ps1` desktop runner (the password stays on the box). `C:\qcb-lab\ufb-sideload.ps1` does sign +
+install interactively at the box. Uninstall the Inno build first: both register `ufb://` / `union://` and a login entry.
 
 ## What the package does and doesn't need
 
