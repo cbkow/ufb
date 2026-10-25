@@ -31,6 +31,11 @@ if(NOT UFB_PWSH)
     return()
 endif()
 
+# windeployqt runs inside build_msix.ps1 (QCView's pattern) so the pack never captures a half-deployed tree.
+get_target_property(_ufb_qmake Qt6::qmake IMPORTED_LOCATION)
+get_filename_component(_ufb_qt_bin "${_ufb_qmake}" DIRECTORY)
+set(_ufb_windeployqt "${_ufb_qt_bin}/windeployqt.exe")
+
 add_custom_target(ufb_msix
     COMMAND "${UFB_PWSH}" -NoProfile -ExecutionPolicy Bypass
         -File "${CMAKE_CURRENT_SOURCE_DIR}/build_msix.ps1"
@@ -38,6 +43,7 @@ add_custom_target(ufb_msix
         -AgentExe "${CMAKE_SOURCE_DIR}/agent/target/x86_64-pc-windows-msvc/release/ufb-agent.exe"
         -Version "${PROJECT_VERSION}"
         -ManifestPath "${_ufb_manifest_out}"
+        -WinDeployQt "${_ufb_windeployqt}"
         -ImagesDir "${CMAKE_CURRENT_SOURCE_DIR}/images"
         -OutputDir "${CMAKE_CURRENT_SOURCE_DIR}/dist"
     DEPENDS ufb

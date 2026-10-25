@@ -7,6 +7,11 @@
 #     cmake --build --preset release --target ufb_msix
 # Output: packaging\windows\msix\dist\ufb-<version>-x64.msix
 #
+# The script deploys the runtime into BuildDir itself before staging (QCView's build_msix.ps1 pattern): a ufb
+# relink re-runs only the CMake POST_BUILD copies, and a pack of that half-deployed tree launched with 0xC0000142
+# (2026-10-24). After staging it launch-tests the staged ufb.exe and ufb-agent.exe with a bare PATH and refuses
+# to pack a tree that doesn't load.
+#
 # The staged set is the one installer/ufb_installer.iss packed, minus what the Store package must not or
 # need not carry: winfsp.msi (a driver -- users install WinFsp themselves), open_union_link.ps1 (ufb.exe
 # handles union:// now) and WinSparkle.dll (the Store owns updates).
@@ -29,6 +34,7 @@ param(
     [Parameter(Mandatory)] [string] $AgentExe,
     [Parameter(Mandatory)] [string] $Version,
     [Parameter(Mandatory)] [string] $ManifestPath,
+    [Parameter(Mandatory)] [string] $WinDeployQt,
     [Parameter()]          [string] $ImagesDir = (Join-Path $PSScriptRoot "images"),
     [Parameter()]          [string] $OutputDir = (Join-Path $PSScriptRoot "dist")
 )
@@ -58,9 +64,6 @@ Write-Host "MakePri  : $MakePri"
 # --- Inputs -----------------------------------------------------------------
 $exe = Join-Path $BuildDir "ufb.exe"
 if (-not (Test-Path $exe)) { throw "ufb.exe not found at $exe. Build first." }
-if (-not (Test-Path (Join-Path $BuildDir "Qt6Core.dll"))) {
-    throw "Qt6Core.dll missing from $BuildDir -- the windeployqt POST_BUILD step did not run."
-}
 if (-not (Test-Path $AgentExe)) {
     throw "ufb-agent.exe not found at $AgentExe. Run: cargo build --release --target x86_64-pc-windows-msvc --manifest-path agent/Cargo.toml"
 }
@@ -72,6 +75,34 @@ if ($agentAge.TotalHours -gt 24) {
 if (-not (Test-Path $ManifestPath)) { throw "AppxManifest.xml not found at $ManifestPath. Re-run CMake configure." }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
+
+# --- Deploy the runtime into BuildDir -----------------------------------------
+# The same steps the release script ran by hand after every build: drop stale ffmpeg DLLs (a version bump leaves
+# the old av*/sw* names behind), windeployqt (Qt DLLs, plugins, QML, WebEngine), then the vendored ffmpeg + pdfium
+# and the vcpkg (OpenEXR / libheif) DLLs.
+if (-not (Test-Path $WinDeployQt)) { throw "windeployqt not found at '$WinDeployQt'. Re-run CMake configure." }
+Get-ChildItem -Path $BuildDir -File | Where-Object { $_.Name -like "av*.dll" -or $_.Name -like "sw*.dll" } `
+    | Remove-Item -Force
+Write-Host "Deploying the Qt runtime via $WinDeployQt ..."
+for ($i = 1; $i -le 3; $i++) {
+    # The release script's exact invocation (what the 1.3.x installers shipped; it keeps the WebEngine locales
+    # under translations\). windeployqt's qtposition_nmea / Qt6SerialPort warnings go to stderr, which
+    # PowerShell 5.1 turns into terminating error records under Stop -- run it under Continue, output discarded.
+    $ErrorActionPreference = "Continue"
+    & $WinDeployQt --qmldir "$repoRoot\app\qml" --release $exe *> $null
+    $wdq = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($wdq -eq 0) { break }
+    if ($i -eq 3) { throw "windeployqt failed 3 times (exit $wdq)" }
+    Write-Warning "windeployqt attempt $i failed (exit $wdq) -- transient file lock? retrying in 3s ..."
+    Start-Sleep -Seconds 3
+}
+if (-not (Test-Path (Join-Path $BuildDir "Qt6Core.dll"))) { throw "windeployqt ran but Qt6Core.dll is missing from $BuildDir." }
+foreach ($glob in @("external\ffmpeg\bin\*.dll", "external\pdfium\bin\pdfium.dll", "vcpkg_installed\x64-windows\bin\*.dll")) {
+    $src = Join-Path $repoRoot $glob
+    if (-not (Test-Path $src)) { throw "$glob not found -- run scripts/setup-external.ps1 / the vcpkg install." }
+    Copy-Item -Path $src -Destination $BuildDir -Force
+}
 
 # --- Stage ------------------------------------------------------------------
 $staging = Join-Path $PSScriptRoot "staging"
@@ -117,6 +148,23 @@ if ($env:VCToolsRedistDir) {
 if (-not $crt) { throw "The MSVC CRT redist folder was not found (VCToolsRedistDir='$env:VCToolsRedistDir'). Run from a VS x64 dev shell." }
 Write-Host "C++ runtime: $($crt.FullName)"
 Get-ChildItem -Path $crt.FullName -Filter "*.dll" | Copy-Item -Destination $staging -Force
+
+# --- Launch gate ----------------------------------------------------------------
+# Both exes from the staged tree with only System32 on PATH -- what a packaged process sees beyond its own
+# folder. --prime-smartscreen returns 0 after 3 s with no Qt setup, so anything else (0xC0000142 /
+# 0xC0000135) means a DLL in the tree doesn't load.
+$savedPath = $env:PATH
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+try {
+    foreach ($e in @("ufb.exe", "ufb-agent.exe")) {
+        $p = [Diagnostics.Process]::Start((Join-Path $staging $e), "--prime-smartscreen")
+        if (-not $p.WaitForExit(30000)) { $p.Kill(); throw "$e --prime-smartscreen did not exit within 30 s." }
+        if ($p.ExitCode -ne 0) { throw ("$e does not start from the staged tree (exit 0x{0:X8}) -- a DLL is missing or broken." -f $p.ExitCode) }
+        Write-Host "Launch gate: $e OK"
+    }
+} finally {
+    $env:PATH = $savedPath
+}
 
 # --- Manifest, tiles, icons, licences ----------------------------------------
 Copy-Item -Path $ManifestPath -Destination (Join-Path $staging "AppxManifest.xml")
