@@ -1,5 +1,9 @@
 # UFB Installer (Inno Setup)
 
+> **Not a release channel since 1.4.0.** Windows ships only through the Microsoft Store
+> (`packaging/windows/msix/README.md`); WinSparkle is retired and `docs/appcast-win.xml` is frozen
+> at 1.3.3. This script stays as an unpublished fallback until the Store channel has proven itself.
+
 Builds a Windows installer for the Qt-based UFB. Run from this directory after producing a release build.
 
 ## Prerequisites
@@ -46,8 +50,8 @@ The output `UFB-X.Y.Z-x64.exe` lands next to the `.iss`.
 
 | Component | Purpose |
 |---|---|
-| `core` (fixed) | `ufb.exe`, `ufb-agent.exe`, all DLLs, Qt plugin dirs (`platforms/`, `imageformats/`, …), `qml/`, `translations/`, `templates/`, `icons/`, `assets/scripts/` (`open_union_link.ps1` protocol handler), license |
-| `uri_protocol` | Registers `ufb://` (opens in app) and `union://` (opens in Explorer via `open_union_link.ps1`, with cross-OS path-mapping resolution) |
+| `core` (fixed) | `ufb.exe`, `ufb-agent.exe`, all DLLs, Qt plugin dirs (`platforms/`, `imageformats/`, …), `qml/`, `translations/`, `templates/`, `icons/`, license |
+| `uri_protocol` | Registers `ufb://` (opens in app) and `union://` (ufb.exe reveals it in Explorer, with cross-OS path-mapping resolution) |
 | `firewall` | Allows mesh-sync TCP 49221/49222 + UDP 4265 inbound for this exe |
 | `shortcuts/desktop` + `shortcuts/startmenu` | Self-explanatory |
 

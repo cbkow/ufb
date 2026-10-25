@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AppxManifest.xml.in — the Microsoft Store package manifest (CMake configure_file @ONLY, see CMakeLists.txt here).
+    @UFB_MSIX_IDENTITY@                Partner Center Package/Identity/Name
+    @UFB_MSIX_PUBLISHER@               Partner Center Package/Identity/Publisher (the account's CN)
+    @UFB_MSIX_PUBLISHER_DISPLAY_NAME@  Package/Properties/PublisherDisplayName
+    @UFB_MSIX_VERSION@                 PROJECT_VERSION padded to four parts (1.4.0 → 1.4.0.0)
+
+  Design notes (lessons from minRender installer/STORE.md and minNotes packaging/windows/msix):
+  - runFullTrust + the two network capabilities only. NO unvirtualizedResources (minRender 0.5.6.0 was denied for
+    it): everything UFB writes under %LOCALAPPDATA%\ufb is read only by ufb.exe and the ufb-agent.exe it spawns,
+    both inside the package, so default file-system / registry virtualization is fine. The one outside reader,
+    the union:// PowerShell handler, is gone — ufb.exe owns union:// now.
+  - WinFsp is NOT in the package (the Store can't install drivers). Users install it from winfsp.dev for sync
+    mounts; the listing discloses that first (policy 10.2.4) and the sidebar shows an "Install WinFsp…" pill.
+  - windows.firewallRules replace the Inno installer's netsh rules: mesh control TCP 49221, data TCP 49222,
+    heartbeat UDP 4265 (v6 epoch, core/src/mesh), on ufb.exe, all profiles.
+  - windows.startupTask replaces the HKCU Run value. A task can't pass arguments, so main.cpp detects the
+    StartupTask activation (LoginItem::launchedByStartupTask) and starts tray-only, the same as the background launch flag.
+    Enabled="true": on once the user has launched UFB once; the tray menu's Start at Login toggles it.
+    TaskId must match kStartupTaskId in app/LoginItem.cpp.
+  - No hidden Application entries / execution aliases (minRender's HeadlessAppBypass refusal).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap desktop desktop2 rescap">
+
+  <Identity
+    Name="@UFB_MSIX_IDENTITY@"
+    Version="@UFB_MSIX_VERSION@"
+    Publisher="@UFB_MSIX_PUBLISHER@"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>ufb</DisplayName>
+    <PublisherDisplayName>@UFB_MSIX_PUBLISHER_DISPLAY_NAME@</PublisherDisplayName>
+    <Logo>images\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="ufb" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="ufb"
+        Description="File browser and project manager for post-production"
+        BackgroundColor="transparent"
+        Square150x150Logo="images\Square150x150Logo.png"
+        Square44x44Logo="images\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="images\Wide310x150Logo.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- ufb:// opens the path in UFB; union:// shows it in Explorer (Main.qml _isRevealUri). Both resolve
+             through the user's path mappings (FileOps.resolve_ufb_uri). -->
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="ufb">
+            <uap:DisplayName>ufb Link</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="union">
+            <uap:DisplayName>Union Link</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+
+        <desktop:Extension Category="windows.startupTask" Executable="ufb.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="ufbStartup" Enabled="true" DisplayName="ufb" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Extensions>
+    <desktop2:Extension Category="windows.firewallRules">
+      <desktop2:FirewallRules Executable="ufb.exe">
+        <desktop2:Rule Direction="in" IPProtocol="TCP" LocalPortMin="49221" LocalPortMax="49222" Profile="all" />
+        <desktop2:Rule Direction="in" IPProtocol="UDP" LocalPortMin="4265" LocalPortMax="4265" Profile="all" />
+      </desktop2:FirewallRules>
+    </desktop2:Extension>
+  </Extensions>
+
+  <Capabilities>
+    <Capability Name="internetClientServer" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>

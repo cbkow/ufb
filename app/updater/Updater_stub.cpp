@@ -1,5 +1,6 @@
 // Updater_stub.cpp — no-op updater for platforms without an update
-// backend (anything that isn't macOS+Sparkle or Windows+WinSparkle).
+// backend (anything that isn't macOS+Sparkle — Windows included: the
+// Microsoft Store owns updates there).
 // Keeps the QML-facing API present so Main.qml's menu compiles
 // everywhere; `available()` is false so the item can hide/disable.
 

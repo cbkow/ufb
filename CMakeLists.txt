@@ -167,3 +167,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/external.cmake)
 # -----------------------------------------------------------------------------
 
 add_subdirectory(app)
+
+# The Microsoft Store package (Windows only): the ufb_msix target. Windows
+# ships only through the Store since 1.4.0 — packaging/windows/msix/README.md.
+add_subdirectory(packaging/windows/msix)

@@ -44,6 +44,7 @@
 #  include "player/vulkan/vulkan_device_manager.h"
 #endif
 #include "AppController.h"
+#include "LoginItem.h"
 #include "UfbApplication.h"
 
 #ifdef UFB_HAVE_WEBENGINE
@@ -171,7 +172,11 @@ int main(int argc, char *argv[])
     // those windows are already bound to the default AUMID and the
     // taskbar's icon-grouping uses that default's icon instead of
     // anything we set later. So this is the very first thing we do.
-    SetCurrentProcessExplicitAppUserModelID(L"com.unionfiles.ufb");
+    // Not in the Store package: it already has an AUMID (the package's
+    // Application), and overriding it splits the taskbar button from
+    // the Start tile / pins.
+    if (!LoginItem::isPackaged())
+        SetCurrentProcessExplicitAppUserModelID(L"com.unionfiles.ufb");
 
     // Release builds set WIN32_EXECUTABLE TRUE (GUI subsystem) which
     // detaches stdout/stderr from any parent console. Reattach when
@@ -280,6 +285,16 @@ int main(int argc, char *argv[])
         if (a.startsWith("--") || a.startsWith("-")) continue;  // skip flags
         if (launchPath.isEmpty()) launchPath = a;
     }
+#ifdef Q_OS_WIN
+    // The Store package's startup task launches ufb.exe with no
+    // arguments; it means the same as the Run key's --background.
+    if (!startInBackground && launchPath.isEmpty() && LoginItem::launchedByStartupTask())
+        startInBackground = true;
+    // union:// shows its target in Explorer (Main.qml _isRevealUri); a
+    // cold launch for one starts UFB resident in the tray, no window.
+    if (launchPath.startsWith(QLatin1String("union:"), Qt::CaseInsensitive))
+        startInBackground = true;
+#endif
 
 #ifdef Q_OS_MACOS
     // (MacOSMigration deleted 1.0.7 — every fleet mac ran the Tauri-era
@@ -516,13 +531,20 @@ int main(int argc, char *argv[])
     // plans/17 slice B: credentials are OS-owned; connecting IS the
     // sign-in and the OS dialog appears via the mount allow_ui path.
 
-    // Auto-update controller (Sparkle on macOS, WinSparkle on Windows;
-    // no-op stub elsewhere). QML's Help menu calls
+    // Auto-update controller (Sparkle on macOS; no-op stub elsewhere —
+    // the Microsoft Store updates the Windows build). QML's Help menu calls
     // `Updater.checkForUpdates()`; `Updater.available` gates the item.
     // When no backend is vendored, available() is false and the menu
     // item hides. Schedules a background check on construction.
     ufb::Updater updater;
     engine.rootContext()->setContextProperty("Updater", &updater);
+
+    // "Start UFB at login" (tray menu, Windows) and the package probe
+    // QML uses to drop affordances that make no sense under MSIX file
+    // virtualization (revealing the AppData sync cache).
+    LoginItem loginItem;
+    engine.rootContext()->setContextProperty("LoginItem", &loginItem);
+    engine.rootContext()->setContextProperty("_isPackaged", loginItem.packaged());
 
 #ifdef Q_OS_MACOS
     // Live accent-colour observer. QML reads `MacAccent.accent` and

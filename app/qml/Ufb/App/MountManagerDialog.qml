@@ -263,6 +263,11 @@ Dialog {
                         Layout.preferredHeight: Theme.dim.toolStripHeight
                         iconName: "folder-open"
                         text: qsTr("Reveal")
+                        // Store (MSIX) build: the default cache under
+                        // AppData physically lives in the package's
+                        // private LocalCache, so Explorer would open an
+                        // empty folder. Clear Cache covers that need.
+                        visible: !(typeof _isPackaged !== "undefined" && _isPackaged)
                         tooltip: qsTr("Open the current cache folder in Explorer / Finder. Creates the folder if the agent hasn't materialised it yet.")
                         onClicked: {
                             var p = dialog.configsObj.syncCacheRoot

@@ -1813,6 +1813,8 @@ pub fn start(
             nas_root.display()
         );
 
+        // "winfsp_init failed" is matched by app/qml/Ufb/App/Sidebar.qml
+        // (needsWinFsp → the "Install WinFsp…" pill) — keep the phrase.
         if winfsp_init().is_err() {
             log::error!(
                 "[winfsp] {} winfsp_init failed — is WinFsp runtime installed?",

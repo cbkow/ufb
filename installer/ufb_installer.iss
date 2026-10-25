@@ -15,7 +15,7 @@
 ;   * Main exe + Qt + Phosphor + cxx-qt bindings (.dll)
 ;   * Project template tree                     (.\templates\)
 ;   * ufb:/// URI scheme registration           (HKCR)
-;   * union:/// URI scheme + open_union_link.ps1
+;   * union:/// URI scheme (ufb.exe reveals the target in Explorer)
 ;   * Mesh sync firewall rules (TCP 49221/49222, UDP 4265)
 ;   * Start Menu / Desktop shortcuts
 ;
@@ -33,9 +33,10 @@
 ; Paths relative to this .iss file (repo-root/installer/).
 #define ReleaseDir "..\build\release"
 #define IconsDir   "..\app\icons"
-#define AgentDir   "..\agent\target\release"
+; The release build compiles the agent with --target x86_64-pc-windows-msvc;
+; the bare target\release dir held a stale 1.2.3 agent that 1.3.0-1.3.3 shipped.
+#define AgentDir   "..\agent\target\x86_64-pc-windows-msvc\release"
 #define WinFspDir  "..\external\winfsp"
-#define ScriptsDir "..\assets\scripts"
 
 [Setup]
 AppId={{B3C9D5E7-4F8A-6B2C-9D1E-7A3F5C8E2D4B}
@@ -197,8 +198,6 @@ Source: "..\LICENSES\*"; DestDir: "{app}\LICENSES"; Flags: ignoreversion recurse
 ; external/winfsp/version.txt for traceability.
 Source: "{#WinFspDir}\winfsp.msi"; Flags: dontcopy noencryption; Components: core
 
-; open_union_link.ps1 backs the union:/// protocol handler below.
-Source: "{#ScriptsDir}\open_union_link.ps1";    DestDir: "{app}\assets\scripts"; Flags: ignoreversion; Components: core
 
 [Icons]
 ; Pin the icon source explicitly (rather than relying on Windows
@@ -220,16 +219,14 @@ Root: HKCR; Subkey: "ufb"; ValueType: string; ValueName: "URL Protocol"; ValueDa
 Root: HKCR; Subkey: "ufb\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\icon.ico,0"; Components: uri_protocol
 Root: HKCR; Subkey: "ufb\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Components: uri_protocol
 
-; union:// — sibling protocol that opens the resolved path in
-; Explorer instead of in-app. Handled by open_union_link.ps1, which
-; strips the OS tag, applies cross-OS path mappings from
-; %LOCALAPPDATA%\ufb\settings.json, and calls explorer.exe /select.
-; -ExecutionPolicy Bypass + -NoProfile so the handler doesn't fail
-; on machines with restricted policy or slow profile scripts.
+; union:// — sibling protocol that shows the resolved path in
+; Explorer instead of in-app. ufb.exe handles it since 1.4.0 (Main.qml
+; _isRevealUri → FileOps.reveal_ufb_uri, path mappings applied); the
+; open_union_link.ps1 PowerShell handler is gone.
 Root: HKCR; Subkey: "union"; ValueType: string; ValueName: ""; ValueData: "URL:Union Protocol"; Flags: uninsdeletekey; Components: uri_protocol
 Root: HKCR; Subkey: "union"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Components: uri_protocol
 Root: HKCR; Subkey: "union\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\icons\icon.ico,0"; Components: uri_protocol
-Root: HKCR; Subkey: "union\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """powershell.exe"" -NoProfile -ExecutionPolicy Bypass -File ""{app}\assets\scripts\open_union_link.ps1"" ""%1"""; Components: uri_protocol
+Root: HKCR; Subkey: "union\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Components: uri_protocol
 
 ; App User Model ID (Windows 10/11 taskbar grouping). Two halves:
 ;

@@ -258,48 +258,6 @@ if ((Test-Path $winfspMsi) -and $existingVersion -eq $winFspVersion) {
     }
 }
 
-# ---- WinSparkle (auto-update, Phase 2) -----------------------------
-# WinSparkle is the Windows auto-updater: it downloads the new Inno
-# installer from the LAN appcast, verifies its EdDSA signature, runs
-# it, and relaunches. Layout cmake/app/CMakeLists.txt expects:
-#   external/winsparkle/include/winsparkle.h
-#   external/winsparkle/lib/WinSparkle.lib
-#   external/winsparkle/bin/WinSparkle.dll
-# Official release ships a flat zip with WinSparkle.dll + .lib +
-# include/winsparkle.h; we restage into the include/lib/bin layout.
-$winSparkleVersion = '0.9.3'   # https://github.com/vslavik/winsparkle/releases
-# NOTE: must be >= 0.9.0 - that's where WinSparkle added EdDSA (Ed25519)
-# support (win_sparkle_set_eddsa_public_key). 0.8.x is DSA-only and won't
-# compile Updater_win.cpp, which shares the Ed25519 key with the Mac side.
-$ufbWinSparkle = Join-Path $ufbExt 'winsparkle'
-if (Test-Path (Join-Path $ufbWinSparkle 'include\winsparkle.h')) {
-    Write-Host "[skip] WinSparkle already in external/winsparkle"
-} else {
-    Write-Host "Downloading WinSparkle $winSparkleVersion..."
-    $wsZip = Join-Path $env:TEMP "WinSparkle-$winSparkleVersion.zip"
-    $wsUrl = "https://github.com/vslavik/winsparkle/releases/download/v$winSparkleVersion/WinSparkle-$winSparkleVersion.zip"
-    Invoke-WebRequest -Uri $wsUrl -OutFile $wsZip -UseBasicParsing
-    $wsTmp = Join-Path $env:TEMP 'ufb-winsparkle-extract'
-    if (Test-Path $wsTmp) { Remove-Item -Recurse -Force $wsTmp }
-    Expand-Archive -Path $wsZip -DestinationPath $wsTmp -Force
-    # The zip's top folder is WinSparkle-<ver>\; binaries live under
-    # x64\Release\ (WinSparkle.dll + .lib) and include\winsparkle.h.
-    $wsSrc = Join-Path $wsTmp "WinSparkle-$winSparkleVersion"
-    New-Item -ItemType Directory -Force -Path (Join-Path $ufbWinSparkle 'include') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $ufbWinSparkle 'lib')     | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $ufbWinSparkle 'bin')     | Out-Null
-    # Copy the whole include\ dir, not just winsparkle.h: it #includes
-    # winsparkle-version.h, so a lone header fails to compile (C1083).
-    robocopy (Join-Path $wsSrc 'include') (Join-Path $ufbWinSparkle 'include') /E /NFL /NDL /NJH /NJS /NP | Out-Null
-    Copy-Item (Join-Path $wsSrc 'x64\Release\WinSparkle.lib') (Join-Path $ufbWinSparkle 'lib\WinSparkle.lib')   -Force
-    Copy-Item (Join-Path $wsSrc 'x64\Release\WinSparkle.dll') (Join-Path $ufbWinSparkle 'bin\WinSparkle.dll')   -Force
-    Remove-Item -Recurse -Force $wsTmp
-    if (Test-Path (Join-Path $ufbWinSparkle 'include\winsparkle.h')) {
-        Write-Host "WinSparkle $winSparkleVersion ready at $ufbWinSparkle"
-    } else {
-        Write-Warning "WinSparkle layout incomplete - check the zip structure for v$winSparkleVersion"
-    }
-}
 
 Write-Host ""
 Write-Host "Done. external now contains:"

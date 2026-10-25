@@ -1,5 +1,9 @@
 # Auto-update setup (Sparkle + WinSparkle)
 
+> **Windows half retired in 1.4.0.** Windows ships through the Microsoft Store, which owns updates
+> (`packaging/windows/msix/README.md`); WinSparkle is gone from the build and `docs/appcast-win.xml` is frozen
+> at 1.3.3. The WinSparkle sections below are history. macOS/Sparkle is unchanged.
+
 UFB's in-app updater checks an appcast served by GitHub Pages at
 `https://ufbrowser.com/` (the `docs/` folder of this repo, same setup
 as the minNotes sister site). macOS uses **Sparkle**; Windows uses

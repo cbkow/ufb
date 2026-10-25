@@ -207,6 +207,15 @@ pub mod qobject {
         #[qinvokable]
         fn resolve_ufb_uri(self: &FileOps, uri_or_path: QString) -> QString;
 
+        /// `union://` activation on Windows: resolve like
+        /// `resolve_ufb_uri`, then show the target in Explorer instead
+        /// of navigating in-app — select it when it exists, else open
+        /// its parent folder (what the retired open_union_link.ps1
+        /// handler did before the Store package; a package protocol
+        /// can only launch ufb.exe). Returns false when the URI doesn't resolve.
+        #[qinvokable]
+        fn reveal_ufb_uri(self: &FileOps, uri: QString) -> bool;
+
         /// Returns "B" or "C" — the FolderTabView layout mode for the
         /// given folder. Probes up to 10 child directories looking for
         /// shot-style project/renders structure. Sync.
@@ -706,6 +715,17 @@ impl qobject::FileOps {
             &settings.path_mappings,
         );
         cxx_qt_lib::QString::from(&translated)
+    }
+
+    fn reveal_ufb_uri(self: &qobject::FileOps, uri: cxx_qt_lib::QString) -> bool {
+        let resolved = self.resolve_ufb_uri(uri).to_string();
+        if resolved.is_empty() {
+            return false;
+        }
+        if let Err(e) = file_ops::reveal_or_open_parent(&resolved) {
+            log::warn!("FileOps.reveal_ufb_uri({}): {}", resolved, e);
+        }
+        true
     }
 
     fn detect_folder_layout_mode(

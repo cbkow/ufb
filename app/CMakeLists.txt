@@ -22,6 +22,9 @@ qt_add_executable(ufb
     thumbnails/ThumbCache.cpp
     thumbnails/ThumbCache.h
     updater/Updater.h
+    # "Start UFB at login" (Windows: Store startup task / HKCU Run).
+    LoginItem.h
+    LoginItem.cpp
     # The chromeless window: flags live in Main.qml, the per-OS halves below.
     WindowChrome.h
     WindowChrome.cpp
@@ -70,8 +73,7 @@ qt_add_executable(ufb
 # App version for runtime reporting (main.cpp's
 # setApplicationVersion). Derived from project(VERSION) so it can
 # never drift from Info.plist / the appcasts the way the old
-# hardcoded string did. The WIN32 updater block below also relies
-# on this for WinSparkle's appcast comparison.
+# hardcoded string did.
 target_compile_definitions(ufb PRIVATE
     "UFB_APP_VERSION=\"${CMAKE_PROJECT_VERSION}\"")
 
@@ -288,18 +290,20 @@ elseif(APPLE)
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 
-# ── Auto-update (Phase 2): Sparkle (macOS) / WinSparkle (Windows) ────
+# ── Auto-update (Phase 2): Sparkle (macOS) ─────────────────────────────
 #
 # The updater object is platform-split like ShellThumbnail. The actual
 # framework link is CONDITIONAL on the vendored dependency being
 # present, so the app still builds without it — the stub path compiles
 # and Updater.available() returns false (the menu item hides). Vendor:
 #   macOS:   external/Sparkle/Sparkle.framework  (Sparkle 2.x release)
-#   Windows: external/winsparkle/{include,bin,lib}  (WinSparkle release)
+# Windows ships through the Microsoft Store since 1.4.0 — the Store owns
+# updates, so Windows takes the stub (WinSparkle retired, the Windows
+# appcast frozen at 1.3.3; see packaging/windows/msix/README.md).
 #
 # UFB_UPDATE_PUBLIC_KEY (root CMakeLists cache var) is the base64 EdDSA
 # public key from Sparkle's generate_keys — substituted into Info.plist
-# as SUPublicEDKey (macOS) and compiled into Updater_win.cpp (Windows).
+# as SUPublicEDKey.
 if(APPLE)
     target_sources(ufb PRIVATE updater/Updater_mac.mm)
     set_source_files_properties(updater/Updater_mac.mm
@@ -333,26 +337,6 @@ if(APPLE)
                 "QCView-Player/external/Sparkle/Sparkle.framework (2.9.2) there.")
     endif()
 
-elseif(WIN32)
-    target_sources(ufb PRIVATE updater/Updater_win.cpp)
-    # UFB_APP_VERSION (WinSparkle's appcast comparison — ufb.exe has
-    # no VERSIONINFO resource) is defined for all platforms near the
-    # top of this file.
-    target_compile_definitions(ufb PRIVATE
-        "UFB_UPDATE_PUBLIC_KEY=\"${UFB_UPDATE_PUBLIC_KEY}\"")
-
-    set(_winsparkle_root "${CMAKE_SOURCE_DIR}/external/winsparkle")
-    if(EXISTS "${_winsparkle_root}/include/winsparkle.h")
-        message(STATUS "ufb: WinSparkle found at ${_winsparkle_root}")
-        target_compile_definitions(ufb PRIVATE UFB_HAVE_WINSPARKLE)
-        target_include_directories(ufb PRIVATE "${_winsparkle_root}/include")
-        target_link_libraries(ufb PRIVATE "${_winsparkle_root}/lib/WinSparkle.lib")
-        # WinSparkle.dll is copied next to ufb.exe by the deploy block
-        # further down (with the other runtime DLLs).
-    else()
-        message(STATUS "ufb: WinSparkle NOT found at ${_winsparkle_root} — "
-                "auto-update disabled (run scripts/setup-external.ps1).")
-    endif()
 else()
     target_sources(ufb PRIVATE updater/Updater_stub.cpp)
 endif()
@@ -396,6 +380,14 @@ if(WIN32)
     # user32   = generic GDI/USER surface the shell APIs touch
     # dwmapi   = DwmSetWindowAttribute (DWMWA_CLOAK startup-flash fix)
     target_link_libraries(ufb PRIVATE shell32 comctl32 gdi32 user32 dwmapi)
+
+    # windowsapp = the C++/WinRT umbrella (LoginItem.cpp: StartupTask +
+    # AppInstance activation args for the Store package).
+    target_link_libraries(ufb PRIVATE windowsapp)
+    # C++/WinRT under C++17 falls back to <experimental/coroutine>, which
+    # MSVC 14.5x rejects (STL1011). That one file builds as C++20 (the
+    # later /std wins; D9025 "overriding" is expected).
+    set_source_files_properties(LoginItem.cpp PROPERTIES COMPILE_OPTIONS "/std:c++20")
 endif()
 
 # Thumbnail backends from cmake/external.cmake.
@@ -956,21 +948,6 @@ if(WIN32)
         message(STATUS "ufb: exiftool missing in external/exiftool — run scripts/setup-external.ps1")
     endif()
 
-    # WinSparkle.dll next to ufb.exe (the Inno [Files] *.dll glob picks
-    # it up from there). Updater_win.cpp links WinSparkle.lib; the DLL
-    # must sit beside the exe at runtime.
-    set(_ufb_winsparkle_dll "${CMAKE_SOURCE_DIR}/external/winsparkle/bin/WinSparkle.dll")
-    if(EXISTS "${_ufb_winsparkle_dll}")
-        add_custom_command(TARGET ufb POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_ufb_winsparkle_dll}"
-                "$<TARGET_FILE_DIR:ufb>/WinSparkle.dll"
-            COMMENT "Sync WinSparkle.dll next to ufb.exe"
-        )
-    else()
-        message(STATUS "ufb: WinSparkle.dll missing in external/winsparkle/bin — "
-                "auto-update disabled (run scripts/setup-external.ps1)")
-    endif()
 endif()
 
 if(APPLE)

@@ -157,10 +157,11 @@ Direct runtime dependencies (shipped as binary alongside UFB)
    License: GPL-3.0 with FLOSS exception
    File:    WinFsp-LICENSE.txt
    https://github.com/winfsp/winfsp
-   Distribution: bundled installer redistributable. WinFsp's MSI is
-                 silently installed by UFB's installer when the target
-                 machine doesn't already have it. Linked at runtime
-                 by the agent via the `winfsp` Rust crate (delay-load).
+   Distribution: not shipped. Since 1.4.0 (the Microsoft Store
+                 package) users install WinFsp themselves from
+                 winfsp.dev when they want sync mounts; the agent
+                 loads the installed runtime via the `winfsp` Rust
+                 crate (delay-load).
 
 9. SQLite (via the bundled feature of the rusqlite crate)
    Public Domain
@@ -200,14 +201,7 @@ Direct runtime dependencies (shipped as binary alongside UFB)
             Contents/Frameworks/ and drives in-app updates from the
             ufbrowser.com appcast.
 
-13. WinSparkle 0.9.3 (Windows auto-update library)
-   Copyright (c) 2009-2026 Vaclav Slavik
-   License: MIT
-   File:    WinSparkle-LICENSE.txt
-   https://winsparkle.org
-   Linkage: dynamic. WinSparkle.dll ships next to ufb.exe.
-
-14. Geist Sans + Geist Mono 1.8.2 (typefaces)
+13. Geist Sans + Geist Mono 1.8.2 (typefaces)
    Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font)
    License: SIL Open Font License, Version 1.1
    File:    Geist-OFL-1.1.txt

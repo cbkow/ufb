@@ -5,17 +5,17 @@
 //             appcast items: Sparkle shows the version + release notes
 //             and opens the DMG URL (the multi-bundle drag-install DMG
 //             can't be atomically swapped; notarization is integrity).
-//   Windows — WinSparkle. Downloads the new installer, verifies the
-//             EdDSA signature, runs it, relaunches.
+//   Windows — none: the Microsoft Store owns updates (WinSparkle was
+//             retired in 1.4.0), so Windows builds take the stub.
 //
 // Implementations are selected per-platform in app/CMakeLists.txt
-// (Updater_mac.mm / Updater_win.cpp / Updater_stub.cpp), exactly like
+// (Updater_mac.mm / Updater_stub.cpp), exactly like
 // the ShellThumbnail_{mac,win} pair. Registered to QML in main.cpp via
 //   engine.rootContext()->setContextProperty("Updater", &updater);
 // so QML calls `Updater.checkForUpdates()`.
 //
-// The framework link is conditional: if external/sparkle (macOS) or
-// external/winsparkle (Windows) isn't present, the stub build compiles
+// The framework link is conditional: if external/Sparkle (macOS) isn't
+// present, the stub build compiles
 // and `available()` returns false — the menu item can hide/disable.
 
 #pragma once

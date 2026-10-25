@@ -69,3 +69,7 @@ macos-helpers/DerivedData/
 /external/nfsserve/.cargo-ok
 installer/UFB-1.0.4-x64.exe
 installer/UFB-*.exe
+
+# MSIX build output (packaging/windows/msix/build_msix.ps1)
+/packaging/windows/msix/dist/
+/packaging/windows/msix/staging/

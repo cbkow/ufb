@@ -190,6 +190,13 @@ Rectangle {
                     unmanaged: m.unmanaged === true,
                     notice: m.notice || "",
                     noticeFixable: m.noticeFixable === true,
+                    // A sync mount the agent couldn't start because the
+                    // WinFsp driver isn't installed — users install it
+                    // themselves (the Store package can't ship a driver).
+                    // Matches the phrase agent/src/sync/winfsp_server.rs
+                    // reports from its winfsp_init check.
+                    needsWinFsp: Qt.platform.os === "windows"
+                        && (m.stateDetail || "").indexOf("winfsp_init failed") >= 0,
                     state: m.unmanaged === true ? qsTr("bookmark") : (m.state || "(waiting)"),
                     // The owner's human sentence for the state ("NetFS
                     // mount of \\nas\x failed: no route to host") —
@@ -754,6 +761,39 @@ Rectangle {
                             id: noticeMa
                             anchors.fill: parent
                             hoverEnabled: true
+                        }
+                    }
+                    // WinFsp missing: link to the official installer.
+                    Rectangle {
+                        visible: model.needsWinFsp === true
+                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredHeight: 22
+                        implicitWidth: installWinFspLabel.implicitWidth + 16
+                        radius: Theme.dim.radiusSmall
+                        color: installWinFspHover.containsMouse
+                            ? Theme.colors.warning
+                            : Theme.colors.warningMuted || Theme.colors.warning
+                        opacity: installWinFspHover.containsMouse ? 1.0 : 0.85
+                        ToolTip.text: qsTr("Sync mounts need the free WinFsp driver. Install it, then the mount retries on its own.")
+                        ToolTip.visible: installWinFspHover.containsMouse
+                        ToolTip.delay: 300
+                        Label {
+                            id: installWinFspLabel
+                            anchors.centerIn: parent
+                            text: qsTr("Install WinFsp…")
+                            color: "#ffffff"
+                            font.pixelSize: Theme.font.sizeTiny
+                            font.bold: true
+                        }
+                        MouseArea {
+                            id: installWinFspHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: (mouse) => {
+                                mouse.accepted = true  // not the row's navigate
+                                Qt.openUrlExternally("https://winfsp.dev/rel/")
+                            }
                         }
                     }
                     // Actionable half of the drift notice: the

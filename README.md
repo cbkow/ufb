@@ -105,9 +105,10 @@ macos-helpers/ Swift FinderSync extension (xcodegen project)
 scripts/       Build/sign/notarize/release + appcast helpers
 ```
 
-## Building a release installer
+## Building a release package
 
-End-to-end Windows release build:
+Windows ships through the Microsoft Store since 1.4.0. End-to-end
+Windows release build (from a VS x64 developer shell):
 
 ```powershell
 # 1. Vendored prebuilts (one-time per fresh clone or version bump)
@@ -123,13 +124,14 @@ Copy-Item external\ffmpeg\bin\*.dll build\release\ -Force
 Copy-Item external\pdfium\bin\pdfium.dll build\release\ -Force
 Copy-Item vcpkg_installed\x64-windows\bin\*.dll build\release\ -Force
 
-# 4. Compile the installer
-& 'C:\Program Files (x86)\Inno Setup 6\iscc.exe' installer\ufb_installer.iss
+# 4. Pack the MSIX
+cmake --build build\release --target ufb_msix
 ```
 
-Output: `installer/UFB-{version}-x64.exe` (e.g.
-`UFB-0.9.9909-x64.exe`). See [`installer/README.md`](installer/README.md)
-for what's bundled + end-user prerequisites.
+Output: `packaging/windows/msix/dist/ufb-{version}-x64.msix`, unsigned —
+the file Partner Center takes. See
+[`packaging/windows/msix/README.md`](packaging/windows/msix/README.md)
+for the package design, sideload testing and the submission routine.
 
 ## Project status
 
@@ -138,11 +140,12 @@ and the macOS port are complete, including the OS-native
 simplification pass: GUI-owned SMB mounts, OS-keychain credentials,
 and path-identity live mode. The **1.0.x** series is incremental polish —
 the spacebar preview lightbox, persistent thumbnail cache, in-app
-auto-update (Sparkle / WinSparkle via [ufbrowser.com](https://ufbrowser.com)),
+auto-update (Sparkle via [ufbrowser.com](https://ufbrowser.com) on macOS,
+the Microsoft Store on Windows since 1.4.0),
 and startup/DB hardening.
 
 macOS releases are built by `scripts/release-mac.sh` (sign → notarize
-→ signed installer pkg → appcast); Windows releases by the Inno Setup flow below.
+→ signed installer pkg → appcast); Windows releases by the MSIX flow above.
 
 ## License
 

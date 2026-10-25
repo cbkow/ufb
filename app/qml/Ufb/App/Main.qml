@@ -166,6 +166,8 @@ ApplicationWindow {
                 window._showFromTray()
         }
         menu: Labs.Menu {
+            // The user may have flipped Start at Login in Task Manager.
+            onAboutToShow: if (LoginItem) LoginItem.refresh()
             Labs.MenuItem {
                 text: qsTr("Open UFB")
                 onTriggered: window._showFromTray()
@@ -176,6 +178,29 @@ ApplicationWindow {
                 title: qsTr("Mounts")
             }
             Labs.MenuSeparator {}
+            // Windows only (LoginItem.available): the Store package's
+            // startup task, or the HKCU Run value unpackaged. A task the
+            // user switched off in Windows can't be re-enabled from here,
+            // so that state opens Settings → Startup instead. Null-guarded
+            // like Updater (context property reads null during teardown).
+            Labs.MenuItem {
+                visible: LoginItem ? LoginItem.available : false
+                text: LoginItem && LoginItem.blockedBySystem
+                    ? qsTr("Start at Login (set in Windows Settings)…")
+                    : qsTr("Start at Login")
+                checkable: !(LoginItem && LoginItem.blockedBySystem)
+                checked: LoginItem ? LoginItem.enabled : false
+                onTriggered: {
+                    if (LoginItem.blockedBySystem) LoginItem.openSystemSettings()
+                    else LoginItem.setEnabled(!LoginItem.enabled)
+                    // The click toggled `checked` itself; hand it back
+                    // to the real state (the change lands async).
+                    checked = Qt.binding(() => LoginItem ? LoginItem.enabled : false)
+                }
+            }
+            Labs.MenuSeparator {
+                visible: LoginItem ? LoginItem.available : false
+            }
             Labs.MenuItem {
                 text: qsTr("Quit UFB")
                 onTriggered: Qt.quit()
@@ -522,6 +547,13 @@ ApplicationWindow {
     Connections {
         target: typeof AppCtl !== "undefined" ? AppCtl : null
         function onUriRequested(path) {
+            // union:// on Windows shows the target in Explorer and
+            // leaves the window where it is (see _isRevealUri).
+            if (window._isRevealUri(path)) {
+                if (!FileOps.reveal_ufb_uri(path))
+                    console.warn("Main: AppCtl union uri unresolvable:", path)
+                return
+            }
             // Always raise/focus, even on an empty payload - the user
             // re-launched and the most useful thing is the existing
             // window coming forward.
@@ -543,6 +575,15 @@ ApplicationWindow {
             // that project's tab + panel; otherwise the browser navigates.
             window._routeResolvedPath(resolved, window._lastActiveFilesTabIndex, true)
         }
+    }
+
+    /// `union://` means "show it in the file manager" rather than "open
+    /// it in UFB". On Windows ufb.exe owns that scheme (the Store package
+    /// can't point a protocol anywhere else); main.cpp starts a cold
+    /// launch tray-only for it. macOS keeps navigating in-app.
+    function _isRevealUri(path) {
+        return Qt.platform.os === "windows" && !!path
+            && path.trim().toLowerCase().indexOf("union:") === 0
     }
 
     /// Resolve a path the URI/launch-arg flow has produced into a
@@ -907,6 +948,11 @@ ApplicationWindow {
         interval: 200
         repeat: false
         onTriggered: {
+            if (window._isRevealUri(_launchPath)) {
+                if (!FileOps.reveal_ufb_uri(_launchPath))
+                    console.warn("Main: could not resolve launch arg:", _launchPath)
+                return
+            }
             var resolved = FileOps.resolve_ufb_uri(_launchPath)
             if (resolved.length === 0) {
                 console.warn("Main: could not resolve launch arg:", _launchPath)
@@ -2270,7 +2316,7 @@ ApplicationWindow {
                 color: "#666"
                 font.pixelSize: 11
             }
-            // Auto-update check (Sparkle/WinSparkle). Hidden when no
+            // Auto-update check (Sparkle, macOS). Hidden when no
             // update backend is compiled in (Updater.available == false).
             // Styled as a muted status-bar text link (matches the
             // "ufb-core <ver>" label beside it), accenting on hover.
