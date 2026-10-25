@@ -112,8 +112,7 @@ After any manifest or packaging change:
    ffmpeg); minNotes is GPL-3.0 too and certified.
 4. Certification typically takes 1–3 business days. A denied package gets a version bump before resubmitting.
 5. Listing basics: website <https://ufbrowser.com>, support <https://github.com/cbkow/ufb/issues>, privacy policy
-   (needed — the app uses the network: a page on ufbrowser.com stating ufb collects nothing and talks only to the
-   user's own LAN peers and shares).
+   <https://ufbrowser.com/privacy/> (`docs/privacy.md` — no telemetry; LAN mesh, the user's shares, Sparkle on mac).
 
 ### Listing text (draft)
 
