@@ -62,7 +62,11 @@ for f in "${FILES[@]}"; do
     fi
     if grep -q "$OLD" "$f"; then
         # BSD/macOS sed in-place needs the '' arg; this script runs on macOS.
-        sed -i '' "s/$OLD/$NEW/g" "$f"
+        # Comment lines (`#`, `;`) are skipped: they mention versions as
+        # history ("retired in 1.4.0") and must not move with the bump —
+        # bit 1.4.0 and 1.4.1.
+        # (`#define` in the .iss is not a comment: only `# ` and `;` are.)
+        sed -i '' -e "/^[[:space:]]*;/b" -e "/^[[:space:]]*#[[:space:]]/b" -e "s/$OLD/$NEW/g" "$f"
         echo "  updated $f"
     else
         echo "  NOTE: $OLD not found in $f (already bumped?)"
