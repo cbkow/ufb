@@ -11,6 +11,34 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.4.1</title>
+      <sparkle:version>1.4.1</sparkle:version>
+      <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>UFB 1.4.1</h2>
+<ul>
+  <li><b>Mac: network-share mounts no longer hang at login.</b> macOS's
+      mount service (NetAuthSysAgent) can get stuck for every app on the
+      Mac, Finder included, when two shares on the same server are connected
+      at the same instant. UFB now connects one share at a time across the
+      app and its background agent, so it can no longer trigger the hang
+      itself.</li>
+  <li><b>Mac: a stuck mount service is detected and cleared automatically.</b>
+      UFB watches the service while a mount is pending, spots the hang in
+      about five seconds instead of waiting out a one-minute timeout,
+      restarts the service once and reconnects, with no action needed.
+      If the service gets stuck again within ten minutes, the Mounts row
+      shows a "Restart…" button instead.</li>
+  <li><b>Mac: one connection attempt per server.</b> When a server accepts
+      connections but mounts keep failing, UFB retries that server on a
+      single backing-off schedule instead of every share retrying on its own
+      timer.</li>
+  <li>Nothing changes on Windows in this release.</li>
+</ul>]]></description>
+      <pubDate>Fri, 06 Nov 2026 16:49:04 -0500</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.4.1/UFB-1.4.1-arm64.pkg" type="application/octet-stream" sparkle:edSignature="57VT1m+FmMLguMLnMm3H1iyBDN4TCHtIBCp4HvYCE6g0V/xYb5XBh7aKtpSMAQ7JUnVhjBCS6e3Pw02rBrGjBg==" length="372159093" />
+    </item>
+    <item>
       <title>Version 1.4.0</title>
       <sparkle:version>1.4.0</sparkle:version>
       <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
