@@ -2106,6 +2106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "netfs-guard"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3769,6 +3777,7 @@ dependencies = [
  "libc",
  "log",
  "md5",
+ "netfs-guard",
  "notify",
  "objc2",
  "objc2-app-kit",

@@ -8,7 +8,7 @@ members = [
 # rusqlite/r2d2 versions don't have to match core's, and it can build
 # and ship independently. Built via `just agent` or `cargo build
 # --manifest-path agent/Cargo.toml`.
-exclude = ["agent"]
+exclude = ["agent", "netfs-guard"]
 
 [workspace.package]
 version = "1.4.0"

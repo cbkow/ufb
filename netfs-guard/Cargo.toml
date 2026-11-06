@@ -1,0 +1,15 @@
+[package]
+name = "netfs-guard"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "macOS NetFS mount-issue guard shared by the UFB GUI and agent: machine-wide issue gate, NetAuthSysAgent wedge observation, restart policy"
+publish = false
+
+# Standalone workspace root: path-depended on by both the main workspace
+# (core) and the excluded agent crate, so it must not belong to either.
+[workspace]
+
+[dependencies]
+libc = "0.2"
+log = "0.4"

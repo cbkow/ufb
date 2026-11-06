@@ -3,6 +3,8 @@
 /target/
 agent/target/
 agent/Cargo.lock
+netfs-guard/target/
+netfs-guard/Cargo.lock
 
 # IDE / agent state (Claude Code stores per-project conversation +
 # task state under .claude/ — local-only, must stay out of git).
