@@ -63,6 +63,9 @@ fs_extra = "1.3"
 
 # Clipboard helper for cross-platform paths (file_ops)
 arboard = "3"
+# The family path kit (minplatform crates/min-paths, canon §22 row 125): URLs, uri-lists, translation, clipboard, guards.
+# A path dependency while minplatform is private; becomes a git dependency when it goes public.
+min-paths = { path = "../../minplatform/crates/min-paths" }
 
 # URL/file opener
 opener = { version = "0.7", features = ["reveal"] }

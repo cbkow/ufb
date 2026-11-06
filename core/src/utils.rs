@@ -18,50 +18,7 @@ pub fn get_app_data_dir() -> PathBuf {
 /// resolves that (minNotes' FileLinks pattern). Returns the input
 /// unchanged off Windows, unpackaged, or when the path can't be opened.
 pub fn external_path(path: &std::path::Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_NAME_NORMALIZED, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
-        };
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        // SAFETY: `wide` is NUL-terminated and outlives the call; the
-        // handle is closed below. BACKUP_SEMANTICS lets it open folders.
-        let handle = unsafe {
-            CreateFileW(
-                PCWSTR(wide.as_ptr()),
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                None,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS,
-                HANDLE::default(),
-            )
-        };
-        let Ok(handle) = handle else { return path.to_path_buf() };
-        let mut buf = vec![0u16; 1024];
-        let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
-        let _ = unsafe { CloseHandle(handle) };
-        if len == 0 || len >= buf.len() {
-            return path.to_path_buf();
-        }
-        let s = std::ffi::OsString::from_wide(&buf[..len]).to_string_lossy().into_owned();
-        // `\\?\C:\...` → `C:\...`; `\\?\UNC\srv\share` → `\\srv\share`.
-        let s = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            format!(r"\\{}", rest)
-        } else {
-            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
-        };
-        PathBuf::from(s)
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_path_buf()
-    }
+    min_paths::volume::external_path(path)
 }
 
 /// Get or create a persistent device ID.
@@ -221,53 +178,9 @@ pub fn build_union_uri(path: &str) -> String {
 /// the whole drag. A genuine UNC path is emitted in proper
 /// `file://host/share` form instead of the old `file://///…`.
 pub fn path_to_file_url(path: &str) -> Option<String> {
-    let normalised = path.replace('\\', "/");
-    if cfg!(target_os = "windows") {
-        if let Some(rest) = normalised.strip_prefix("//") {
-            // UNC: \\server\share\… -> file://server/share/…
-            if rest.is_empty() {
-                return None;
-            }
-            return Some(format!("file://{}", percent_encode_path(rest)));
-        }
-        let b = normalised.as_bytes();
-        let has_drive =
-            b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic();
-        if has_drive {
-            return Some(format!(
-                "file:///{}",
-                percent_encode_path(&normalised)
-            ));
-        }
-        // Drive-less or relative — unrepresentable without inventing a
-        // drive letter; dropping the entry beats wedging the OS.
-        log::warn!(
-            "path_to_file_url: dropping drive-less Windows path from drag payload: {:?}",
-            path
-        );
-        None
-    } else if normalised.starts_with('/') {
-        Some(format!("file://{}", percent_encode_path(&normalised)))
-    } else {
-        Some(format!("file:///{}", percent_encode_path(&normalised)))
-    }
-}
-
-/// Percent-encode the bytes of a path that aren't already URL-safe.
-/// Preserves `/`, `:`, `-`, `_`, `.`, `~`, alphanumerics. Encodes the
-/// rest. Path separators stay literal.
-fn percent_encode_path(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        let safe = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~');
-        if safe {
-            out.push(byte as char);
-        } else {
-            out.push_str(&format!("%{:02X}", byte));
-        }
-    }
-    out
+    let u = min_paths::url::path_to_file_url(path);
+    if u.is_none() { log::warn!("path_to_file_url: dropping unrepresentable path from drag payload: {:?}", path); }
+    u
 }
 
 /// Parsed result from a ufb:// or union:// URI.
@@ -301,147 +214,27 @@ pub fn parse_path_uri(uri: &str) -> Option<ParsedUri> {
     })
 }
 
-/// Expand a leading `~` or `~/` against the current machine's $HOME. Returns
-/// the input unchanged if it doesn't start with `~`. Only meaningful when the
-/// path is intended for the current OS — we never expand against some other
-/// machine's home. Callers gate by comparing the mapping's OS to
-/// `current_os_tag()`.
-fn expand_home(path: &str) -> String {
-    let rest = if let Some(r) = path.strip_prefix("~/") {
-        r
-    } else if path == "~" {
-        ""
-    } else {
-        return path.to_string();
-    };
-    let Some(home) = dirs::home_dir() else {
-        return path.to_string();
-    };
-    let home_str = home.to_string_lossy();
-    if rest.is_empty() {
-        home_str.into_owned()
-    } else {
-        format!("{}/{}", home_str.trim_end_matches('/'), rest)
-    }
+/// `~` expansion against this machine's home (min-paths; `translate_path_to` applies it to current-OS roots only).
+pub fn expand_home(path: &str) -> String { min_paths::map::expand_home(path) }
+
+/// ufb's mapping rows → the family's one table (min-paths `Mapping`; no id, no Linux root in ufb's settings).
+pub fn to_min_paths_mappings(mappings: &[crate::settings::PathMapping]) -> Vec<min_paths::map::Mapping> {
+    mappings.iter().map(|m| min_paths::map::Mapping { id: String::new(), label: m.label.clone(), win: m.win.clone(), mac: m.mac.clone(), lin: String::new(), enabled: m.enabled }).collect()
 }
 
-/// Expand `~` in a mapping prefix iff the mapping's OS is also the current
-/// machine's OS — otherwise we'd be expanding against the wrong home dir.
-fn expand_mapping_prefix(prefix: &str, os: &str) -> String {
-    if os == current_os_tag() {
-        expand_home(prefix)
-    } else {
-        prefix.to_string()
-    }
-}
-
-/// Translate a path from source_os format to target_os format using mapping rules.
+/// Translate a path from source_os format to target_os format using mapping rules — min-paths' `translate` (ufb's
+/// algorithm, plus the component-boundary check: `/Volumes/share` no longer matches `/Volumes/share-extra`). `~` in a
+/// mapping root expands only for the current OS; an unknown OS tag falls through to a separator swap, as before.
 pub fn translate_path_to(
     source_os: &str,
     target_os: &str,
     path: &str,
     mappings: &[crate::settings::PathMapping],
 ) -> String {
-    // NOTE: deliberately NO `source_os == target_os` short-circuit. A
-    // same-OS call must still run the mapping loop so a foreign-form
-    // string that drifted into a local-OS field — a drive-less
-    // `\Volumes\…` or a forward-slash `/Volumes/…` row in a Windows DB —
-    // gets repaired to the proper native form. For a same-OS call the
-    // loop matches a mapping prefix against itself, normalising it;
-    // paths that match nothing fall through to the `to_native_path` tail
-    // unchanged, exactly as the old early-return did.
-
-    // Try each mapping rule (skip disabled mappings)
-    for mapping in mappings {
-        if !mapping.enabled {
-            continue;
-        }
-        let source_prefix_raw = match source_os {
-            "win" => &mapping.win,
-            "mac" => &mapping.mac,
-            _ => continue,
-        };
-        let target_prefix_raw = match target_os {
-            "win" => &mapping.win,
-            "mac" => &mapping.mac,
-            _ => continue,
-        };
-
-        if source_prefix_raw.is_empty() || target_prefix_raw.is_empty() {
-            continue;
-        }
-
-        // Expand ~/ in prefixes when they refer to the current machine. This
-        // lets a stored mapping of `~/ufb/mounts/X` work on any Mac regardless
-        // of the user's login name.
-        let source_prefix = expand_mapping_prefix(source_prefix_raw, source_os);
-        let target_prefix = expand_mapping_prefix(target_prefix_raw, target_os);
-
-        // Normalize for comparison (forward slashes, case-insensitive on Windows).
-        // For win-source paths, also strip the leading drive letter (`C:`) and
-        // any leading slash so legacy DB rows that lost their drive prefix
-        // (`Volumes\X`, `\Volumes\X`) still match a mapping written as
-        // `C:\Volumes\X`. Drive letters in path mappings are conventional —
-        // the share suffix is what actually identifies the location.
-        let norm_path = path.replace('\\', "/");
-        let norm_source = source_prefix.replace('\\', "/");
-
-        fn strip_for_win(s: &str) -> &str {
-            let bytes = s.as_bytes();
-            let s = if bytes.len() >= 2
-                && bytes[1] == b':'
-                && bytes[0].is_ascii_alphabetic()
-            {
-                &s[2..]
-            } else {
-                s
-            };
-            s.trim_start_matches('/')
-        }
-
-        // Keep a case-preserved version for slicing the remainder; the
-        // lowercased copies are only for the win-source equality check.
-        let (case_path, cmp_path, cmp_source) = if source_os == "win" {
-            let cs = strip_for_win(&norm_source);
-            if cs.is_empty() {
-                // The mapping is a bare drive root (e.g. `U:\`) — the
-                // drive letter is its only discriminating information.
-                // Stripping it would leave an empty prefix that matches
-                // every path, so compare with the drive letter intact.
-                let cs_full = norm_source.trim_end_matches('/');
-                (
-                    norm_path.clone(),
-                    norm_path.to_lowercase(),
-                    cs_full.to_lowercase(),
-                )
-            } else {
-                let cp = strip_for_win(&norm_path);
-                (cp.to_string(), cp.to_lowercase(), cs.to_lowercase())
-            }
-        } else {
-            (norm_path.clone(), norm_path.clone(), norm_source.clone())
-        };
-
-        if cmp_path.starts_with(&cmp_source) {
-            // Slice from the case-preserved path using the source's
-            // byte length — both went through identical
-            // strip_for_win/replace passes so the lengths line up.
-            let remainder = &case_path[cmp_source.len()..];
-            let target_norm = target_prefix
-                .trim_end_matches('/')
-                .trim_end_matches('\\');
-            let remainder_trimmed = remainder.trim_start_matches('/').trim_start_matches('\\');
-            let translated = if remainder_trimmed.is_empty() {
-                target_norm.to_string()
-            } else {
-                format!("{}/{}", target_norm, remainder_trimmed)
-            };
-            return to_native_path(&translated, target_os);
-        }
+    match (min_paths::Os::from_tag(source_os), min_paths::Os::from_tag(target_os)) {
+        (Some(src), Some(dst)) => min_paths::map::translate(src, dst, path, &to_min_paths_mappings(mappings)),
+        _ => to_native_path(path, target_os),
     }
-
-    // No mapping found — just convert to native path separators
-    to_native_path(path, target_os)
 }
 
 /// Translate a path from one OS to the local OS using path mapping rules.
@@ -611,11 +404,7 @@ pub fn to_identity_storage(
 
 /// Convert forward-slash path to native OS path separators.
 pub fn to_native_path(path: &str, os: &str) -> String {
-    if os == "win" {
-        path.replace('/', "\\")
-    } else {
-        path.replace('\\', "/")
-    }
+    min_paths::map::to_native(path, min_paths::Os::from_tag(os).unwrap_or(min_paths::Os::Mac))
 }
 
 #[cfg(test)]

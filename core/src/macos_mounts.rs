@@ -126,37 +126,9 @@ fn strip_port(host: &str) -> &str {
     }
 }
 
-/// Minimal RFC 3986 percent-decoding (`%20` → space). Malformed
-/// escapes are kept verbatim so a stray `%` can't erase characters;
-/// invalid UTF-8 is replaced lossily — this only feeds comparisons.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            // Byte-sliced (not str-sliced) so a multibyte char right
-            // after a stray `%` can't land us on a non-char boundary.
-            // Both chars must be hex digits: from_str_radix alone
-            // accepts a sign, so "%+1" would decode to 0x01.
-            let hex = &bytes[i + 1..i + 3];
-            if let Some(v) = hex
-                .iter()
-                .all(|b| b.is_ascii_hexdigit())
-                .then(|| std::str::from_utf8(hex).ok())
-                .flatten()
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-            {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+/// Minimal RFC 3986 percent-decoding (min-paths' one codec: malformed escapes kept verbatim, both chars must be hex,
+/// invalid UTF-8 replaced lossily — this only feeds comparisons).
+fn percent_decode(s: &str) -> String { min_paths::url::percent_decode(s) }
 
 /// `\\host\share\sub\` → `host/share/sub`: the comparison key a UNC
 /// yields for `MountLine::source`. Empty segments (doubled

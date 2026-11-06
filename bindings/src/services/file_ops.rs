@@ -42,6 +42,9 @@ pub mod qobject {
         /// decodes, and normalises Windows drive paths.
         #[qinvokable]
         fn urls_to_paths(self: &FileOps, urls_json: QString) -> QString;
+        /// A raw `text/uri-list` → JSON array of its URIs (CRLF/LF, comments dropped) — min-paths; the QML drop sites use it.
+        #[qinvokable]
+        fn decode_uri_list(self: &FileOps, text: QString) -> QString;
 
         /// True if both paths live on the same volume — used by drop
         /// handlers to pick the default action (move same-volume,
@@ -373,25 +376,15 @@ impl qobject::FileOps {
     }
 
     fn to_uri_list(self: &qobject::FileOps, paths_json: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        // RFC 2483 with CRLF after EVERY entry incl. the last (Qt drops the last URL into CF_HDROP otherwise) and
+        // unrepresentable paths skipped (a four-slash URL wedges Windows DnD) — min-paths `uri_list::encode`.
         let paths: Vec<String> = serde_json::from_str(&paths_json.to_string()).unwrap_or_default();
-        // RFC 2483 text/uri-list: each URI on its own line terminated
-        // by CRLF, INCLUDING the last one. Without a trailing CRLF
-        // some Qt code paths drop the final URL when translating to
-        // the native Windows CF_HDROP drop format — symptom on
-        // multi-select drag-out is that only one file gets carried
-        // even though the source MIME string had several. Always
-        // emit the closing CRLF.
-        let mut out = String::new();
-        for p in paths {
-            // Drive-less / unrepresentable paths return None and are
-            // skipped — emitting `file:////…` for them wedges Windows
-            // drag-and-drop. See ufb_core::utils::path_to_file_url.
-            if let Some(url) = ufb_core::utils::path_to_file_url(&p) {
-                out.push_str(&url);
-                out.push_str("\r\n");
-            }
-        }
-        cxx_qt_lib::QString::from(&out)
+        cxx_qt_lib::QString::from(&min_paths::url::uri_list::encode(&paths))
+    }
+
+    fn decode_uri_list(self: &qobject::FileOps, text: cxx_qt_lib::QString) -> cxx_qt_lib::QString {
+        let uris = min_paths::url::uri_list::decode(&text.to_string());
+        cxx_qt_lib::QString::from(&serde_json::to_string(&uris).unwrap_or_else(|_| "[]".into()))
     }
 
     fn urls_to_paths(
@@ -399,7 +392,7 @@ impl qobject::FileOps {
         urls_json: cxx_qt_lib::QString,
     ) -> cxx_qt_lib::QString {
         let urls: Vec<String> = serde_json::from_str(&urls_json.to_string()).unwrap_or_default();
-        let paths: Vec<String> = urls.into_iter().filter_map(|u| file_url_to_path(&u)).collect();
+        let paths: Vec<String> = urls.into_iter().filter_map(|u| min_paths::url::file_url_to_path(&u)).collect();
         let json = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into());
         cxx_qt_lib::QString::from(&json)
     }
@@ -409,7 +402,8 @@ impl qobject::FileOps {
         a: cxx_qt_lib::QString,
         b: cxx_qt_lib::QString,
     ) -> bool {
-        same_volume_impl(&a.to_string(), &b.to_string())
+        // Device identity (min-paths, row 119): a drag between two volumes now defaults to Copy on macOS too.
+        min_paths::volume::same_volume(Path::new(&a.to_string()), Path::new(&b.to_string()))
     }
 
     fn copy_files(
@@ -888,108 +882,6 @@ fn parse_copy_move(
         dest
     );
     Some(CopyMoveRequest { sources, dest })
-}
-
-/// Reverse: a `file://...` URL → local path. Returns None for non-file
-/// URLs or anything that can't be made into a path.
-fn file_url_to_path(url: &str) -> Option<String> {
-    let stripped = url.strip_prefix("file://")?;
-    // Windows: `file:///C:/foo` → strip the leading `/` so we get `C:/foo`.
-    let body = if cfg!(target_os = "windows") {
-        stripped
-            .strip_prefix('/')
-            .filter(|s| s.len() >= 2 && s.as_bytes()[1] == b':')
-            .unwrap_or(stripped)
-    } else {
-        stripped
-    };
-    let decoded = percent_decode(body);
-    if decoded.is_empty() {
-        return None;
-    }
-    Some(if cfg!(target_os = "windows") {
-        decoded.replace('/', "\\")
-    } else {
-        decoded
-    })
-}
-
-/// Tiny percent-decoder. We only need ASCII bytes back to ASCII; UTF-8
-/// pass-through happens for free since we operate on bytes.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                out.push(((h << 4) | l) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn same_volume_impl(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    if cfg!(target_os = "windows") {
-        // Drive letter compare. Network paths starting with `\\server\share`
-        // count as same-volume when the share matches.
-        match (drive_or_unc(a), drive_or_unc(b)) {
-            (Some(va), Some(vb)) => va.eq_ignore_ascii_case(&vb),
-            _ => false,
-        }
-    } else {
-        // Crude same-mount heuristic: walk parents of both paths until
-        // the metadata's `dev` field matches. Without that field on
-        // stable Rust we fall back to comparing the leading path
-        // segment. Good enough for the path-first first cut.
-        Path::new(a)
-            .components()
-            .next()
-            .zip(Path::new(b).components().next())
-            .map(|(ca, cb)| ca == cb)
-            .unwrap_or(false)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn drive_or_unc(p: &str) -> Option<String> {
-    let trimmed = p.trim_start();
-    if trimmed.starts_with("\\\\") || trimmed.starts_with("//") {
-        // \\server\share\rest → \\server\share
-        let bytes = trimmed.as_bytes();
-        let mut slash_count = 0;
-        for (i, b) in bytes.iter().enumerate() {
-            if *b == b'\\' || *b == b'/' {
-                slash_count += 1;
-                if slash_count == 4 {
-                    return Some(trimmed[..i].to_string());
-                }
-            }
-        }
-        // No fourth slash — entire string is `\\server\share`.
-        return Some(trimmed.to_string());
-    }
-    let bytes = trimmed.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        Some(trimmed[..2].to_string())
-    } else {
-        None
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn drive_or_unc(_p: &str) -> Option<String> {
-    None
 }
 
 // ─── Active-ops state + events forwarder ──────────────────────────────

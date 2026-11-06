@@ -389,6 +389,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "min-paths",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2053,6 +2054,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "min-paths"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2198,9 +2211,9 @@ dependencies = [
 
 [[package]]
 name = "objc2"
-version = "0.6.4"
+version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
 dependencies = [
  "objc2-encode",
 ]
@@ -3777,6 +3790,7 @@ dependencies = [
  "libc",
  "log",
  "md5",
+ "min-paths",
  "netfs-guard",
  "notify",
  "objc2",

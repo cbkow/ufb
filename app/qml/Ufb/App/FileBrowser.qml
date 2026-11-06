@@ -700,14 +700,8 @@ Rectangle {
         var raw = ""
         try { raw = drop.getDataAsString("text/uri-list") || "" } catch (e) {}
         if (raw.length > 0) {
-            var lines = raw.split(/\r?\n/)
             var rawUris = []
-            for (var j = 0; j < lines.length; ++j) {
-                var line = lines[j].trim()
-                if (line.length > 0 && line.charAt(0) !== "#") {
-                    rawUris.push(line)
-                }
-            }
+            try { rawUris = JSON.parse(FileOps.decode_uri_list(raw)) } catch (e) {}
             if (rawUris.length > uris.length) uris = rawUris
         }
         if (uris.length === 0) return []

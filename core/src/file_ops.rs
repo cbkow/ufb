@@ -9,7 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 /// A single filesystem entry (file or directory) returned by listings,
 /// search, drag/drop, and clipboard operations.
@@ -239,420 +238,28 @@ pub struct PasteIntent {
     pub effect: PasteEffect,
 }
 
-/// Process-global registry of "paths that UFB itself most recently
-/// cut" plus the OS clipboard sequence number captured at write time.
-/// Used so paste, in any pane / tab, can ask "did *we* cut this?"
-/// without per-pane state. The sequence number lets us detect when
-/// another app has overwritten the clipboard since our cut, in which
-/// case the record is stale and paste falls back to copy.
-struct LastCutRecord {
-    paths: Vec<String>, // sorted, for set-equality compare
-    sequence: i64,
-}
-
-fn last_cut_registry() -> &'static Mutex<Option<LastCutRecord>> {
-    static REG: OnceLock<Mutex<Option<LastCutRecord>>> = OnceLock::new();
-    REG.get_or_init(|| Mutex::new(None))
-}
-
-/// Current OS clipboard generation. Windows: GetClipboardSequenceNumber.
-/// macOS: NSPasteboard.changeCount. Both increment monotonically every
-/// time anything writes to the system clipboard.
-fn current_clipboard_sequence() -> i64 {
-    #[cfg(target_os = "windows")]
-    {
-        unsafe {
-            windows::Win32::System::DataExchange::GetClipboardSequenceNumber() as i64
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // objc2-app-kit ≥ 0.3 demarcates these as safe and returns
-        // `isize` from changeCount. Cast widens to our cross-platform
-        // i64 sequence type.
-        use objc2_app_kit::NSPasteboard;
-        let pb = NSPasteboard::generalPasteboard();
-        pb.changeCount() as i64
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        0
-    }
-}
-
-fn record_cut(paths: &[String]) {
-    let mut sorted: Vec<String> = paths.to_vec();
-    sorted.sort();
-    let seq = current_clipboard_sequence();
-    *last_cut_registry().lock().unwrap() = Some(LastCutRecord { paths: sorted, sequence: seq });
-}
-
-fn clear_cut_record() {
-    *last_cut_registry().lock().unwrap() = None;
-}
-
-/// True if the registry's most recent cut still owns the clipboard
-/// (sequence matches) AND the path set equals `paths`.
-fn registry_matches(paths: &[String]) -> bool {
-    let reg = last_cut_registry().lock().unwrap();
-    let Some(rec) = reg.as_ref() else { return false };
-    if rec.sequence != current_clipboard_sequence() {
-        return false;
-    }
-    let mut sorted: Vec<String> = paths.to_vec();
-    sorted.sort();
-    sorted == rec.paths
+// The clipboard file-list code (one NSURL per item via writeObjects:, CF_HDROP + Preferred DropEffect, the cut registry
+// keyed on the pasteboard sequence, the non-blocking has_paths probe) moved to min-paths `clipboard` (canon §22 row 125);
+// these keep ufb's API and types.
+fn from_min_intent(i: min_paths::clipboard::PasteIntent) -> PasteIntent {
+    PasteIntent { paths: i.paths, effect: match i.effect { min_paths::clipboard::PasteEffect::Move => PasteEffect::Move, min_paths::clipboard::PasteEffect::Copy => PasteEffect::Copy } }
 }
 
 /// Copy file paths to clipboard.
-pub fn clipboard_copy_paths(paths: &[String]) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let r = clipboard_set_paths_windows(paths, 0x01); // DROPEFFECT_COPY
-    #[cfg(target_os = "macos")]
-    let r = clipboard_copy_paths_macos(paths);
-    if r.is_ok() {
-        clear_cut_record();
-    }
-    r
-}
+pub fn clipboard_copy_paths(paths: &[String]) -> Result<(), String> { min_paths::clipboard::copy_paths(paths) }
 
-/// Cut file paths to clipboard. On Windows, sets the
-/// "Preferred DropEffect" clipboard format to DROPEFFECT_MOVE so that
-/// Explorer interprets a paste as a move (with the visual cut-pending
-/// fade on the source items). On macOS, the pasteboard has no native
-/// move/copy distinction at the file-URL layer; this is the same as
-/// `clipboard_copy_paths`. The "cut-pending" visual treatment lives
-/// in the UI side regardless.
-pub fn clipboard_cut_paths(paths: &[String]) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let r = clipboard_set_paths_windows(paths, 0x02); // DROPEFFECT_MOVE
-    #[cfg(target_os = "macos")]
-    let r = clipboard_copy_paths_macos(paths);
-    if r.is_ok() {
-        record_cut(paths);
-    }
-    r
-}
+/// Cut file paths to clipboard: Windows sets "Preferred DropEffect" = DROPEFFECT_MOVE (Explorer pastes as a move);
+/// macOS records the cut in the registry (the pasteboard has no move flavour).
+pub fn clipboard_cut_paths(paths: &[String]) -> Result<(), String> { min_paths::clipboard::cut_paths(paths) }
 
-#[cfg(target_os = "windows")]
-fn clipboard_set_paths_windows(paths: &[String], drop_effect: u32) -> Result<(), String> {
-    use clipboard_win::{raw, Clipboard};
-
-    let _clip = Clipboard::new_attempts(10)
-        .map_err(|e| format!("Failed to open clipboard: {}", e))?;
-
-    raw::empty().map_err(|e| format!("Failed to empty clipboard: {}", e))?;
-
-    raw::set_file_list(paths)
-        .map_err(|e| format!("Failed to set clipboard CF_HDROP: {}", e))?;
-
-    set_preferred_drop_effect(drop_effect);
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn set_preferred_drop_effect(effect: u32) {
-    use windows::core::w;
-    use windows::Win32::System::DataExchange::{RegisterClipboardFormatW, SetClipboardData};
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-
-    unsafe {
-        let fmt = RegisterClipboardFormatW(w!("Preferred DropEffect"));
-        if fmt == 0 {
-            return;
-        }
-        let hmem = GlobalAlloc(GMEM_MOVEABLE, 4);
-        if let Ok(hmem) = hmem {
-            let lock: *mut std::ffi::c_void = GlobalLock(hmem);
-            if !lock.is_null() {
-                std::ptr::write(lock as *mut u32, effect);
-                let _ = GlobalUnlock(hmem);
-            }
-            let _ = SetClipboardData(fmt, windows::Win32::Foundation::HANDLE(hmem.0));
-        }
-    }
-}
-
-/// Write file URLs the way Finder does: one NSURL object per file via
-/// `writeObjects:`. AppKit fans each URL out into a full pasteboard item
-/// (`public.file-url` + auto-translated legacy flavors), so Finder and
-/// every modern app can paste all of them. The previous implementation
-/// wrote a single legacy `NSFilenamesPboardType` plist string, which the
-/// UTI bridge collapsed to ONE item — multi-file copies pasted only the
-/// first file, and some readers saw nothing at all.
-#[cfg(target_os = "macos")]
-fn clipboard_copy_paths_macos(paths: &[String]) -> Result<(), String> {
-    use objc2::runtime::ProtocolObject;
-    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
-    use objc2_foundation::{NSArray, NSString, NSURL};
-
-    if paths.is_empty() {
-        return Err("No valid file paths to copy".into());
-    }
-
-    let urls: Vec<objc2::rc::Retained<NSURL>> = paths
-        .iter()
-        .map(|p| {
-            let resolved =
-                std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-            NSURL::fileURLWithPath(&NSString::from_str(&resolved.to_string_lossy()))
-        })
-        .collect();
-    let objects: Vec<&ProtocolObject<dyn NSPasteboardWriting>> =
-        urls.iter().map(|u| ProtocolObject::from_ref(&**u)).collect();
-
-    let pasteboard = NSPasteboard::generalPasteboard();
-    pasteboard.clearContents();
-    if pasteboard.writeObjects(&NSArray::from_slice(&objects)) {
-        Ok(())
-    } else {
-        Err("Failed to write file paths to pasteboard".into())
-    }
-}
-
-/// Read file URLs via `readObjectsForClasses:` — the canonical AppKit
-/// paste path. Unlike a manual `public.file-url` string scan, this
-/// resolves every URL flavor a writer may have used (per-item file-url
-/// strings, legacy `NSFilenamesPboardType` plists, AppleScript `furl`
-/// data, `file://localhost/` forms) and hands back decoded POSIX paths.
-#[cfg(target_os = "macos")]
-fn clipboard_paste_paths_macos() -> Result<Vec<String>, String> {
-    use objc2_app_kit::NSPasteboard;
-    use objc2_foundation::{NSArray, NSURL};
-
-    let pasteboard = NSPasteboard::generalPasteboard();
-    let classes = NSArray::from_slice(&[objc2::class!(NSURL)]);
-    let objects = unsafe { pasteboard.readObjectsForClasses_options(&classes, None) };
-
-    let mut paths = Vec::new();
-    if let Some(objects) = objects {
-        for obj in objects.iter() {
-            if let Some(url) = obj.downcast_ref::<NSURL>() {
-                if url.isFileURL() {
-                    if let Some(p) = url.path() {
-                        paths.push(p.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(paths)
-}
-
-/// Heuristic check: does this string look like a filesystem path?
-fn looks_like_path(s: &str) -> bool {
-    if s.len() >= 3
-        && s.as_bytes()[1] == b':'
-        && (s.as_bytes()[2] == b'\\' || s.as_bytes()[2] == b'/')
-    {
-        return s.as_bytes()[0].is_ascii_alphabetic();
-    }
-    if s.starts_with("\\\\") || s.starts_with("//") {
-        return true;
-    }
-    if s.starts_with('/') {
-        return true;
-    }
-    false
-}
-
-/// Paste file paths from clipboard.
-pub fn clipboard_paste_paths() -> Result<Vec<String>, String> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(paths) = clipboard_paste_paths_hdrop() {
-            if !paths.is_empty() {
-                return Ok(paths);
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(paths) = clipboard_paste_paths_macos() {
-            if !paths.is_empty() {
-                return Ok(paths);
-            }
-        }
-    }
-
-    // Fallback: read plain text
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("Failed to open clipboard: {}", e))?;
-    let text = clipboard
-        .get_text()
-        .map_err(|e| format!("Failed to read clipboard: {}", e))?;
-    let paths: Vec<String> = text
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && looks_like_path(l))
-        .collect();
-    Ok(paths)
-}
-
-#[cfg(target_os = "windows")]
-fn clipboard_paste_paths_hdrop() -> Result<Vec<String>, String> {
-    use clipboard_win::{raw, Clipboard};
-
-    let _clip = Clipboard::new_attempts(10)
-        .map_err(|e| format!("Failed to open clipboard: {}", e))?;
-
-    let mut file_list: Vec<String> = Vec::new();
-    raw::get_file_list(&mut file_list)
-        .map_err(|e| format!("Failed to read CF_HDROP: {}", e))?;
-
-    let paths: Vec<String> = file_list.into_iter().filter(|s| !s.is_empty()).collect();
-
-    Ok(paths)
-}
+/// Paste file paths from clipboard (native file list first, then path-looking lines of text).
+pub fn clipboard_paste_paths() -> Result<Vec<String>, String> { min_paths::clipboard::paste_paths() }
 
 /// Read paths and resolve move-vs-copy intent in one pass.
-///
-/// - **Windows**: opens the clipboard once, reads `CF_HDROP` for the
-///   paths and `"Preferred DropEffect"` for the effect. Explorer's
-///   own Cut sets DROPEFFECT_MOVE, so this transparently supports
-///   Explorer→UFB cut→paste = move.
-/// - **macOS**: there is no native move/copy distinction at the
-///   pasteboard layer. The effect is `Move` only when our internal
-///   registry shows that *we* cut these exact paths and the clipboard
-///   hasn't been touched since. Anything else is `Copy`.
-/// - **Plain text fallback**: always `Copy` — text has no move semantics.
-pub fn clipboard_paste_intent() -> Result<PasteIntent, String> {
-    #[cfg(target_os = "windows")]
-    {
-        match clipboard_paste_intent_windows() {
-            Ok(intent) if !intent.paths.is_empty() => return Ok(intent),
-            _ => {}
-        }
-    }
+pub fn clipboard_paste_intent() -> Result<PasteIntent, String> { min_paths::clipboard::paste_intent().map(from_min_intent) }
 
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(paths) = clipboard_paste_paths_macos() {
-            if !paths.is_empty() {
-                let effect = if registry_matches(&paths) {
-                    PasteEffect::Move
-                } else {
-                    PasteEffect::Copy
-                };
-                return Ok(PasteIntent { paths, effect });
-            }
-        }
-    }
-
-    // Plain-text fallback (URLs/paths in clipboard text).
-    let paths = clipboard_paste_paths()?;
-    Ok(PasteIntent {
-        paths,
-        effect: PasteEffect::Copy,
-    })
-}
-
-/// Cheap, non-blocking "could Paste do anything?" probe for menu
-/// enablement. Runs on the GUI thread every time a context menu opens,
-/// so it must never wait on another process.
-///
-/// On Windows this deliberately does NOT call `GetClipboardData` (which
-/// is what `clipboard_paste_intent` does): when the clipboard owner used
-/// delayed rendering — Explorer, Office, browsers and the Adobe apps all
-/// do — `GetClipboardData` is a synchronous `WM_RENDERFORMAT` round-trip
-/// to that owner, and a busy or wedged owner stalls *our* GUI thread
-/// until Windows flags UFB as "not responding".
-/// `IsClipboardFormatAvailable` only inspects the format list and
-/// returns immediately. The actual paste still goes through
-/// `clipboard_paste_intent` and reads the data for real.
-///
-/// `CF_UNICODETEXT` counts as "maybe" because the paste path accepts
-/// path-looking text; we can't tell without rendering it, so Paste is
-/// enabled and becomes a no-op if the text turns out not to be paths.
-pub fn clipboard_has_paths() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
-        // Standard clipboard format ids (winuser.h).
-        const CF_UNICODETEXT: u32 = 13;
-        const CF_HDROP: u32 = 15;
-        unsafe {
-            IsClipboardFormatAvailable(CF_HDROP).is_ok()
-                || IsClipboardFormatAvailable(CF_UNICODETEXT).is_ok()
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        clipboard_paste_intent()
-            .map(|intent| !intent.paths.is_empty())
-            .unwrap_or(false)
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn clipboard_paste_intent_windows() -> Result<PasteIntent, String> {
-    use clipboard_win::{raw, Clipboard};
-
-    let _clip = Clipboard::new_attempts(10)
-        .map_err(|e| format!("Failed to open clipboard: {}", e))?;
-
-    let mut file_list: Vec<String> = Vec::new();
-    raw::get_file_list(&mut file_list)
-        .map_err(|e| format!("Failed to read CF_HDROP: {}", e))?;
-    let paths: Vec<String> = file_list.into_iter().filter(|s| !s.is_empty()).collect();
-
-    if paths.is_empty() {
-        return Ok(PasteIntent {
-            paths,
-            effect: PasteEffect::Copy,
-        });
-    }
-
-    // Authoritative on Windows: Explorer/UFB Cut both write
-    // DROPEFFECT_MOVE here. Fall back to the registry only if the
-    // format isn't present at all (some apps publish CF_HDROP without
-    // a Preferred DropEffect).
-    let effect = match read_preferred_drop_effect_holding_clipboard() {
-        Some(true) => PasteEffect::Move,
-        Some(false) => PasteEffect::Copy,
-        None => {
-            if registry_matches(&paths) {
-                PasteEffect::Move
-            } else {
-                PasteEffect::Copy
-            }
-        }
-    };
-
-    Ok(PasteIntent { paths, effect })
-}
-
-/// Read the `"Preferred DropEffect"` clipboard format. Caller must
-/// already hold the clipboard open. Returns `Some(true)` for MOVE,
-/// `Some(false)` for any other effect, `None` if the format isn't
-/// present.
-#[cfg(target_os = "windows")]
-fn read_preferred_drop_effect_holding_clipboard() -> Option<bool> {
-    use windows::core::w;
-    use windows::Win32::Foundation::{HANDLE, HGLOBAL};
-    use windows::Win32::System::DataExchange::{GetClipboardData, RegisterClipboardFormatW};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-
-    unsafe {
-        let fmt = RegisterClipboardFormatW(w!("Preferred DropEffect"));
-        if fmt == 0 {
-            return None;
-        }
-        let handle: HANDLE = GetClipboardData(fmt).ok()?;
-        let hmem = HGLOBAL(handle.0);
-        let lock: *mut std::ffi::c_void = GlobalLock(hmem);
-        if lock.is_null() {
-            return None;
-        }
-        let effect = std::ptr::read(lock as *const u32);
-        let _ = GlobalUnlock(hmem);
-        // DROPEFFECT_MOVE = 0x02
-        Some((effect & 0x02) != 0)
-    }
-}
+/// Cheap, non-blocking "could Paste do anything?" probe for menu enablement (never renders delayed clipboard data).
+pub fn clipboard_has_paths() -> bool { min_paths::clipboard::has_paths() }
 
 /// Reveal a path in the native file manager. Selects the item in
 /// its parent folder.
@@ -1348,20 +955,12 @@ fn rename_template_file(name: &str, item_name: &str) -> String {
 /// Put a plain-text string on the system clipboard. Used for the
 /// "Copy Path" / "Copy Filename" menu actions where we're not
 /// transferring file objects — just human-readable text.
-pub fn clipboard_copy_text(text: &str) -> Result<(), String> {
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.set_text(text.to_string()))
-        .map_err(|e| format!("Failed to write text to clipboard: {}", e))
-}
+pub fn clipboard_copy_text(text: &str) -> Result<(), String> { min_paths::clipboard::copy_text(text) }
 
 /// Plain text currently on the clipboard, or "" (no text / error).
 /// Used to prefill the New Web Link dialog when the clipboard holds
 /// a URL.
-pub fn clipboard_text() -> String {
-    arboard::Clipboard::new()
-        .and_then(|mut cb| cb.get_text())
-        .unwrap_or_default()
-}
+pub fn clipboard_text() -> String { min_paths::clipboard::clipboard_text() }
 
 // ── Web links (.url / .webloc) ──────────────────────────────────────
 //
@@ -1459,39 +1058,10 @@ fn parse_webloc_xml(text: &str) -> Option<String> {
     )
 }
 
-/// Turn a user-typed link name into a safe `.url` file name: path
-/// separators and control characters become "-", a trailing ".url"
-/// is not doubled, and an empty name falls back to the URL's host.
-pub fn web_link_file_name(name: &str, url: &str) -> String {
-    let mut base: String = name
-        .trim()
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
-            c if c.is_control() => '-',
-            c => c,
-        })
-        .collect();
-    base = base.trim().trim_end_matches('.').to_string();
-    if base.to_ascii_lowercase().ends_with(".url") {
-        base.truncate(base.len() - 4);
-    }
-    if base.is_empty() {
-        base = url
-            .trim()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or("")
-            .trim_start_matches("www.")
-            .to_string();
-    }
-    if base.is_empty() {
-        base = "Link".to_string();
-    }
-    format!("{}.url", base)
-}
+/// Turn a user-typed link name into a safe `.url` file name (min-paths `names`: separators and control characters
+/// become "-", a trailing ".url" is not doubled, a Windows reserved name gets a "_", an empty name falls back to the URL's
+/// host).
+pub fn web_link_file_name(name: &str, url: &str) -> String { min_paths::names::web_link_file_name(name, url) }
 
 /// Create `<dir>/<name>.url` pointing at `url`. Never overwrites: a
 /// collision gets a " 2", " 3", … suffix. Returns the created path.
@@ -1663,35 +1233,13 @@ fn new_op_id(prefix: &str) -> String {
     format!("{}-{}-{}", prefix, std::process::id(), n)
 }
 
-/// Drop-onto-self guard. If user drops files back onto the folder they
-/// came from (e.g. drag out → cursor flicks back into app → drop on
-/// source panel), `target == src_path`. fs_extra opens the destination
-/// with `File::create` BEFORE reading the source, which truncates the
-/// source to zero bytes. Skip these items.
+/// Drop guards (min-paths `volume::drop_guard`): a file dropped back where it came from (fs_extra would truncate the
+/// source), or a folder dropped into itself / one of its own subfolders. Skip these items.
 fn is_drop_onto_self(src: &Path, target: &Path) -> bool {
-    if src == target {
-        return true;
+    match min_paths::volume::drop_guard(src, target) {
+        Some(reason) => { log::info!("[drop guard] {}: src={} target={}", reason, src.display(), target.display()); true }
+        None => false,
     }
-    if let (Ok(s), Ok(t)) = (
-        std::fs::canonicalize(src),
-        std::fs::canonicalize(target.parent().unwrap_or(target)).map(|p| {
-            target
-                .file_name()
-                .map(|fname| p.join(fname))
-                .unwrap_or(p)
-        }),
-    ) {
-        let norm = |p: &Path| {
-            p.to_string_lossy()
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .to_lowercase()
-        };
-        if norm(&s) == norm(&t) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Copy files / directories with progress events.
