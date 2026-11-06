@@ -13,7 +13,9 @@ pub use fallback::stale_dir_blocking;
 pub use fallback::MacosMount;
 pub use fallback::MacosMountError;
 pub use netfs::cancel_inflight_mounts;
+pub use netfs::daemon_wedged;
 pub use netfs::inflight_count;
+pub use netfs::{NETAUTH_WEDGED_NOTICE, NOTICE_FIX_RESTART_NETAUTH, NOTICE_FIX_RMDIR_STALE_DIR};
 
 /// macOS App Group identifier shared by ufb-agent (this binary), the Qt
 /// main app (UFB.app), the Swift menu-bar tray (UFBTray.app), and the

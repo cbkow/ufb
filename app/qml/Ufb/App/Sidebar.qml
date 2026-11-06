@@ -190,6 +190,7 @@ Rectangle {
                     unmanaged: m.unmanaged === true,
                     notice: m.notice || "",
                     noticeFixable: m.noticeFixable === true,
+                    noticeFix: m.noticeFix || "",
                     // A sync mount the agent couldn't start because the
                     // WinFsp driver isn't installed — users install it
                     // themselves (the Store package can't ship a driver).
@@ -796,13 +797,18 @@ Rectangle {
                             }
                         }
                     }
-                    // Actionable half of the drift notice: the
-                    // expected /Volumes name is blocked by a stale
-                    // leftover folder (empty, unmounted). The pill
-                    // removes it with admin rights (one system auth
-                    // prompt) and restarts the mount so it lands on
-                    // the clean name. A live foreign volume never
-                    // sets noticeFixable — no pill, tooltip only.
+                    // Actionable half of a notice. Two kinds, told
+                    // apart by noticeFix:
+                    //  - drift: the expected /Volumes name is blocked
+                    //    by a stale leftover folder (empty, unmounted).
+                    //    The pill removes it with admin rights (one
+                    //    system auth prompt) and restarts the mount so
+                    //    it lands on the clean name. A live foreign
+                    //    volume never sets noticeFixable — tooltip only.
+                    //  - restart_netauth: the mount failed because
+                    //    macOS's NetAuthSysAgent is wedged (every NetFS
+                    //    mount on the Mac hangs). The pill restarts the
+                    //    daemon (user-owned, no prompt) and retries.
                     Rectangle {
                         visible: model.noticeFixable === true
                         Layout.alignment: Qt.AlignVCenter
@@ -816,7 +822,8 @@ Rectangle {
                         Label {
                             id: fixDriftLabel
                             anchors.centerIn: parent
-                            text: qsTr("Fix…")
+                            text: model.noticeFix === "restart_netauth"
+                                ? qsTr("Restart…") : qsTr("Fix…")
                             color: "#ffffff"
                             font.pixelSize: Theme.font.sizeTiny
                             font.bold: true
@@ -831,10 +838,10 @@ Rectangle {
                                 // navigate-on-click MouseArea doesn't
                                 // also fire.
                                 mouse.accepted = true
-                                console.log("[Sidebar] Fix pill clicked for", model.mountId)
-                                var err = Mount.fix_blocked_mountpoint(model.mountId)
+                                console.log("[Sidebar] Fix pill clicked for", model.mountId, model.noticeFix)
+                                var err = Mount.fix_mount_notice(model.mountId, model.noticeFix)
                                 if (err && err.length > 0)
-                                    console.warn("[Sidebar] fix_blocked_mountpoint:", err)
+                                    console.warn("[Sidebar] fix_mount_notice:", err)
                             }
                         }
                     }

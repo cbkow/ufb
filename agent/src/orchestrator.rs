@@ -2243,25 +2243,42 @@ impl Orchestrator {
             _ => None,
         };
 
-        let (notice, notice_fixable) = {
+        let (notice, notice_fixable, notice_fix) = {
             #[cfg(target_os = "macos")]
             {
+                use crate::platform::macos::{
+                    NETAUTH_WEDGED_NOTICE, NOTICE_FIX_RESTART_NETAUTH, NOTICE_FIX_RMDIR_STALE_DIR,
+                };
                 // Mounted: drift notice. Stopped: an unmount failure
                 // from the disconnect (audit 2026-09-11 P2). Cleared by
-                // the next mount_drive.
+                // the next mount_drive. Mounting / Error: a NetFS
+                // cancel this process issued went unanswered, i.e.
+                // NetAuthSysAgent is wedged (2026-11-05) — the row
+                // offers to restart it; the flag clears itself once the
+                // daemon answers or its pid changes.
                 match &self.state {
                     MountState::Mounted(_) | MountState::Stopped => match self.mount_notice.clone() {
-                        Some((text, fixable)) => {
-                            (Some(text), if fixable { Some(true) } else { None })
+                        Some((text, true)) => {
+                            (Some(text), Some(true), Some(NOTICE_FIX_RMDIR_STALE_DIR.to_string()))
                         }
-                        None => (None, None),
+                        Some((text, false)) => (Some(text), None, None),
+                        None => (None, None, None),
                     },
-                    _ => (None, None),
+                    MountState::Mounting | MountState::Error(_)
+                        if crate::platform::macos::daemon_wedged() =>
+                    {
+                        (
+                            Some(NETAUTH_WEDGED_NOTICE.to_string()),
+                            Some(true),
+                            Some(NOTICE_FIX_RESTART_NETAUTH.to_string()),
+                        )
+                    }
+                    _ => (None, None, None),
                 }
             }
             #[cfg(not(target_os = "macos"))]
             {
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -2275,6 +2292,7 @@ impl Orchestrator {
             mounted_at,
             notice,
             notice_fixable,
+            notice_fix,
         };
 
         // Stash into the shared state_cache before broadcasting so

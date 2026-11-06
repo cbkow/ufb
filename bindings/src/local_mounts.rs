@@ -218,11 +218,15 @@ pub fn apply_config(
     }
 }
 
+/// `notice`: row-notice text plus the fix the GUI's pill performs
+/// (`None` = informational only, no pill). Fix kinds are the
+/// `notice_fix` wire values (`rmdir_stale_dir` / `restart_netauth`).
 fn emit(events: &MountEventsArc, spec: &LocalMountSpec, state: &str, detail: String,
-        mounted_at: Option<String>, notice: Option<(String, bool)>) {
-    let (notice, notice_fixable) = match notice {
-        Some((text, fixable)) => (Some(text), if fixable { Some(true) } else { None }),
-        None => (None, None),
+        mounted_at: Option<String>, notice: Option<(String, Option<&'static str>)>) {
+    let (notice, notice_fixable, notice_fix) = match notice {
+        Some((text, Some(fix))) => (Some(text), Some(true), Some(fix.to_string())),
+        Some((text, None)) => (Some(text), None, None),
+        None => (None, None, None),
     };
     events.local_state_update(&MountStateUpdateMsg {
         mount_id: spec.id.clone(),
@@ -233,6 +237,7 @@ fn emit(events: &MountEventsArc, spec: &LocalMountSpec, state: &str, detail: Str
         mounted_at,
         notice,
         notice_fixable,
+        notice_fix,
     });
 }
 
@@ -272,6 +277,24 @@ mod sys {
 
         pub fn is_ours(path: &str, nas_share_path: &str) -> Option<bool> {
             macos_mounts::mount_at_path_is_ours(path, nas_share_path)
+        }
+
+        /// Fix kind for a fixable drift notice (admin rmdir of the
+        /// stale placeholder).
+        pub const DRIFT_FIX: &str = macos_mounts::NOTICE_FIX_RMDIR_STALE_DIR;
+
+        /// Row notice for a failed mount when this process's NetFS
+        /// cancel went unanswered — NetAuthSysAgent is wedged
+        /// (2026-11-05) and every mount on the Mac hangs until it is
+        /// restarted. The pill restarts it and retries. None when the
+        /// failure was anything else.
+        pub fn failure_notice() -> Option<(String, Option<&'static str>)> {
+            macos_mounts::daemon_wedged().then(|| {
+                (
+                    macos_mounts::NETAUTH_WEDGED_NOTICE.to_string(),
+                    Some(macos_mounts::NOTICE_FIX_RESTART_NETAUTH),
+                )
+            })
         }
 
         /// Drift notice — same semantics as the agent's `drift_notice`:
@@ -360,6 +383,15 @@ mod sys {
 
         pub fn is_ours(path: &str, nas_share_path: &str) -> Option<bool> {
             windows_mounts::mount_at_letter_is_ours(path, nas_share_path)
+        }
+
+        /// Windows drift is never fixable; the constant exists so the
+        /// OS-agnostic caller reads the same either way.
+        pub const DRIFT_FIX: &str = "";
+
+        /// No wedge-able mount daemon on Windows.
+        pub fn failure_notice() -> Option<(String, Option<&'static str>)> {
+            None
         }
 
         /// Drift = mounted at a different letter than configured
@@ -512,6 +544,9 @@ async fn run_mount(
                     Ok((path, notice)) => {
                         mounted_at = Some(path.clone());
                         log::info!("[local-mounts] {} mounted at {}", spec.id, path);
+                        let notice = notice.map(|(text, fixable)| {
+                            (text, fixable.then_some(sys::DRIFT_FIX))
+                        });
                         emit(&events, &spec, "mounted", "Mounted".into(),
                              Some(path), notice);
                     }
@@ -528,7 +563,7 @@ async fn run_mount(
                     }
                     Err(sys::MountError::Other(e)) => {
                         log::warn!("[local-mounts] {} mount failed: {}", spec.id, e);
-                        emit(&events, &spec, "error", e, None, None);
+                        emit(&events, &spec, "error", e, None, sys::failure_notice());
                         // Fall through to the wait: heartbeat tick
                         // doubles as retry-with-backoff (30s).
                     }

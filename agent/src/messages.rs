@@ -148,6 +148,14 @@ pub struct MountStateUpdateMsg {
     /// foreign occupant, which must never be touched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice_fixable: Option<bool>,
+    /// Which fix the GUI's pill performs when `notice_fixable`:
+    /// `"rmdir_stale_dir"` (admin removal of the placeholder dir) or
+    /// `"restart_netauth"` (restart the wedged NetAuthSysAgent, then
+    /// retry the mount). Absent on the wire from agents older than
+    /// 1.4.1 — the GUI treats absent as `rmdir_stale_dir`, which was
+    /// the only fix that existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +268,7 @@ mod tests {
             mounted_at: None,
             notice: None,
             notice_fixable: None,
+            notice_fix: None,
         });
 
         let json = serde_json::to_string(&msg).unwrap();
@@ -334,7 +343,8 @@ mod tests {
                 needs_elevation: None,
                 mounted_at: Some("/Volumes/x".into()),
                 notice: None,
-            notice_fixable: None,
+                notice_fixable: None,
+                notice_fix: None,
             }),
         ];
         for v in variants {

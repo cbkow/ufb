@@ -895,6 +895,16 @@ pub mod qobject {
         /// started, or an error message. macOS only.
         #[qinvokable]
         fn fix_blocked_mountpoint(self: Pin<&mut Mount>, mount_id: QString) -> QString;
+
+        /// Perform the fix a row's notice offers (`noticeFix` from
+        /// mount_states_json): `"restart_netauth"` restarts the
+        /// wedged NetAuthSysAgent on a worker thread and then
+        /// restarts the mount; anything else (including "" from an
+        /// agent older than 1.4.1) is the stale-directory removal of
+        /// `fix_blocked_mountpoint`. Returns "" when the fix was
+        /// started, or an error message. macOS only.
+        #[qinvokable]
+        fn fix_mount_notice(self: Pin<&mut Mount>, mount_id: QString, fix: QString) -> QString;
         #[qinvokable]
         fn clear_sync_cache(self: Pin<&mut Mount>, mount_id: QString) -> QString;
         #[qinvokable]
@@ -1240,6 +1250,52 @@ impl qobject::Mount {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = mount_id;
+            cxx_qt_lib::QString::from("unsupported on this platform")
+        }
+    }
+    fn fix_mount_notice(
+        self: core::pin::Pin<&mut qobject::Mount>,
+        mount_id: cxx_qt_lib::QString,
+        fix: cxx_qt_lib::QString,
+    ) -> cxx_qt_lib::QString {
+        #[cfg(target_os = "macos")]
+        {
+            if fix.to_string() != ufb_core::macos_mounts::NOTICE_FIX_RESTART_NETAUTH {
+                return self.fix_blocked_mountpoint(mount_id);
+            }
+            use cxx_qt::Threading;
+            let id = mount_id.to_string();
+            log::info!("[mounts] fix_mount_notice({}) — restarting NetAuthSysAgent", id);
+            let qt_handle: cxx_qt::CxxQtThread<qobject::Mount> = self.as_ref().qt_thread();
+            // Worker thread: the restart waits up to a few seconds
+            // for the daemon to exit — must not freeze the Qt loop.
+            std::thread::spawn(move || {
+                match ufb_core::macos_mounts::restart_netauth_agent() {
+                    Ok(stopped) => {
+                        log::info!(
+                            "[mounts] NetAuthSysAgent restart done (stopped pid {:?}) — restarting mount {}",
+                            stopped, id
+                        );
+                        // Give the processes that had requests parked
+                        // in the old daemon a moment to see their
+                        // callbacks before the retry lands.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let _ = qt_handle.queue(
+                            move |mount: core::pin::Pin<&mut qobject::Mount>| {
+                                let _ = mount.restart_mount(
+                                    cxx_qt_lib::QString::from(id.as_str()),
+                                );
+                            },
+                        );
+                    }
+                    Err(e) => log::warn!("[mounts] NetAuthSysAgent restart failed: {}", e),
+                }
+            });
+            cxx_qt_lib::QString::from("")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (mount_id, fix);
             cxx_qt_lib::QString::from("unsupported on this platform")
         }
     }
@@ -1916,6 +1972,10 @@ fn serialize_merged(
         /// True when the drift is a stale leftover directory the
         /// row can offer to remove (admin rmdir + restart).
         notice_fixable: bool,
+        /// Which fix the pill performs ("rmdir_stale_dir" /
+        /// "restart_netauth"; "" when not fixable or from an older
+        /// agent, which the GUI reads as rmdir_stale_dir).
+        notice_fix: &'a str,
         /// "Fake" mount: UI-only bookmark, no agent lifecycle. Rows
         /// render without state pill / lifecycle buttons and are
         /// always navigable.
@@ -2017,6 +2077,9 @@ fn serialize_merged(
                 notice_fixable: st
                     .and_then(|s| s.notice_fixable)
                     .unwrap_or(false),
+                notice_fix: st
+                    .and_then(|s| s.notice_fix.as_deref())
+                    .unwrap_or(""),
                 unmanaged,
             }
         })

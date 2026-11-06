@@ -794,6 +794,370 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 /// `NetFSMountURLCancel` before giving up on a clean retirement.
 const CANCEL_GRACE: Duration = Duration::from_secs(10);
 
+// ── Wedged-daemon detection + restart (2026-11-05) ───────────────────
+//
+// Twin of the agent's netfs.rs section (see its commentary for the
+// incident). Second wedge mode seen live: NetAuthSysAgent's SMB plugin
+// parked in the post-session LSARPC account lookup after several
+// sessions to one server were set up at once; `NetFSMountURLCancel`
+// returned 0 but the request was never retired, and every NetFS mount
+// on the machine — Finder included — queued behind it. The GUI owns
+// the remedy: `restart_netauth_agent` below, driven by the sidebar's
+// Fix pill. No admin rights are involved: the daemon runs as the
+// logged-in user and launchd respawns it on demand.
+
+/// Row-notice text for a wedged daemon. Kept identical in both twins.
+pub const NETAUTH_WEDGED_NOTICE: &str =
+    "macOS's mount service (NetAuthSysAgent) is stuck — mounts from every app hang until it is restarted";
+/// `MountStateUpdateMsg.notice_fix` value for that notice.
+pub const NOTICE_FIX_RESTART_NETAUTH: &str = "restart_netauth";
+/// `notice_fix` value for the stale-placeholder drift notice.
+pub const NOTICE_FIX_RMDIR_STALE_DIR: &str = "rmdir_stale_dir";
+
+struct WedgeInfo {
+    /// NetAuthSysAgent's pid when the wedge was detected (None when
+    /// pgrep couldn't tell). A different pid later means the parked
+    /// threads died with the old process.
+    pid: Option<u32>,
+    /// Host of the request whose cancel went unanswered. A completed
+    /// request to this host clears the flag.
+    host: String,
+    /// Last pid re-check, so `daemon_wedged` doesn't fork pgrep on
+    /// every state-update tick.
+    checked_at: std::time::Instant,
+}
+
+static WEDGE: Mutex<Option<WedgeInfo>> = Mutex::new(None);
+
+fn wedge() -> MutexGuard<'static, Option<WedgeInfo>> {
+    WEDGE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Minimum interval between pid re-checks in `daemon_wedged`.
+const WEDGE_RECHECK: Duration = Duration::from_secs(2);
+
+/// Pid of the current user's NetAuthSysAgent, if it is running. It is
+/// launched on demand by the NetFS framework, so None is normal when
+/// nothing has mounted anything yet this login session.
+pub fn netauth_agent_pid() -> Option<u32> {
+    let uid = unsafe { libc::getuid() };
+    let out = Command::new("/usr/bin/pgrep")
+        .args(["-x", "-u", &uid.to_string(), "NetAuthSysAgent"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Record that `NetFSMountURLCancel` on a request for `smb_url` was
+/// accepted but never acknowledged within `CANCEL_GRACE`.
+fn note_cancel_unacknowledged(smb_url: &str) {
+    let pid = netauth_agent_pid();
+    let host = smb_url_host(smb_url).unwrap_or("").to_string();
+    log::warn!(
+        "[netfs] NetAuthSysAgent{} is wedged: the cancel of {} went unanswered — \
+         every NetFS mount on this Mac (Finder included) will hang until the daemon \
+         is restarted (sidebar Fix pill; by hand: killall NetAuthSysAgent)",
+        pid.map(|p| format!(" (pid {})", p)).unwrap_or_default(),
+        smb_url
+    );
+    *wedge() = Some(WedgeInfo { pid, host, checked_at: std::time::Instant::now() });
+}
+
+/// A request for `smb_url` reached its terminal callback: if the wedge
+/// was recorded against the same host, the daemon is answering again.
+fn note_daemon_responsive(smb_url: &str) {
+    let host = smb_url_host(smb_url).unwrap_or("");
+    let mut w = wedge();
+    let same_host = w.as_ref().map(|i| i.host == host).unwrap_or(false);
+    if same_host {
+        log::info!(
+            "[netfs] NetAuthSysAgent answered a request for {} — clearing the wedged flag",
+            host
+        );
+        *w = None;
+    }
+}
+
+/// True while an unacknowledged cancel stands against the daemon that
+/// is still running. Re-checks the pid at most every `WEDGE_RECHECK`:
+/// a new pid (someone ran `killall NetAuthSysAgent`, or the Fix pill
+/// did) clears the flag — the parked threads died with the old
+/// process. "Not running" also clears it: launchd will start a fresh
+/// daemon for the next request.
+pub fn daemon_wedged() -> bool {
+    let mut w = wedge();
+    let Some(info) = w.as_mut() else {
+        return false;
+    };
+    if info.checked_at.elapsed() < WEDGE_RECHECK {
+        return true;
+    }
+    info.checked_at = std::time::Instant::now();
+    match (info.pid, netauth_agent_pid()) {
+        (Some(old), Some(now)) if old == now => true,
+        (None, _) => true, // couldn't identify the wedged daemon; wait for a callback
+        (Some(old), now) => {
+            log::info!(
+                "[netfs] NetAuthSysAgent pid changed ({} → {:?}) — the wedged daemon is gone, clearing the flag",
+                old, now
+            );
+            *w = None;
+            false
+        }
+    }
+}
+
+// ── Cross-process issue gate (2026-11-05) ────────────────────────────
+//
+// Proven live (UFB closed, no session to the server): three fresh-
+// session mounts handed to NetAuthSysAgent in the same millisecond →
+// one mounts in under a second, the other two park forever in the
+// LSARPC account lookup (`smb_mount → setNetworkAccountSID →
+// LsarGetUserName`) inside the daemon's shared DCE-RPC runtime. The
+// same three issued one after another → 0.8s / 0.2s / 0.1s, nothing
+// parked. Three separate `mount_smbfs` processes in parallel all
+// succeed too — the collision is inside the ONE daemon every NetFS
+// client shares. UFB produced exactly that collision at every login:
+// the agent's sync mount and the GUI's plain mounts fail the pre-flight
+// together (VPN not up yet) and retry on the same 30s cadence, so three
+// fresh sessions to one host reached the daemon within a millisecond.
+//
+// So: one NetFS issue at a time, machine-wide, for this user. An
+// advisory `flock` on a file in the user's UFB data dir — the GUI and
+// the agent are separate processes, so an in-process mutex can't do it
+// (the other twin takes the same file; flock also excludes a second
+// open of the file within one process). Held from just before
+// `NetFSMountURLAsync` until the mount callback arrives or
+// `GATE_HOLD_CAP` passes, whichever is first: a healthy mount releases
+// it in well under a second; a hung one stops blocking the others after
+// the cap (they then meet the same hung daemon — no worse than before).
+// A waiter that can't get the lock within `GATE_WAIT` proceeds anyway:
+// the gate must never turn a slow mount into a lost one. Lock-file
+// trouble (no HOME, unwritable dir) disables the gate for that attempt
+// with a warning; the mount still runs, just ungated. Twinned in the
+// agent's netfs.rs and core's macos_mounts.rs.
+
+/// Longest a mount holds the gate while waiting for its callback.
+const GATE_HOLD_CAP: Duration = Duration::from_secs(15);
+/// Longest a mount waits for the gate before proceeding ungated.
+/// Deliberately longer than `GATE_HOLD_CAP` so a waiter normally gets
+/// its turn.
+const GATE_WAIT: Duration = Duration::from_secs(20);
+/// `flock(LOCK_NB)` retry interval while waiting for the gate.
+const GATE_POLL: Duration = Duration::from_millis(50);
+
+fn gate_path() -> Option<std::path::PathBuf> {
+    gate_path_in(std::path::PathBuf::from(std::env::var_os("HOME")?))
+}
+
+fn gate_path_in(home: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    Some(home.join(".local/share/ufb/netfs-issue.lock"))
+}
+
+/// The gate as held by one mount attempt. `file` is `Some` only while
+/// the flock is held; dropping (or `release`) unlocks. Never blocks
+/// anything on error — see the module notes above.
+struct IssueGate {
+    file: Option<std::fs::File>,
+    smb_url: String,
+}
+
+impl IssueGate {
+    fn acquire(smb_url: &str) -> IssueGate {
+        Self::acquire_at(smb_url, gate_path())
+    }
+
+    fn ungated(smb_url: &str) -> IssueGate {
+        IssueGate { file: None, smb_url: smb_url.to_string() }
+    }
+
+    fn acquire_at(smb_url: &str, path: Option<std::path::PathBuf>) -> IssueGate {
+        use std::os::fd::AsRawFd;
+        let Some(path) = path else {
+            log::warn!("[netfs] issue gate: no HOME — mounting {} ungated", smb_url);
+            return Self::ungated(smb_url);
+        };
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                log::warn!(
+                    "[netfs] issue gate: cannot create {} ({}) — mounting {} ungated",
+                    dir.display(),
+                    e,
+                    smb_url
+                );
+                return Self::ungated(smb_url);
+            }
+        }
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!(
+                    "[netfs] issue gate: cannot open {} ({}) — mounting {} ungated",
+                    path.display(),
+                    e,
+                    smb_url
+                );
+                return Self::ungated(smb_url);
+            }
+        };
+        let started = std::time::Instant::now();
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                let waited = started.elapsed();
+                if waited >= Duration::from_secs(1) {
+                    log::info!(
+                        "[netfs] issue gate: waited {:.1}s behind another mount before issuing {}",
+                        waited.as_secs_f64(),
+                        smb_url
+                    );
+                }
+                return IssueGate { file: Some(file), smb_url: smb_url.to_string() };
+            }
+            let err = std::io::Error::last_os_error();
+            let busy = matches!(err.raw_os_error(), Some(libc::EWOULDBLOCK) | Some(libc::EINTR));
+            if !busy {
+                log::warn!(
+                    "[netfs] issue gate: flock on {} failed ({}) — mounting {} ungated",
+                    path.display(),
+                    err,
+                    smb_url
+                );
+                return Self::ungated(smb_url);
+            }
+            if started.elapsed() >= GATE_WAIT {
+                log::warn!(
+                    "[netfs] issue gate: still held by another mount after {}s — issuing {} ungated",
+                    GATE_WAIT.as_secs(),
+                    smb_url
+                );
+                return Self::ungated(smb_url);
+            }
+            std::thread::sleep(GATE_POLL);
+        }
+    }
+
+    /// Let the next mount issue. Idempotent; also runs on drop.
+    fn release(&mut self) {
+        use std::os::fd::AsRawFd;
+        if let Some(file) = self.file.take() {
+            unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            }
+            // close → any lock the kernel still associates with this
+            // open file description is dropped too.
+            drop(file);
+        }
+    }
+
+    fn is_held(&self) -> bool {
+        self.file.is_some()
+    }
+}
+
+impl Drop for IssueGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Wait for the mount callback with the gate held for at most
+/// `GATE_HOLD_CAP`, then release it and keep waiting for the rest of
+/// `timeout`. The gate is released on every exit path.
+fn recv_gated(
+    rx: &mpsc::Receiver<(i32, Option<String>)>,
+    gate: &mut IssueGate,
+    timeout: Duration,
+) -> Result<(i32, Option<String>), mpsc::RecvTimeoutError> {
+    let gated = timeout.min(GATE_HOLD_CAP);
+    match rx.recv_timeout(gated) {
+        Ok(done) => {
+            gate.release();
+            Ok(done)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) if timeout > gated => {
+            if gate.is_held() {
+                log::info!(
+                    "[netfs] issue gate: {} still pending after {}s — releasing the gate so other mounts can proceed",
+                    gate.smb_url,
+                    gated.as_secs()
+                );
+            }
+            gate.release();
+            rx.recv_timeout(timeout - gated)
+        }
+        Err(e) => {
+            gate.release();
+            Err(e)
+        }
+    }
+}
+
+/// How long `restart_netauth_agent` waits for SIGTERM to land before
+/// escalating to SIGKILL.
+const NETAUTH_TERM_GRACE: Duration = Duration::from_secs(3);
+
+/// Restart the current user's NetAuthSysAgent — the Fix pill's action
+/// for `NOTICE_FIX_RESTART_NETAUTH`. SIGTERM, then SIGKILL after
+/// `NETAUTH_TERM_GRACE`; returns the pid that was stopped (None when
+/// the daemon wasn't running, which already means "not wedged").
+/// launchd respawns it on the next NetFS request. Every process that
+/// had a request parked inside the old daemon gets its callback at
+/// once (ECANCELED / an error) — including this one's own leaked
+/// requests, whose arguments were deliberately leaked for exactly
+/// this moment. Side effect worth knowing: the NetFS client library
+/// in each process REPLAYS its still-pending requests against the new
+/// daemon, so a retry issued right after this call may briefly race a
+/// replayed copy of itself; the drift notice covers the one visible
+/// outcome (a stranded `/Volumes/<share>` placeholder).
+///
+/// Blocking (up to a few seconds) — run on a worker thread.
+pub fn restart_netauth_agent() -> Result<Option<u32>, String> {
+    let Some(pid) = netauth_agent_pid() else {
+        log::info!("[netfs] restart_netauth_agent: NetAuthSysAgent is not running — nothing to restart");
+        *wedge() = None;
+        return Ok(None);
+    };
+    log::warn!("[netfs] restarting NetAuthSysAgent (pid {}) — user asked to clear a wedged mount service", pid);
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
+        return Err(format!(
+            "SIGTERM to NetAuthSysAgent (pid {}) failed: {}",
+            pid,
+            std::io::Error::last_os_error()
+        ));
+    }
+    let deadline = std::time::Instant::now() + NETAUTH_TERM_GRACE;
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        if netauth_agent_pid() != Some(pid) {
+            *wedge() = None;
+            return Ok(Some(pid));
+        }
+    }
+    log::warn!("[netfs] NetAuthSysAgent (pid {}) ignored SIGTERM for {}s — sending SIGKILL", pid, NETAUTH_TERM_GRACE.as_secs());
+    if unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) } != 0 {
+        return Err(format!(
+            "SIGKILL to NetAuthSysAgent (pid {}) failed: {}",
+            pid,
+            std::io::Error::last_os_error()
+        ));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    *wedge() = None;
+    Ok(Some(pid))
+}
+
 // ── In-flight request registry (audit 2026-09-11 M-3) ────────────────
 //
 // A process that dies (or simply exits) with a NetFSMountURLAsync
@@ -1171,6 +1535,10 @@ fn netfs_smb_mount_serialized(
             inflight_for_block
                 .done
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+            // Any terminal callback — success, error, or the ECANCELED
+            // of a replayed request after a daemon restart — proves
+            // the daemon is answering for this host again.
+            note_daemon_responsive(&inflight_for_block.url);
             let resolved: Option<String> = if status == 0 && !mountpoints.is_null() {
                 let arr = mountpoints as CFArrayRef;
                 let count = unsafe { CFArrayGetCount(arr) };
@@ -1198,6 +1566,12 @@ fn netfs_smb_mount_serialized(
     // the request (it waits briefly for the id if needed).
     let seq = register_inflight(inflight.clone());
     let mut inflight_guard = InflightGuard { seq, keep: false };
+
+    // One NetFS issue at a time across the GUI and the agent (see the
+    // gate notes above). Held across the wait below, up to
+    // GATE_HOLD_CAP; `issue_guard` (this process's mutex) is still
+    // dropped right after the call returns.
+    let mut gate = IssueGate::acquire(smb_url);
 
     let mut request_id: *mut c_void = std::ptr::null_mut();
     let start_status = unsafe {
@@ -1229,7 +1603,8 @@ fn netfs_smb_mount_serialized(
         .store(request_id as usize, std::sync::atomic::Ordering::SeqCst);
 
     let timeout = if allow_ui { MOUNT_TIMEOUT_UI } else { MOUNT_TIMEOUT_SILENT };
-    let (status, resolved) = match rx.recv_timeout(timeout) {
+    // Gate released inside recv_gated on every path.
+    let (status, resolved) = match recv_gated(&rx, &mut gate, timeout) {
         Ok(done) => done,
         Err(_) => {
             log::warn!(
@@ -1253,6 +1628,7 @@ fn netfs_smb_mount_serialized(
                         smb_url,
                         cancel_status
                     );
+                    note_cancel_unacknowledged(smb_url);
                     // Still live inside the daemon: leave it in the
                     // registry (flagged cancelled) so the quit sweep
                     // knows about it — it will log, not wait.
@@ -1315,6 +1691,30 @@ pub fn status_message(status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_issue_gate_excludes_second_opener_and_releases() {
+        use std::os::fd::AsRawFd;
+        let home = std::env::temp_dir().join(format!("ufb-gate-test-{}", std::process::id()));
+        let path = gate_path_in(home.clone());
+        let mut g = IssueGate::acquire_at("smb://h/s", path.clone());
+        assert!(g.is_held(), "first acquire must hold the gate");
+        let p = path.clone().unwrap();
+        let second = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, -1, "a second opener must be excluded while the gate is held");
+        g.release();
+        assert!(!g.is_held());
+        let rc = unsafe { libc::flock(second.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "release must let the next opener in");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn test_issue_gate_without_home_is_ungated() {
+        let g = IssueGate::acquire_at("smb://h/s", None);
+        assert!(!g.is_held());
+    }
 
     const GFX: &str = "//chris%20bialkowski@192.168.40.100/GFX_Dropbox on /Volumes/GFX_Dropbox (smbfs, nodev, nosuid, mounted by chris)";
     const TANK: &str = "//chris@nas/Tank on /Volumes/Tank (smbfs, nodev, nosuid, mounted by chris)";
