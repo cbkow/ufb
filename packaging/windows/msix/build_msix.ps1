@@ -98,11 +98,17 @@ for ($i = 1; $i -le 3; $i++) {
     Start-Sleep -Seconds 3
 }
 if (-not (Test-Path (Join-Path $BuildDir "Qt6Core.dll"))) { throw "windeployqt ran but Qt6Core.dll is missing from $BuildDir." }
-foreach ($glob in @("external\ffmpeg\bin\*.dll", "external\pdfium\bin\pdfium.dll", "vcpkg_installed\x64-windows\bin\*.dll")) {
+foreach ($glob in @("external\ffmpeg\bin\*.dll", "external\pdfium\bin\pdfium.dll")) {
     $src = Join-Path $repoRoot $glob
-    if (-not (Test-Path $src)) { throw "$glob not found -- run scripts/setup-external.ps1 / the vcpkg install." }
+    if (-not (Test-Path $src)) { throw "$glob not found -- run scripts/setup-external.ps1." }
     Copy-Item -Path $src -Destination $BuildDir -Force
 }
+# vcpkg manifest mode installs under the BUILD dir by default (the presets set no VCPKG_INSTALLED_DIR);
+# a repo-root vcpkg_installed only exists where someone ran `vcpkg install` by hand (the old build box).
+$vcpkgBin = @((Join-Path $BuildDir "vcpkg_installed\x64-windows\bin"), (Join-Path $repoRoot "vcpkg_installed\x64-windows\bin")) |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $vcpkgBin) { throw "vcpkg_installed\x64-windows\bin not found under $BuildDir or $repoRoot -- configure with the release preset first." }
+Copy-Item -Path (Join-Path $vcpkgBin "*.dll") -Destination $BuildDir -Force
 
 # --- Stage ------------------------------------------------------------------
 $staging = Join-Path $PSScriptRoot "staging"
