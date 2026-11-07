@@ -65,7 +65,7 @@ fs_extra = "1.3"
 arboard = "3"
 # The family path kit (minplatform crates/min-paths, canon §22 row 125): URLs, uri-lists, translation, clipboard, guards.
 # A path dependency while minplatform is private; becomes a git dependency when it goes public.
-min-paths = { path = "../../minplatform/crates/min-paths" }
+min-paths = { git = "https://github.com/cbkow/minplatform.git", rev = "1d48ee44d2d473c55d5e36ab430d76716a49f248" }
 
 # URL/file opener
 opener = { version = "0.7", features = ["reveal"] }
