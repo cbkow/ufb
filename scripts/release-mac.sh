@@ -160,6 +160,16 @@ for var in libheif_DIR OpenEXR_DIR Imath_DIR; do
         *) echo "  WARN $var=$val (not vcpkg_installed — check provenance)" >&2 ;;
     esac
 done
+# Install-name leaf rule (macOS 27.2+ dyld, hardened runtime): a dylib
+# requested as @rpath/<leaf> must carry an install name with that same
+# leaf, or the process dies at launch with "Library missing". 1.4.1
+# shipped ffmpeg alias copies that broke this.
+"$REPO_ROOT/scripts/fix-ffmpeg-install-names-mac.sh" --check \
+    "$UFB_APP_BUNDLE/Contents/Frameworks" \
+    "$UFB_APP_BUNDLE/Contents/MacOS/ufb" \
+    "$UFB_APP_BUNDLE/Contents/MacOS/ffmpeg" \
+    "$UFB_APP_BUNDLE/Contents/MacOS/ffprobe" || GATE_FAIL=1
+
 if [ "$GATE_FAIL" -ne 0 ]; then
     echo "ERROR: deployment-target gate failed — app would not load on macOS $UFB_MACOS_MIN." >&2
     exit 1

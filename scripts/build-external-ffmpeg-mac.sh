@@ -149,61 +149,11 @@ make -j"$(sysctl -n hw.ncpu)"
 echo "[ffmpeg] installing to $OUTPUT_DIR..."
 make install
 
-# Confirm Mach-Os are relocatable. ffmpeg's default install_name uses
-# the build prefix; we rewrite to @rpath/<name> so the bundle's
-# Frameworks/ layout works without LD_LIBRARY_PATH gymnastics.
-#
-# Drives the rewrite off `otool -L <macho>` rather than file globs.
-# ffmpeg's binaries link against the symlink-named dylibs (e.g.
-# `libavformat.61.dylib`, not the realpath `libavformat.61.7.100.
-# dylib`), so a glob loop that filters out symlinks misses the names
-# the linker actually wrote into the load commands. Walking otool's
-# output catches every such reference exactly as it appears.
-patch_macho() {
-    local target="$1"
-    [[ -f "$target" ]] || return 0
-    # Iterate every dep that points back into the build prefix and
-    # rewrite to @rpath/<basename>.
-    while IFS= read -r dep; do
-        local depbase
-        depbase=$(basename "$dep")
-        install_name_tool -change "$dep" "@rpath/$depbase" "$target" \
-            2>/dev/null || true
-    done < <(otool -L "$target" 2>/dev/null \
-                | awk -v prefix="$OUTPUT_DIR/lib/" \
-                      'NR>1 && $1 ~ "^"prefix {print $1}')
-}
-
-echo "[ffmpeg] rewriting dylib install_names + cross-deps to @rpath..."
-for lib in "$OUTPUT_DIR/lib"/*.dylib; do
-    # Skip symlinks for the -id rewrite (only patch the real versioned
-    # files), but DO patch all real dylibs' cross-deps.
-    if [[ -L "$lib" ]]; then continue; fi
-    base=$(basename "$lib")
-    install_name_tool -id "@rpath/$base" "$lib" 2>/dev/null || true
-    patch_macho "$lib"
-done
-
-# ffmpeg/ffprobe binaries: same dependency rewrite, plus an LC_RPATH
-# of @executable_path/../Frameworks. The CMake POST_BUILD step in
-# app/CMakeLists.txt drops these binaries into UFB.app/Contents/
-# MacOS/ next to the main `ufb` Mach-O, where the parent path
-# resolves to UFB.app/Contents/Frameworks/ — exactly where the libav*
-# dylibs are placed by the same step that handles ufb's own links.
-echo "[ffmpeg] rewriting binary load paths..."
-for bin in "$OUTPUT_DIR/bin/ffmpeg" "$OUTPUT_DIR/bin/ffprobe"; do
-    [[ -x "$bin" ]] || continue
-    patch_macho "$bin"
-    # Drop any pre-existing rpath that points at the build prefix
-    # (configure leaves one), then add the bundle-relative one. The
-    # check-and-delete loop is bounded by the rpath count to avoid
-    # an infinite spin if delete_rpath ever no-ops silently.
-    while IFS= read -r old; do
-        [[ -z "$old" ]] && continue
-        install_name_tool -delete_rpath "$old" "$bin" 2>/dev/null || true
-    done < <(otool -l "$bin" 2>/dev/null \
-                | awk '/cmd LC_RPATH/{f=1; next} f && /path /{print $2; f=0}')
-    install_name_tool -add_rpath "@executable_path/../Frameworks" "$bin"
-done
+# Make the Mach-Os relocatable: dylib ids, cross-deps and the CLI
+# binaries' load commands all become @rpath/<real versioned file name>,
+# and ffmpeg/ffprobe get LC_RPATH @executable_path/../Frameworks.
+# Lives in its own idempotent script so it can be re-run on an existing
+# external/ffmpeg (see its header for the macOS 27.2 leaf-name rule).
+"$SCRIPT_DIR/fix-ffmpeg-install-names-mac.sh" "$OUTPUT_DIR"
 
 echo "[ffmpeg] done. Output: $OUTPUT_DIR"

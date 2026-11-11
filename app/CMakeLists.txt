@@ -662,7 +662,16 @@ if(APPLE)
         # if the user hasn't run scripts/setup-external-mac.sh yet —
         # they'll see the OpenEXR/ffmpeg/PDFium messages from
         # cmake/external.cmake telling them what to do).
-        COMMAND bash -c "cp ${_ufb_ffmpeg_dylib_glob} '$<TARGET_BUNDLE_CONTENT_DIR:ufb>/Frameworks/' 2>/dev/null || true"
+        #
+        # Only the REAL versioned files are bundled. Every reference is
+        # @rpath/<real name> (scripts/fix-ffmpeg-install-names-mac.sh),
+        # so the lib<name>.<MAJOR>.dylib / lib<name>.dylib symlinks are
+        # link-time conveniences only. Shipping them as dereferenced
+        # copies is what killed 1.4.1 at launch on macOS 27.2: dyld
+        # rejects a dylib whose install-name leaf differs from the name
+        # it was requested by. The rm clears alias copies an older
+        # build left in an existing bundle.
+        COMMAND bash -c "for f in ${_ufb_ffmpeg_dylib_glob}; do d='$<TARGET_BUNDLE_CONTENT_DIR:ufb>/Frameworks/'; if [ -L \"$f\" ]; then rm -f \"$d$(basename \"$f\")\"; elif [ -f \"$f\" ]; then cp \"$f\" \"$d\"; fi; done; true"
         COMMAND bash -c "cp '${_ufb_pdfium_dylib}' '$<TARGET_BUNDLE_CONTENT_DIR:ufb>/Frameworks/' 2>/dev/null || true"
         COMMENT "Copy vendored dylibs (ffmpeg + PDFium) into UFB.app/Contents/Frameworks/"
         VERBATIM
