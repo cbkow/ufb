@@ -168,10 +168,11 @@ done
     "$UFB_APP_BUNDLE/Contents/Frameworks" \
     "$UFB_APP_BUNDLE/Contents/MacOS/ufb" \
     "$UFB_APP_BUNDLE/Contents/MacOS/ffmpeg" \
-    "$UFB_APP_BUNDLE/Contents/MacOS/ffprobe" || GATE_FAIL=1
+    "$UFB_APP_BUNDLE/Contents/MacOS/ffprobe" \
+    || { echo "  FAIL install-name leaf rule — app would not launch on macOS 27.2+" >&2; GATE_FAIL=1; }
 
 if [ "$GATE_FAIL" -ne 0 ]; then
-    echo "ERROR: deployment-target gate failed — app would not load on macOS $UFB_MACOS_MIN." >&2
+    echo "ERROR: release gate failed (see FAIL lines above)." >&2
     exit 1
 fi
 echo "  OK — all Mach-Os load on macOS $UFB_MACOS_MIN+"

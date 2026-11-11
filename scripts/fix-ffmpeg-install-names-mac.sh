@@ -43,6 +43,7 @@ install_leaf() {  # leaf of a dylib's LC_ID_DYLIB, empty if none
 
 if [[ "${1:-}" == "--check" ]]; then
     dir="${2:?usage: --check <dir> [<macho>...]}"
+    [[ -d "$dir" ]] || { echo "  FAIL --check: no such directory $dir" >&2; exit 1; }
     shift 2
     fail=0
     targets=()
@@ -54,7 +55,17 @@ if [[ "${1:-}" == "--check" ]]; then
         while IFS= read -r dep; do
             leaf="${dep#@rpath/}"
             [[ "$leaf" == */* ]] && continue      # frameworks etc.
-            [[ -e "$dir/$leaf" ]] || continue     # not one of ours
+            if [[ ! -e "$dir/$leaf" ]]; then
+                # A missing ffmpeg lib is a dangling reference (an
+                # external/ffmpeg never re-run through this script still
+                # asks for the alias names the bundle no longer ships).
+                case "$leaf" in
+                    libav*|libsw*|libpostproc*)
+                        echo "  FAIL $(basename "$t") wants @rpath/$leaf — not in $dir (re-run scripts/fix-ffmpeg-install-names-mac.sh, rebuild)" >&2
+                        fail=1 ;;
+                esac
+                continue
+            fi
             got="$(install_leaf "$dir/$leaf")"
             if [[ "$got" != "$leaf" ]]; then
                 echo "  FAIL $(basename "$t") wants @rpath/$leaf but that file's install name is '$got'" >&2
@@ -86,14 +97,16 @@ patch_macho() {
         esac
         real="$(basename "$(cd "$LIB_DIR" && realpath "$leaf")")"
         [[ "$dep" == "@rpath/$real" ]] && continue
-        install_name_tool -change "$dep" "@rpath/$real" "$target" 2>/dev/null
+        install_name_tool -change "$dep" "@rpath/$real" "$target" 2>/dev/null \
+            || { echo "[ffmpeg-names] install_name_tool -change failed: $target ($dep)" >&2; exit 1; }
     done < <(otool -L "$target" 2>/dev/null | awk 'NR>1 {print $1}')
 }
 
 echo "[ffmpeg-names] dylib ids + cross-deps → @rpath/<real name>"
 for lib in "$LIB_DIR"/*.dylib; do
     [[ -L "$lib" ]] && continue
-    install_name_tool -id "@rpath/$(basename "$lib")" "$lib" 2>/dev/null
+    install_name_tool -id "@rpath/$(basename "$lib")" "$lib" 2>/dev/null \
+        || { echo "[ffmpeg-names] install_name_tool -id failed: $lib" >&2; exit 1; }
     patch_macho "$lib"
 done
 
