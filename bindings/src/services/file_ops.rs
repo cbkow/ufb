@@ -402,8 +402,25 @@ impl qobject::FileOps {
         a: cxx_qt_lib::QString,
         b: cxx_qt_lib::QString,
     ) -> bool {
-        // Device identity (min-paths, row 119): a drag between two volumes now defaults to Copy on macOS too.
-        min_paths::volume::same_volume(Path::new(&a.to_string()), Path::new(&b.to_string()))
+        let (a, b) = (a.to_string(), b.to_string());
+        // Windows keeps the 1.4.1 rule — same drive letter or same
+        // \\server\share. Volume serials are NOT a safe "same volume"
+        // signal there: two shares exported from one server volume (or a
+        // redirector reporting serial 0) compare equal, and the Sidebar
+        // would then default a cross-share drag to Move.
+        #[cfg(target_os = "windows")]
+        {
+            match (windows_volume_root(&a), windows_volume_root(&b)) {
+                (Some(va), Some(vb)) => va.eq_ignore_ascii_case(&vb),
+                _ => false,
+            }
+        }
+        // Elsewhere: device identity (min-paths, row 119) — a drag
+        // between two volumes defaults to Copy on macOS too.
+        #[cfg(not(target_os = "windows"))]
+        {
+            min_paths::volume::same_volume(Path::new(&a), Path::new(&b))
+        }
     }
 
     fn copy_files(
@@ -1154,4 +1171,27 @@ impl FileOpsEvents for LoggingEvents {
     fn op_error(&self, error: FileOpError) {
         log::warn!("fileop {} error: {}", error.id, error.error);
     }
+}
+
+/// `C:` for a drive path, `\\server\share` for a UNC path.
+#[cfg(target_os = "windows")]
+fn windows_volume_root(p: &str) -> Option<String> {
+    let t = p.trim_start();
+    if t.starts_with("\\\\") || t.starts_with("//") {
+        let mut seps = 0;
+        for (i, b) in t.bytes().enumerate() {
+            if b == b'\\' || b == b'/' {
+                seps += 1;
+                if seps == 4 {
+                    return Some(t[..i].replace('/', "\\"));
+                }
+            }
+        }
+        return Some(t.replace('/', "\\"));
+    }
+    let b = t.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return Some(t[..2].to_string());
+    }
+    None
 }
