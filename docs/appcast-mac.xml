@@ -11,6 +11,25 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 1.4.2</title>
+      <sparkle:version>1.4.2</sparkle:version>
+      <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<h2>UFB 1.4.2</h2>
+<ul>
+  <li><b>Mac: UFB opens again on macOS 27.2.</b> After updating to macOS
+      27.2, UFB 1.4.1 quit immediately at launch. The bundled video
+      libraries are now packaged the way the new system loader
+      requires.</li>
+  <li>Install this before updating to macOS 27.2: once 1.4.1 can no longer
+      open, it cannot update itself and needs the installer from the
+      download page.</li>
+  <li>Nothing changes on Windows in this release.</li>
+</ul>]]></description>
+      <pubDate>Wed, 11 Nov 2026 09:34:57 -0500</pubDate>
+      <enclosure url="https://github.com/cbkow/ufb/releases/download/v1.4.2/UFB-1.4.2-arm64.pkg" type="application/octet-stream" sparkle:edSignature="s60CdTVXqsXpU6VipjKDUZLeE7yPYPeLGSXbP77TtITTM7BKSa4rVY9z8eiyOrZYJxSoZn1KI0+YaBp5vXHHCQ==" length="350104156" />
+    </item>
+    <item>
       <title>Version 1.4.1</title>
       <sparkle:version>1.4.1</sparkle:version>
       <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
