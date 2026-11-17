@@ -1,5 +1,6 @@
 ---
 title: Shares, paths and sync
+permalink: /sync/
 nav_order: 5
 ---
 

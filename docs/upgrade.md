@@ -1,5 +1,6 @@
 ---
 title: Upgrading from 1.4
+permalink: /upgrade/
 nav_order: 7
 ---
 

@@ -1,5 +1,6 @@
 ---
 title: Project types
+permalink: /types/
 nav_order: 6
 ---
 

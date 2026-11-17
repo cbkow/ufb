@@ -1,5 +1,6 @@
 ---
 title: Jobs and tracking
+permalink: /projects/
 nav_order: 4
 ---
 

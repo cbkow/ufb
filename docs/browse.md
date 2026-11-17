@@ -1,5 +1,6 @@
 ---
 title: Browse
+permalink: /browse/
 nav_order: 3
 ---
 
