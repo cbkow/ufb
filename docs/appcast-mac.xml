@@ -11,6 +11,39 @@
          opens the DMG link on GitHub Releases). -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.1</title>
+      <sparkle:version>2.0.1</sparkle:version>
+      <sparkle:shortVersionString>2.0.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<p><b>UFB 2 is the same tool, rebuilt from the ground up:</b> a file browser first, with the job tracking you know.
+It opens your database where it is (one copy is kept beside it) and takes over your bookmarks, project folders,
+path mappings and sync settings.</p>
+<ul>
+  <li><b>A file browser that works like one</b> &mdash; a second pane, optional tabs, drag and drop, the system's
+      Trash, and <b>Undo / Redo</b> for file operations.</li>
+  <li><b>A tasks panel</b> for copies, archives and transcodes; archives are read by UFB itself (zip, 7z, tar; rar
+      through the system's tool), with passwords.</li>
+  <li><b>A Settings window</b>: what a pane shows, start at sign-in, sync, path mappings.</li>
+  <li><b>Project types a studio can write itself</b>; several rows of the tracker and several cards of the board at
+      once; notes on several lines; rename several files in one step.</li>
+  <li><b>Shares are the system's own mounts</b>, saved in the sidebar and connected on a press.</li>
+</ul>
+<p><b>What is gone</b> &mdash; sync mounts with their local cache, the mount agent and the Finder extension. A sync
+mount saved in 1.4 becomes a plain saved share. The installer removes the old <code>/Applications/UFB</code> folder
+and installs <code>/Applications/UFB.app</code>.</p>
+<p><b>Mixed studios</b> &mdash; UFB 2 and 1.4 machines share metadata, but columns made on a UFB 2 machine do not
+appear on machines still on 1.4: move a studio's machines together. macOS 13 or later is required. Read
+<a href="https://ufbrowser.com/upgrade/">Upgrading from 1.4</a> first.</p>
+      ]]></description>
+      <pubDate>Tue, 17 Nov 2026 16:20:58 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.1/UFB-2.0.1-arm64.pkg"
+        sparkle:edSignature="MGuyXp5NMM8ACkrQMvkacaFQ0vmswCLRoMt6NFGmF4DXKwlk3ckqUQ3QKDG2q6ogdva12nzoNvE0akRuBcLoAQ=="
+        length="24846164"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 1.4.2</title>
       <sparkle:version>1.4.2</sparkle:version>
       <sparkle:shortVersionString>1.4.2</sparkle:shortVersionString>
