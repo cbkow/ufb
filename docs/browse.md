@@ -12,7 +12,7 @@ nav_order: 3
 
 - **The sidebar**: Favorites, Shares, Jobs, All Tracked, Places (the system's folders and drives) and Sync. Add a favourite from a folder's menu (**Add to Favorites**) or by dropping a folder on the Favorites heading; dropping on a favourite itself copies or moves into it.
 - **List or grid**, with a size slider for the tiles. A folder remembers how it was shown once you change its view.
-- **A second pane** (**View → Show Second Pane**, or the toolbar's right-hand button): two folders side by side, each with its own history.
+- **Two panes** side by side, each with its own history. A browser view opens with both; **View → Show Second Pane** (or the toolbar's right-hand button) closes and opens the second, and **Settings → General → Show a second pane** says how a view starts.
 - **Tabs** are there when you ask for them: Ctrl+T (Cmd+T on macOS) opens one, Ctrl+W closes it, and a window with one tab shows no tab strip. Any folder's menu has **Open in New Tab** and **Open in New Window**.
 - **The path bar** takes a typed or pasted path, a `ufb:` link, or a path written for the other system.
 
@@ -56,6 +56,6 @@ Typing in the search field filters the folder in view. **Return** searches the f
 
 ## Settings
 
-**Settings…** is in the application menu on macOS (Cmd+,) and in Edit on Windows (Ctrl+,): what a new pane shows (hidden files, folders first, sequences as one entry, grid), start at sign-in, sync, path mappings, and About with the licence notices.
+**Settings…** is in the application menu on macOS (Cmd+,) and in Edit on Windows (Ctrl+,): what a new pane shows (hidden files, folders first, sequences as one entry, grid), whether a view starts with its second pane, start at sign-in, sync, path mappings, and About with the licence notices.
 
 ![Settings](/images/ufb2-settings.png)
