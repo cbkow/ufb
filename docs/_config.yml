@@ -1,10 +1,16 @@
 title: UFB
-description: Union File Browser — docs and downloads
+description: Union File Browser — manual and downloads
 remote_theme: just-the-docs/just-the-docs
 
-# Same GitHub Pages setup as the minNotes sister site: just-the-docs
-# remote theme, dark scheme with a toggle. The appcast-*.xml files in
-# this folder are served as static files at ufbrowser.com — they are
-# the live Sparkle/WinSparkle update feeds (see scripts/make-appcast.sh).
+logo: "/images/ufb-logo.png"
+
+# The appcast-*.xml files in this folder are served as static files at ufbrowser.com: appcast-mac.xml is the live
+# Sparkle feed of the macOS application; appcast-win.xml is frozen (Windows ships through the Microsoft Store).
 color_scheme: dark
 enable_dark_mode: true
+
+just_the_docs:
+  custom_css:
+    - custom/custom.scss
+
+footer_content: 'Copyright &copy; 2025&ndash;2026 cbkow. UFB is free software under the <a href="https://github.com/cbkow/ufb/blob/main/LICENSE">GNU General Public License, version 3 or later</a>; its source is in <a href="https://github.com/cbkow/minplatform">cbkow/minplatform</a>.'

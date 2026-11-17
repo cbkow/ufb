@@ -1,0 +1,91 @@
+/* Sidebar link hover */
+
+.nav-list-link {
+  color: #efefef;      
+}
+
+.nav-list-link:hover {
+  background-color: #2d2d2d;
+  color: #f0f0f0;
+}
+.nav-list-link.active {
+  background-color: #3d3d3d;
+  color: #f0f0f0;
+  font-weight: 500;
+}
+
+/* Nested child links */
+.nav-list-child-link {
+  color: #3794ff;
+}
+
+.nav-list-child-link:hover,
+.nav-list-child-link.active {
+  color: #3794ff;
+}
+
+/* Remove gradient, use flat background from .nav-list-link:hover */
+.nav-list .nav-list-item .nav-list-link:hover,
+.nav-list .nav-list-item .nav-list-link.active {
+    background-image: none;
+}
+
+/* Remove logo hover effects */
+.site-title:hover,
+.site-title:focus {
+    background-color: transparent;
+    background-image: none;
+}
+
+/* Hamburger menu - keep background transparent, text color on hover */
+.site-button {
+    background-color: transparent;
+    background-image: none;
+    color: #dcdcdc;
+}
+.site-button:hover,
+.site-button:focus {
+    background-color: #2d2d2d;
+    background-image: none;
+    color: #f0f0f0;
+}
+.site-button.nav-open {
+    background-color: #3d3d3d;
+    background-image: none;
+    color: #f0f0f0;
+}
+
+/* Code blocks - single line-height for ASCII diagrams */
+pre,
+pre code {
+    line-height: 1;
+}
+
+/* Dark scrollbars */
+* {
+    scrollbar-color: #3d3d3d #1f1f1f;
+}
+
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1f1f1f;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #3d3d3d;
+    border-radius: 6px;
+    border: 2px solid #1f1f1f;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #555555;
+}
+
+::-webkit-scrollbar-corner {
+    background: #1f1f1f;
+}
+

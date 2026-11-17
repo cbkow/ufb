@@ -1,168 +1,53 @@
 # UFB — Union File Browser
 
-A native Qt + Rust file browser and project-management tool built for
-visual-effects and post-production workflows. UFB mounts NAS shares
-through a user-mode VFS (WinFsp on Windows, FileProvider / NFS loopback
-on macOS), renders fast thumbnails for production media (PSD / EXR /
-HDR / PDF / AI / video) directly from native C++ libraries, and tracks
-job + shot metadata in a local SQLite store synced across nodes via a
-mesh data plane.
+A file browser and project tracker for visual-effects and post-production teams, on macOS and Windows.
 
-Ships on **macOS** (Apple Silicon, notarized installer package, in-app
-auto-update) and **Windows x64** (the Microsoft Store as
-[ufBrowser](https://apps.microsoft.com/detail/9N71KC2RQ65R), which owns
-updates). Website +
-downloads: [ufbrowser.com](https://ufbrowser.com) · releases:
-[GitHub Releases](https://github.com/cbkow/ufb/releases).
+![UFB](docs/images/ufb2-job.png)
 
-This is the Qt port of the original Tauri build. The numbered
-port phases (and the macOS port that followed) are complete; current
-work is incremental polish under the **1.0.x** series.
+- **A file browser that works like one** — thumbnails, list and grid, a second pane, optional tabs, drag and drop,
+  the system's own Trash, and Undo / Redo for what it does to your files.
+- **Preview with Space** — stills (EXR with its layers, PSD, TIFF, HEIC and the usual ones), video, sound, image
+  sequences, text, PDF and web pages, without leaving the folder.
+- **Image sequences as one entry** — `shot_010.1001.exr …` is one row that previews, renames, copies and transcodes
+  as a whole.
+- **Jobs** — a job is a folder made from a project type: its sections, its shots, the files each shot starts with.
+  A studio can write its own project types.
+- **Tracking** — columns per section (status, artist, priority, due date, notes, links…), a tracker across every
+  job, and a board. Columns and cells are shared between workstations on the LAN and merge cell by cell.
+- **Shares and paths that mean the same on both systems** — saved network shares in the sidebar, path mappings
+  between Windows and macOS, and links that open at the same file on either.
+- **Archives and MP4 copies in the background** — extract zip, 7z, tar and rar; compress to zip; transcode clips and
+  sequences to MP4; all in a tasks panel that never takes you away from the folder you are in.
 
-## What's in the box
+## Install + docs
 
-| Surface | Stack |
-|---|---|
-| App shell, file browser, sidebar, dialogs | Qt 6.11 / QML / Qt Quick Controls |
-| Cross-OS path handling, settings, mesh sync, project DB | Rust core (`core/`) |
-| Rust↔Qt bridge (cxx-qt QObjects exposed to QML) | `bindings/` |
-| NAS mount + VFS + credential store + SMB session | Standalone Rust agent (`agent/`) launched as a child process |
-| Native thumbnails (PSD/EXR/PDF/video/system icons) | C++ in `app/thumbnails/` (psd_sdk, OpenEXR, PDFium, FFmpeg) |
-| Transcode to MP4, extract / compress archives | Bundled CLI tools spawned by the Rust core: ffmpeg + ffprobe + exiftool, 7-Zip (`7zz` on macOS, `7z.exe` on Windows) |
+Manual: **[ufbrowser.com](https://ufbrowser.com)**.
 
-## Requirements
+### Windows
 
-- **Qt 6.11.1** — default install path on Windows is
-  `C:\Qt\6.11.1\msvc2022_64`. `qmake` must be findable by CMake (and
-  exposed as `$env:QMAKE` for cxx-qt-build).
-- **Rust stable** (edition 2021, MSRV pinned in
-  `Cargo.toml::workspace.package.rust-version`).
-- **CMake 3.24+** with **Ninja**.
-- **MSVC 2022** (Visual Studio 17.x or 18.x) on Windows / **Xcode
-  Command Line Tools** on macOS.
-- **WinFsp 2.x Developer SDK** on Windows for the agent build (headers
-  + import lib at `C:\Program Files (x86)\WinFsp\{inc,lib}\`). The
-  installer bundles the WinFsp redistributable for end users — see
-  [`installer/README.md`](installer/README.md).
-- **LLVM / `libclang`** on Windows for `winfsp-sys`'s bindgen step.
-  Set `LIBCLANG_PATH` or put `clang.exe` on `PATH`.
-- **vcpkg** for OpenEXR and libheif (manifest mode — `vcpkg.json` drives it).
-- **macOS, one command:** `scripts/setup-external-mac.sh` fetches or builds
-  everything above the Qt install — PDFium, FFmpeg from source, exiftool,
-  7-Zip, Sparkle, vcpkg (cloned to `~/vcpkg` if absent) with the static
-  libheif / OpenEXR — and checks the release-only tools (xcodegen, a
-  notarytool keychain profile). Re-run it after a fresh clone or a Qt update.
+<a href="https://apps.microsoft.com/detail/9N71KC2RQ65R?referrer=appbadge&mode=full" target="_blank" rel="noopener noreferrer">
+  <img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200"/>
+</a>
 
-## Quick start
+**ufBrowser** on the Microsoft Store. Windows 10 (version 1809 or later) or Windows 11, x64. The Store is the only
+Windows channel and delivers the updates.
 
-```bash
-just build       # dev build (RelWithDebInfo) into build/debug
-just run         # build + launch
-just release     # release build into build/release
-just agent       # build the agent crate (separate workspace)
-just test        # run all Rust tests
-just clean-all   # wipe build artifacts
-```
+### macOS
 
-Install `just` with `cargo install just` if you don't have it.
+Signed and notarized, from [GitHub Releases](https://github.com/cbkow/ufb/releases/latest). Apple Silicon, macOS 13
+or later. The application keeps itself up to date.
 
-### Why `RelWithDebInfo`, not `Debug`
+## Source
 
-The Rust MSVC stdlib always links against the release CRT (`/MD`).
-Building C++ in `Debug` (`/MDd`) produces unresolved-CRT-symbol link
-errors when linking against the Rust-produced static library. Use
-`RelWithDebInfo` for dev — it keeps debug symbols and matches the CRT
-flag Rust enforces. Both presets in `CMakePresets.json` honor this.
+UFB 2 is written in Rust on the same platform as QCView, minNotes and minRender. Its source, build and packaging
+scripts are in **[cbkow/minplatform](https://github.com/cbkow/minplatform)** (`apps/ufb`); a release is the tag
+`ufb-v<version>` there. This repository holds the site, the manual and the macOS update feed.
 
-### Building outside `just`
-
-```powershell
-$env:QMAKE = 'C:/Qt/6.11.1/msvc2022_64/bin/qmake.exe'
-cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake --preset release && cmake --build build\release'
-
-# Agent is a separate cargo workspace
-cd agent && cargo build --release
-```
-
-To launch the result, prepend Qt's `bin/` to `PATH` so the runtime
-DLLs resolve:
-
-```bash
-PATH="/c/Qt/6.11.1/msvc2022_64/bin:$PATH" build/release/ufb.exe
-```
-
-## Repo layout
-
-```
-agent/         ufb-agent — standalone Rust binary; sync VFS host + mesh
-app/           Qt executable (C++): main, image providers, thumbnail backends, updater, lightbox
-app/qml/       QML UI tree (Main, Sidebar, FileBrowser, MountManagerDialog, …)
-bindings/      Rust↔Qt bridge (cxx-qt QObjects, IPC client, services exposed to QML)
-core/          Pure Rust core (Qt-unaware): settings, mesh, mount client, file ops, DB
-devdocs/       Engineering docs (auto-update setup, subsystem audits, feature plans)
-docs/          ufbrowser.com — GitHub Pages site + the live Sparkle/WinSparkle appcasts
-external/      Vendored prebuilts (ffmpeg, pdfium, exiftool, 7zip, winfsp MSI) + the nfsserve source fork
-installer/     Inno Setup script + redistributable bundling (WinFsp, LICENSES/)
-macos-helpers/ Swift FinderSync extension (xcodegen project)
-scripts/       Build/sign/notarize/release + appcast helpers
-```
-
-## Building a release package
-
-Windows ships through the Microsoft Store since 1.4.0. End-to-end
-Windows release build (from a VS x64 developer shell):
-
-```powershell
-# 1. Vendored prebuilts (one-time per fresh clone or version bump)
-scripts/setup-external.ps1
-
-# 2. App + agent
-just release
-just agent-release
-
-# 3. Qt runtime deploy + DLL copy
-& 'C:\Qt\6.11.1\msvc2022_64\bin\windeployqt.exe' --qmldir app/qml --release build/release/ufb.exe
-Copy-Item external\ffmpeg\bin\*.dll build\release\ -Force
-Copy-Item external\pdfium\bin\pdfium.dll build\release\ -Force
-Copy-Item vcpkg_installed\x64-windows\bin\*.dll build\release\ -Force
-
-# 4. Pack the MSIX
-cmake --build build\release --target ufb_msix
-```
-
-Output: `packaging/windows/msix/dist/ufb-{version}-x64.msix`, unsigned —
-the file Partner Center takes. See
-[`packaging/windows/msix/README.md`](packaging/windows/msix/README.md)
-for the package design, sideload testing and the submission routine.
-
-## Project status
-
-Both platforms ship from this repo. The numbered Windows-port phases
-and the macOS port are complete, including the OS-native
-simplification pass: GUI-owned SMB mounts, OS-keychain credentials,
-and path-identity live mode. The **1.0.x** series is incremental polish —
-the spacebar preview lightbox, persistent thumbnail cache, in-app
-auto-update (Sparkle via [ufbrowser.com](https://ufbrowser.com) on macOS,
-the Microsoft Store on Windows since 1.4.0),
-and startup/DB hardening.
-
-macOS releases are built by `scripts/release-mac.sh` (sign → notarize
-→ signed installer pkg → appcast); Windows releases by the MSIX flow above.
+UFB 1.4.x (C++ / Qt and Rust, with its mount agent and Finder extension) is frozen on the
+[`1.4.x`](https://github.com/cbkow/ufb/tree/1.4.x) branch. UFB 2 opens a 1.4.x database in place and shares
+metadata with 1.4.x machines on the same network; see [Upgrading from 1.4](https://ufbrowser.com/upgrade/).
 
 ## License
 
-UFB is licensed **GPL-3.0-or-later**. See [`LICENSE`](LICENSE) for
-the GPL text and [`LICENSES/`](LICENSES/) for the third-party
-license texts UFB redistributes: Qt (LGPL-3.0), FFmpeg + x264
-(GPL-2.0+), 7-Zip (LGPL-2.1 with the unRAR restriction — UFB extracts
-RAR archives and never creates them), libheif + libde265 (LGPL-3.0),
-ExifTool (Artistic), Sparkle / WinSparkle (MIT), OpenEXR / PDFium /
-psd_sdk / Phosphor / cxx-qt / SQLite / miniz, and WinFsp (GPL-3.0 with
-FLOSS exception). [`LICENSES/THIRD_PARTY_NOTICES.txt`](LICENSES/THIRD_PARTY_NOTICES.txt)
-is the index with versions, source locations and how each is used;
-[`LICENSES/RustCrates-NOTICES.txt`](LICENSES/RustCrates-NOTICES.txt)
-(generated by `scripts/gen-rust-notices.sh`) carries the full
-attribution for every Rust crate compiled in. Both installers ship the
-whole `LICENSES/` folder, and each GitHub release carries the
-corresponding source tarballs for the copyleft components
-(`scripts/fetch-third-party-sources.sh`).
+UFB is free software under the GNU General Public License, version 3 or later. See [LICENSE](LICENSE). The
+third-party notices ship with the application (Settings → About → Licence Notices).

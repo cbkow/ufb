@@ -6,52 +6,32 @@ nav_order: 1
 
 # UFB — Union File Browser
 
-A native Qt + Rust file browser and project-management tool built for
-visual-effects and post-production workflows — on macOS and Windows.
+A file browser and project tracker for visual-effects and post-production teams, on macOS and Windows.
+
+![UFB](/images/ufb2-job.png)
 
 ## What it does
 
-- **Browse production media fast** — native thumbnails for PSD, EXR,
-  HDR, PDF, AI, and video, rendered directly from C++ decoders, with a
-  persistent thumbnail cache.
-- **Spacebar preview** — a QuickLook-style lightbox for images, video,
-  PDFs, text, HTML, Word documents, and minNotes notes, including an EXR
-  layer grid, without leaving the app.
-- **Mount NAS shares** — SMB mounts with credentials in the OS
-  keychain/credential store, plus a user-mode VFS for synced project
-  folders (WinFsp on Windows, NFS loopback on macOS).
-- **Track jobs and shots** — project metadata lives in a local SQLite
-  store and syncs between workstations over a LAN mesh; columns and
-  cells merge conflict-free across machines.
-- **Cross-OS paths** — the same project tree resolves on macOS and
-  Windows; drag-and-drop, copy/paste, and links work between both.
-- **Archives and links** — extract zip, 7z, rar and tar archives or
-  zip up any selection from the context menu (bundled 7-Zip), and
-  create web-link files that open in the browser on either OS.
-- **Transcode in the background** — MP4 proxies, extractions and zips
-  run in a task queue with progress in the status bar, never taking
-  you away from the folder you are in.
+- **A file browser that works like one** — thumbnails, list and grid, a second pane, optional tabs, drag and drop, the system's own Trash, and Undo / Redo for what it does to your files.
+- **Preview with Space** — stills (EXR with its layers, PSD, TIFF, HEIC and the usual ones), video, sound, image sequences, text, PDF and web pages.
+- **Image sequences as one entry** — a sequence previews, renames, copies and transcodes as a whole.
+- **Jobs from a project type** — sections, shots and the files each shot starts with. A studio can write [its own project types](types.md).
+- **Tracking** — columns per section, a tracker across every job, and a board. Shared between workstations on the LAN, merged cell by cell.
+- **The same paths on both systems** — saved shares, path mappings between Windows and macOS, links that open at the same file on either.
+- **Archives and MP4 copies in the background** — extract, compress and transcode in a tasks panel.
+- **Windows 10/11 and macOS 13+.**
 
-## Download
+## Get going
 
-- **macOS** (Apple Silicon, notarized): the installer package from
-  [GitHub Releases](https://github.com/cbkow/ufb/releases). It updates
-  itself in-app after that.
-- **Windows** (x64): **ufBrowser** on the
-  [Microsoft Store](https://apps.microsoft.com/detail/9N71KC2RQ65R), which
-  installs and updates it. Or from a terminal:
-  `winget install --id 9N71KC2RQ65R --source msstore`.
-  Sync mounts also need the free [WinFsp](https://winfsp.dev/rel/) driver.
-  Coming from the old Windows installer (1.3.x)? Uninstall it first
-  (Settings → Apps); your settings carry over.
+1. [**Install**](install.md) UFB.
+2. [**Browse**](browse.md): panes, tabs, preview, file operations, archives, MP4 copies, search.
+3. [**Jobs and tracking**](projects.md): jobs, shots, columns, the tracker, the board.
+4. [**Shares, paths and sync**](sync.md): saved shares, path mappings, sharing metadata with your team.
 
-UFB is GPL-3.0-or-later. Third-party components and their licenses
-are listed in the app's `LICENSES/` folder and in
-[THIRD_PARTY_NOTICES](https://github.com/cbkow/ufb/blob/main/LICENSES/THIRD_PARTY_NOTICES.txt);
-each release also carries the source tarballs for the copyleft
-components it bundles.
+Coming from UFB 1.4? Read [Upgrading from 1.4](upgrade.md) first.
 
 ## Source
 
-UFB is developed in the open at
-[github.com/cbkow/ufb](https://github.com/cbkow/ufb).
+UFB is free software under GPL-3.0-or-later. Its source is in
+[cbkow/minplatform](https://github.com/cbkow/minplatform) (`apps/ufb`); UFB 1.4.x is on the
+[`1.4.x` branch](https://github.com/cbkow/ufb/tree/1.4.x) of [cbkow/ufb](https://github.com/cbkow/ufb).
