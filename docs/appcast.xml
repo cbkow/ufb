@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>UFB</title>
+    <link>https://ufbrowser.com/appcast.xml</link>
+    <description>UFB updates (macOS), for UFB 2.0.3 and later</description>
+    <language>en</language>
+    <!-- The feed UFB 2.0.3 and later read. Items are inserted below by minplatform's packaging/macos/appcast-ufb.sh
+         (newest first). From the release after 2.0.3 an entry is the disk image, installed in place.
+         appcast-mac.xml beside this file is the feed of 1.4.x, 2.0.1 and 2.0.2: it is frozen and ends with 2.0.3's
+         installer package, so that every older UFB is led to 2.0.3 first. -->
+    <!-- @@APPCAST_INSERT@@ -->
+    <item>
+      <title>Version 2.0.3</title>
+      <sparkle:version>2.0.3</sparkle:version>
+      <sparkle:shortVersionString>2.0.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>Check for Updates&hellip;</b> is in the UFB menu, under About UFB (it was only in Settings &rarr; About).</li>
+  <li><b>Help &rarr; UFB Help</b> opens the manual.</li>
+</ul>
+<p>From 2.0.2: a browser view opens with its second pane (Settings &rarr; General turns that off); opening UFB again
+with only the menu-bar icon left brings a window back.</p>
+<p>Coming from UFB 1.4? Read <a href="https://ufbrowser.com/upgrade/">Upgrading from 1.4</a> first.</p>
+      ]]></description>
+      <pubDate>Tue, 17 Nov 2026 17:19:03 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.3/UFB-2.0.3-arm64.pkg"
+        sparkle:edSignature="uMPa2EuJBy+rXVjPO9C1Lehqb217yN1BqRrVLgZ35KFIgVhnTFHUhgtd7E4stVenP3vaBpMimMGELXl08uNWBQ=="
+        length="24855460"
+        type="application/octet-stream" />
+    </item>
+  </channel>
+</rss>

@@ -4,8 +4,9 @@ remote_theme: just-the-docs/just-the-docs
 
 logo: "/images/ufb-logo.png"
 
-# The appcast-*.xml files in this folder are served as static files at ufbrowser.com: appcast-mac.xml is the live
-# Sparkle feed of the macOS application; appcast-win.xml is frozen (Windows ships through the Microsoft Store).
+# The appcast files in this folder are served as static files at ufbrowser.com: appcast.xml is the live Sparkle feed
+# of UFB 2.0.3 and later; appcast-mac.xml is the feed older versions read, frozen at 2.0.3; appcast-win.xml is frozen
+# (Windows ships through the Microsoft Store).
 color_scheme: dark
 enable_dark_mode: true
 
