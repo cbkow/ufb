@@ -7,6 +7,7 @@ logo: "/images/ufb-logo.png"
 # The appcast files in this folder are served as static files at ufbrowser.com: appcast.xml is the live Sparkle feed
 # of UFB 2.0.3 and later; appcast-mac.xml is the feed older versions read, frozen at 2.0.3; appcast-win.xml is frozen
 # (Windows ships through the Microsoft Store).
+# (2.0.4: built again.)
 color_scheme: dark
 enable_dark_mode: true
 
