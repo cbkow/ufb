@@ -11,6 +11,28 @@
          installer package, so that every older UFB is led to 2.0.3 first. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.4</title>
+      <sparkle:version>2.0.4</sparkle:version>
+      <sparkle:shortVersionString>2.0.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>Layers of an EXR sequence.</b> A sequence whose frames hold several layers gets a layer chip in the preview's
+      playbar: press it and choose the layer to look at. Playing goes on.</li>
+  <li><b>A share that will not connect can be removed.</b> The other mouse button opens a share's menu wherever on its
+      row it is pressed (the Connect button used to swallow it).</li>
+  <li><b>Who leads sync</b> can be set in Settings &rarr; Sync: Automatic, Prefer this machine, or Never lead (it
+      was only in the Sync entry's menu in the sidebar).</li>
+</ul>
+      ]]></description>
+      <pubDate>Tue, 17 Nov 2026 18:35:22 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.4/UFB-2.0.4-macOS.dmg"
+        sparkle:edSignature="34xAw0V809XVGcnISfoLDSn9nnuT6Xtkn6/AJ/oCdqLPnqgdEPAoxKriouQKMp5gU1obS2zQAqHfH3wQ9kGWCg=="
+        length="27699158"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 2.0.3</title>
       <sparkle:version>2.0.3</sparkle:version>
       <sparkle:shortVersionString>2.0.3</sparkle:shortVersionString>

@@ -12,7 +12,7 @@ UFB 2 is the same tool rebuilt: a file browser first, with the job tracking you 
 
 - **macOS**: UFB 1.4 offers the update and installs it. The installer stops UFB and its mount agent, removes the old `/Applications/UFB` folder (the application, the agent and its Finder extension) and installs `/Applications/UFB.app`.
 - **Windows**: the Microsoft Store updates ufBrowser.
-- **At the first launch**, UFB 2 opens your database where it is, after putting one copy beside it (`ufb_v5.db.before-2.0`), and reads 1.4's settings once: bookmarks become favourites, project folders become jobs folders, path mappings and the sync settings are taken as they are. 1.4's own settings file is not changed.
+- **At the first launch**, UFB 2 opens your database where it is: your jobs, columns and tracked items are there. UFB 2.0.1 to 2.0.3 also read 1.4's settings once (bookmarks, project folders, path mappings, sync) and kept a copy of the database (`ufb_v5.db.before-2.0`); **from 2.0.4 on nothing else is taken over** - add your shares and favourites, and set sync up, in UFB 2. 1.4's own settings file is never changed.
 
 ## What is different
 
@@ -27,4 +27,4 @@ UFB 2 and UFB 1.4 machines share metadata on the same network: cells, stars and 
 
 ## Going back
 
-Quit UFB 2, install 1.4.2 again from its [release](https://github.com/cbkow/ufb/releases/tag/v1.4.2) (macOS), and, to drop what was done since, put `ufb_v5.db.before-2.0` back as `ufb_v5.db`. UFB 1.4 can also open the database as UFB 2 left it.
+Quit UFB 2, install 1.4.2 again from its [release](https://github.com/cbkow/ufb/releases/tag/v1.4.2) (macOS), and, to drop what was done since, put `ufb_v5.db.before-2.0` back as `ufb_v5.db` (if a 2.0.1 - 2.0.3 made one). UFB 1.4 can also open the database as UFB 2 left it.

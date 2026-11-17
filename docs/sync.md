@@ -26,7 +26,7 @@ A mapping says what a share is called on each system — `\\server\jobs` or `P:\
 
 Columns, cells and stars are shared between the machines of a studio on the local network:
 
-- **Settings → Sync**: switch it on, choose the studio's shared folder (the same on every machine) and give this machine a name.
+- **Settings → Sync**: switch it on, choose the studio's shared folder (the same on every machine) and give this machine a name. **Leader** says whether this machine may keep the snapshot the others catch up from: Automatic (the machines settle it), Prefer this machine, or Never lead.
 - Machines find each other on the LAN and exchange changes directly; the shared folder carries a snapshot for machines that were off. Edits merge cell by cell, so two people editing different cells of one shot both keep their work.
 - The **Sync** entry at the foot of the sidebar and the tray's menu say what sync is doing.
 - Nothing leaves your network. See [Privacy](privacy.md).

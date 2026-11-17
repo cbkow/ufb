@@ -18,7 +18,7 @@ nav_order: 3
 
 ## Preview
 
-Press **Space** on a file. Stills (EXR with its layers, PSD, TIFF, HEIC and the common formats), video with a playbar, sound, image sequences, text, PDF and web pages. The arrow keys step through the folder; Space or Escape closes.
+Press **Space** on a file. Stills (EXR with its layers, PSD, TIFF, HEIC and the common formats), video with a playbar, sound, image sequences, text, PDF and web pages. The arrow keys step through the folder; Space or Escape closes. An EXR with several layers opens on a sheet of them; an EXR *sequence* with several layers has a layer chip in the playbar.
 
 ![Preview](/images/ufb2-preview.png)
 

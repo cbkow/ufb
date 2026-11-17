@@ -36,8 +36,8 @@ A Store install keeps everything in the application's private storage:
 |---|---|
 | `ufb2-settings.json` | UFB 2's settings: favourites, saved shares, path mappings, sync, the window |
 | `ufb_v5.db` | the metadata database: jobs, columns, cells, tracked items |
-| `ufb_v5.db.before-2.0` | the copy made once, before UFB 2 first opened a 1.4 database |
-| `settings.json` | UFB 1.4's settings, read once and never changed |
+| `ufb_v5.db.before-2.0` | a copy UFB 2.0.1 - 2.0.3 made once, before first opening a 1.4 database |
+| `settings.json` | UFB 1.4's settings, never changed |
 
 ### Uninstall
 
