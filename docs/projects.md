@@ -29,7 +29,7 @@ Each section has its own columns: **Columns** at the foot of the list adds them;
 | Checkbox | a tick |
 | Notes, Links | several lines, in a small editor by the cell |
 
-Press a cell to edit it. Columns sort the list from their heads.
+Press a cell to edit it. Columns sort the list from their heads. A link in a Links cell opens when it is pressed — a web page in the browser, an application's own address in that application; press beside it to edit the cell.
 
 ## The star, the tracker
 

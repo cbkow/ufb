@@ -11,6 +11,30 @@
          installer package, so that every older UFB is led to 2.0.3 first. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.5</title>
+      <sparkle:version>2.0.5</sparkle:version>
+      <sparkle:shortVersionString>2.0.5</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>Links you can press.</b> A link in a Links column opens when it is pressed: a web page in the browser, an
+      application's own address in that application. Pressing the rest of the cell edits it, as before.</li>
+  <li><b>Web links as files.</b> New Web Link&hellip; in a folder's menu makes a link file from an address (the
+      clipboard's, when it holds one). Opening a link file opens its address.</li>
+  <li><b>New minNote&hellip;</b> in a folder's menu makes a dated minNotes file and opens it.</li>
+  <li><b>New UFB Folder&hellip;, New Date Folder and New Time Folder</b> are back in a folder's menu.</li>
+  <li><b>Double-click is a choice.</b> Settings &rarr; General: a double click previews a file, or opens it in its
+      application. Space previews either way.</li>
+</ul>
+      ]]></description>
+      <pubDate>Wed, 18 Nov 2026 16:25:06 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.5/UFB-2.0.5-macOS.dmg"
+        sparkle:edSignature="HpBdQw5BzjeH95F1hPTW4uawF22ICK0hMkL0GIo0tBzfDL3hW5RjeQt9E3GKPIB5IloOf2q0DKW6IJGR2uh5Ag=="
+        length="27814247"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 2.0.4</title>
       <sparkle:version>2.0.4</sparkle:version>
       <sparkle:shortVersionString>2.0.4</sparkle:shortVersionString>
