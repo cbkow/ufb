@@ -42,7 +42,7 @@ Press the other mouse button on the empty part of a folder:
 
 - **New UFB Folder…** asks for a name and makes `261118a_name`: today's date, the day's next free letter, the name.
 - **New Date Folder** and **New Time Folder** make `261118` and `1430` at once (a letter is added when the name is taken).
-- **New Web Link…** makes a link file from an address — the clipboard's, when it holds one. Opening a link file (`.url`, `.webloc`) opens its address: a web page in the browser, an application's own address (`slack://…`, your studio's tools) in that application. A link to a file or a program of the machine is not opened.
+- **New Web Link…** makes a link file from an address — the clipboard's, when it holds one. Opening a link file (`.url`, `.webloc`) opens its address: a web page in the browser, an application's own address (`slack://…`, your studio's tools) in that application. A link to a file or a program of the machine is not opened. A link file is shown with a link icon, and **New Web Link…** is in the menu of a file or folder too, for a folder with no empty space left.
 - **New minNote…** asks for a name, makes `261118a_name.mnd` and opens it in minNotes.
 
 ## Tasks

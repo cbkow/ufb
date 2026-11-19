@@ -14,7 +14,7 @@ A **job** is a folder made from a [project type](types.md): its sections (3d, ae
 
 - **Project → New Job…** asks for a number and a name and makes the job in the jobs folder, with its sections.
 - A jobs folder is a saved share (or a folder) marked **Is a Jobs Folder**. Any folder can also be subscribed as a job from its menu (**Subscribe as Job**).
-- Jobs are listed in the sidebar. A job opens in a tab: its sections along the top, the section's items on the left, the chosen item's folders on the right.
+- Jobs are listed in the sidebar. A click on one shows its folder in the pane in front, like any other place. To open it **as a job** — its sections along the top, the section's items on the left, the chosen item's folders on the right — choose **Open as Job** in its menu, or click it with Alt held (Option on macOS). A click with the middle button, or with Ctrl held (Cmd on macOS), opens the job in a new tab.
 - **Add** at the foot of the list adds an item the way the section's kind says: a *shot* is copied from the section's skeleton with its project file named after it; a *dated* item is named `YYMMDD<letter>_<name>`; a *folder* is a plain folder.
 
 ## Columns

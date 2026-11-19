@@ -11,6 +11,28 @@
          installer package, so that every older UFB is led to 2.0.3 first. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.7</title>
+      <sparkle:version>2.0.7</sparkle:version>
+      <sparkle:shortVersionString>2.0.7</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>Jobs in the sidebar open like folders.</b> A click on a job shows its folder in the pane in front. The job
+      view is asked for by name: <b>Open as Job</b> in the job's menu, or a click with Option (Alt on Windows) held.
+      A click with the middle button, or with Command (Ctrl) held, opens the job view in a new tab, as before.</li>
+  <li><b>New Web Link&hellip;</b> is in the menu of a file or folder too, for a folder with no empty space left to
+      press.</li>
+  <li>A web link's file is shown with a link icon.</li>
+</ul>
+      ]]></description>
+      <pubDate>Thu, 19 Nov 2026 13:40:56 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.7/UFB-2.0.7-macOS.dmg"
+        sparkle:edSignature="uIm4RxUJqUWFQnotGdXZfmJwhldwqugcZRJrSStKKdvGeS32vP+qlHsV7qvpENidTnEWZ6P8vxJbUie1Cn4lDw=="
+        length="28082920"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 2.0.6</title>
       <sparkle:version>2.0.6</sparkle:version>
       <sparkle:shortVersionString>2.0.6</sparkle:shortVersionString>
