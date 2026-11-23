@@ -11,6 +11,30 @@
          installer package, so that every older UFB is led to 2.0.3 first. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.8</title>
+      <sparkle:version>2.0.8</sparkle:version>
+      <sparkle:shortVersionString>2.0.8</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>Image sequences show what is cached.</b> Under the line of a sequence that plays, a band shows the frames
+      held in memory around the one in view, and frames that are missing or cannot be read are marked red.</li>
+  <li><b>Cache stride.</b> A chip beside the frame rate keeps every frame (1x) or every 2nd to 4th, for renders too
+      heavy to hold whole. It is remembered for each sequence.</li>
+  <li><b>A job's folders follow its project type's order</b>, After Effects first in the built-in type.</li>
+  <li><b>3D renders open their folders.</b> In the renders of a 3D item, a folder that holds a few entries is shown
+      open, its image sequences in view. Settings, General, turns it off.</li>
+  <li>Windows: on a screen that shows HDR, the window is no longer dim.</li>
+</ul>
+      ]]></description>
+      <pubDate>Mon, 23 Nov 2026 15:51:35 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.8/UFB-2.0.8-macOS.dmg"
+        sparkle:edSignature="rTOpnfWbaw6ETSgqz095g5FqJKwJ3ol4gsEhn93ra1Uc16kdpTtYBbES99aR8TI4iRmspK5vB7xMX8yeTng3Bg=="
+        length="28101173"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 2.0.7</title>
       <sparkle:version>2.0.7</sparkle:version>
       <sparkle:shortVersionString>2.0.7</sparkle:shortVersionString>

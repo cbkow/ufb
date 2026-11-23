@@ -28,6 +28,10 @@ A double click on a file previews it too. **Settings → General → Double-clic
 
 Numbered frames are shown as one entry (`shot_010.[1001-1048].exr`). It previews as a clip, and copies, moves, renames and transcodes as a whole. **View → Group Sequences** turns that off; chosen frames can also be grouped by hand (**Group as Sequence**).
 
+While a sequence plays, the playbar has two chips beside loop and mute. The first is the frame rate. The second is the **cache stride**: `1x` keeps every frame in memory, `2x` to `4x` keep every 2nd to 4th and show the nearest kept frame for the others, for renders too heavy to hold whole. A click steps a chip on, a right-click steps it back, and both are remembered for the sequence.
+
+The band under the playbar's line shows what is in memory: the frames kept ahead of the one in view, and, dimmer, those kept behind it. With loop on it continues round the end. A frame that is missing or cannot be read is marked red.
+
 ## File operations
 
 New folder, rename, duplicate, copy, move, Trash — by menu, by key and by drag and drop, between panes, tabs, windows and other applications. A name that is taken is asked about (**Keep Both** among the answers).

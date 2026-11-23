@@ -15,6 +15,8 @@ A **job** is a folder made from a [project type](types.md): its sections (3d, ae
 - **Project → New Job…** asks for a number and a name and makes the job in the jobs folder, with its sections.
 - A jobs folder is a saved share (or a folder) marked **Is a Jobs Folder**. Any folder can also be subscribed as a job from its menu (**Subscribe as Job**).
 - Jobs are listed in the sidebar. A click on one shows its folder in the pane in front, like any other place. To open it **as a job** — its sections along the top, the section's items on the left, the chosen item's folders on the right — choose **Open as Job** in its menu, or click it with Alt held (Option on macOS). A click with the middle button, or with Ctrl held (Cmd on macOS), opens the job in a new tab.
+- The sections are in the order the project type lists them (After Effects first in the built-in type); folders the type does not name follow, by name.
+- In a 3D item's renders, a folder that holds a few entries is shown open in the list, so its image sequences are in view without a click. A folder that holds more stays closed, and one you close stays closed until another item is chosen. **Settings → General → Open the folders of 3D renders** turns this off.
 - **Add** at the foot of the list adds an item the way the section's kind says: a *shot* is copied from the section's skeleton with its project file named after it; a *dated* item is named `YYMMDD<letter>_<name>`; a *folder* is a plain folder.
 
 ## Columns

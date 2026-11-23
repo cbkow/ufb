@@ -28,6 +28,7 @@ folder = "3d"
 kind = "shot"          # Add copies skeletons/3d to 3d/<name>; the project file becomes <name>_v001.<ext>
 skeleton = "3d"
 folders = ["assets"]   # made inside the section when the job is made
+open_renders = true    # an item's render folders that hold a few entries are shown open (2.0.8 and later)
 columns = [
   { name = "Status", type = "dropdown", options = ["Todo", "In progress", { name = "Done", color = "#5fbf3f" }] },
   { name = "Artist" },
@@ -48,7 +49,9 @@ kind = "none"          # nothing is added by UFB
 folders = ["outputs", "projects"]
 ```
 
+- The sections appear in a job in the order they are written here.
 - **kind**: `shot`, `dated`, `folder` or `none`.
+- **open_renders**: in the renders of the section's items, a folder that comes to eight rows or fewer (an image sequence is one row) is shown open. A UFB before 2.0.8 does not know this key: it ignores a type file that has it and uses the built-in type, so add it only when every machine has 2.0.8.
 - **columns**: what the section starts with in a *new* job. `type` is `text` (when none is written), `dropdown`, `date`, `priority`, `number`, `checkbox`, `links` or `notes`; `options` are for a dropdown or a priority — a name, or a name with its colour.
 
 The built-in type, with its skeleton files, is in the source:
