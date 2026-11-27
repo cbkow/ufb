@@ -11,6 +11,27 @@
          installer package, so that every older UFB is led to 2.0.3 first. -->
     <!-- @@APPCAST_INSERT@@ -->
     <item>
+      <title>Version 2.0.9</title>
+      <sparkle:version>2.0.9</sparkle:version>
+      <sparkle:shortVersionString>2.0.9</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+  <li><b>The preview's controls sit over the picture.</b> A video or an image sequence now has the whole preview; its
+      controls are on a bar over the foot of the picture, which shows while the pointer moves and fades when it leaves
+      or rests. A sound file keeps the bar in view.</li>
+  <li><b>Rewind and fast-forward.</b> Two buttons either side of play run through the clip while they are held, as
+      J and L do.</li>
+</ul>
+      ]]></description>
+      <pubDate>Thu, 26 Nov 2026 22:03:28 -0500</pubDate>
+      <enclosure
+        url="https://github.com/cbkow/ufb/releases/download/v2.0.9/UFB-2.0.9-macOS.dmg"
+        sparkle:edSignature="wY9BAd3hCe+lc/lSEIPMcKUuz0F+jlxsMyPm/Ncs94t+1wRjMXgVSAF60BUk5/x1M1NfQ7gNTxetj2FtScmoDQ=="
+        length="28101955"
+        type="application/octet-stream" />
+    </item>
+    <item>
       <title>Version 2.0.8</title>
       <sparkle:version>2.0.8</sparkle:version>
       <sparkle:shortVersionString>2.0.8</sparkle:shortVersionString>
