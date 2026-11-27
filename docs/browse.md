@@ -24,6 +24,10 @@ Press **Space** on a file. Stills (EXR with its layers, PSD, TIFF, HEIC and the 
 
 A double click on a file previews it too. **Settings → General → Double-click previews a file** turns that off: a double click then opens the file in its application, and Space still previews.
 
+## Playing in the preview
+
+A video, a sound file or an image sequence plays in the preview. Its controls are on a bar over the foot of the picture: rewind, play / pause and fast-forward, the time, the line to scrub on, loop and mute. Hold rewind or fast-forward to run through the clip, as `J` and `L` do. The bar shows while the pointer moves over the window and fades when the pointer leaves or has rested for two seconds; a sound file keeps it in view.
+
 ## Image sequences
 
 Numbered frames are shown as one entry (`shot_010.[1001-1048].exr`). It previews as a clip, and copies, moves, renames and transcodes as a whole. **View → Group Sequences** turns that off; chosen frames can also be grouped by hand (**Group as Sequence**).
